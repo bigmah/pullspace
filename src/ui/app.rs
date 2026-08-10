@@ -71,6 +71,37 @@ impl St {
         tick.set(v + 1);
     }
 
+    /// Point the app at another repository, clearing everything tied to the old
+    /// one. `path` may be any directory inside the repo; a non-repo directory is
+    /// browsable too, just without statuses or diffs.
+    pub fn open_repo(&self, path: PathBuf) {
+        let root = discover_root(&path).unwrap_or(path);
+        if root == *self.root.peek() {
+            self.refresh();
+            return;
+        }
+        let mut r = self.root;
+        r.set(root.clone());
+
+        let mut open = self.open;
+        open.set(None);
+        let mut sel = self.selected;
+        sel.set(None);
+        let mut ps = self.pending_scroll;
+        ps.set(None);
+        let mut bottom = self.bottom;
+        bottom.set(BottomPanel::Hidden);
+        let mut expanded = self.expanded;
+        expanded.set(HashMap::new());
+        let mut search_text = self.search_text;
+        search_text.set(String::new());
+        // Dropped so the top bar shows "indexing…" while the new index builds.
+        let mut index = self.index;
+        index.set(None);
+
+        self.refresh();
+    }
+
     /// Open a file from the tree: changed files land in split-diff view.
     pub fn open_file(&self, rel: PathBuf) {
         let changed = self.statuses.peek().get(&rel).is_some();
@@ -183,7 +214,7 @@ pub fn App() -> Element {
     let tree: Memo<Option<FileNode>> = use_memo(move || {
         st.refresh_tick.read();
         let statuses = st.statuses.read().clone();
-        let root = build_tree(&st.root.peek(), &statuses);
+        let root = build_tree(&st.root.read(), &statuses);
         if *st.changes_only.read() {
             filter_changed(&root)
         } else {
@@ -192,14 +223,18 @@ pub fn App() -> Element {
     });
     use_context_provider(|| tree);
 
-    // Build the symbol index off the UI thread once at startup.
-    use_future(move || async move {
-        let root = st.root_path();
-        let idx = tokio::task::spawn_blocking(move || build_index(&root))
-            .await
-            .unwrap_or_default();
-        let mut sig = st.index;
-        sig.set(Some(idx));
+    // Build the symbol index off the UI thread, once at startup and again for
+    // each repo opened afterwards. Reading `root` here is what re-triggers it;
+    // an in-flight build for the previous repo is cancelled.
+    let _ = use_resource(move || {
+        let root = st.root.read().clone();
+        async move {
+            let idx = tokio::task::spawn_blocking(move || build_index(&root))
+                .await
+                .unwrap_or_default();
+            let mut sig = st.index;
+            sig.set(Some(idx));
+        }
     });
 
     rsx! {

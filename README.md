@@ -24,6 +24,8 @@ IDE-ish niceties:
 - **Find References** — whole-word search for the clicked identifier across
   the repo.
 - Jumped-to lines scroll into view and flash.
+- **GitHub pull requests** — sign in once, then review any PR in the same two
+  panes. See [Reviewing GitHub pull requests](#reviewing-github-pull-requests).
 
 ## Running
 
@@ -42,11 +44,57 @@ pullspace /path/to/repo src/lib.rs --mode=inline  # source | inline | split
 The `⟳` button re-reads git status and the file tree after you make changes
 outside the app.
 
+## Reviewing GitHub pull requests
+
+The top-bar chip on the right opens the GitHub panel. Type `owner/repo` to list
+its open pull requests, or paste a pull request URL to jump straight to one. The
+PR's changed files replace the file tree, and each file opens in the same Split
+/ Inline diff views — diffed against the **merge base**, so you see the PR's own
+changes and not everything that landed on the base branch since it was opened.
+
+The repository does not have to be cloned locally; file contents come from the
+API. `✕ close PR` returns to the local working tree.
+
+### Signing in
+
+pullspace uses the **OAuth device flow**, which needs no client secret and no
+redirect server — nothing confidential is stored in the binary. It does need a
+client ID, which is public information, and you register that once:
+
+1. Open <https://github.com/settings/applications/new>.
+2. Give it any name; the homepage and callback URL are not used — put anything
+   valid in them (e.g. `http://localhost`).
+3. Create the app, then on its settings page tick **Enable Device Flow**.
+   Sign-in fails with a clear message if you skip this.
+4. Copy the **Client ID** into the panel and press *Sign in with GitHub*. Enter
+   the code shown, in the browser tab that opens.
+
+The token is written to `~/.config/pullspace/auth.json` with `0600`
+permissions, and the client ID to `config.json` beside it. *Sign out* deletes
+the token.
+
+If you would rather not register an app, pullspace also picks up an existing
+credential at startup, in this order:
+
+| Source | Notes |
+| --- | --- |
+| `~/.config/pullspace/auth.json` | Written by signing in through the app. |
+| `$GITHUB_TOKEN` / `$GH_TOKEN` | Needs the `repo` scope for private repos. |
+| `gh auth token` | Any authenticated [`gh`](https://cli.github.com) CLI. |
+
+`PULLSPACE_GITHUB_CLIENT_ID` overrides the saved client ID. Signing in through
+the app takes precedence over the ambient credentials, so it always has a
+visible effect. Public repositories can be browsed with no credential at all,
+subject to GitHub's 60 requests/hour unauthenticated limit.
+
 ## Architecture
 
 ```
 src/
   backend/          UI-agnostic engine
+    mod.rs          FileContent: one side of a diff, whatever its source
+    auth.rs         GitHub device flow, token storage & discovery
+    github.rs       GitHub REST: PR lists, PR files, blob content
     gitio.rs        git2: repo discovery, statuses, HEAD blob content
     tree.rs         file-tree model built from the worktree + git status
     difftool.rs     hunk/line/segment diff model (similar), split-row pairing
@@ -55,7 +103,8 @@ src/
     search.rs       repo-wide text/word search (ignore walker)
   ui/               Dioxus components
     app.rs          state (signals + context), root layout
-    topbar.rs       brand, search, index status, refresh
+    github.rs       sign-in and pull request picker overlay
+    topbar.rs       brand, search, index status, account chip, refresh
     filetree.rs     recursive tree with status badges
     viewer.rs       source view, inline & split diff views, symbol actions
     bottom.rs       search / references / definitions results panel
@@ -68,7 +117,12 @@ data source.
 
 ## Notes & limits
 
-- Diffs are worktree vs `HEAD` (staged + unstaged combined).
+- Local diffs are worktree vs `HEAD` (staged + unstaged combined); pull request
+  diffs are merge-base vs PR head.
+- In PR mode, search / Go to Definition / Find References are disabled — they
+  walk the local working tree, which the PR's files are not part of.
+- Pull requests are loaded as a snapshot; `⟳` does not re-poll GitHub.
+- PRs over 3000 files are truncated (GitHub's own cap); the top bar says so.
 - Files over ~400 KB / 6k lines render without highlighting for speed;
   binary files are detected and not rendered.
 - Search results are capped at 400 hits.
@@ -80,4 +134,7 @@ data source.
 ```sh
 cargo test    # backend unit tests
 cargo run     # debug build
+
+# Network smoke test against a real public PR, excluded from the normal run:
+cargo test -- --ignored live_pr_round_trip
 ```

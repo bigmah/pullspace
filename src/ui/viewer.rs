@@ -1,21 +1,18 @@
+use std::path::PathBuf;
+
 use dioxus::prelude::*;
 
 use crate::backend::difftool::{diff_hunks, stats, to_rows, Hunk, Line, LineKind};
-use crate::backend::gitio::{head_file, HeadFile};
+use crate::backend::github::{file_at, find_file, RepoRef};
+use crate::backend::gitio::{head_file, worktree_file};
 use crate::backend::highlight::{highlight, Span};
 use crate::backend::tree::ChangeKind;
+use crate::backend::FileContent;
 
-use super::app::{St, ViewMode};
+use super::app::{PrFileState, St, ViewMode};
 
 const BIG_FILE_BYTES: usize = 400_000;
 const BIG_FILE_LINES: usize = 6_000;
-
-#[derive(Clone, PartialEq)]
-enum Loaded {
-    Text(String),
-    Binary,
-    Missing,
-}
 
 #[derive(Clone, PartialEq)]
 enum SourceLines {
@@ -23,8 +20,33 @@ enum SourceLines {
     Plain(Vec<String>),
 }
 
-fn looks_binary(bytes: &[u8]) -> bool {
-    bytes.iter().take(8000).any(|&b| b == 0)
+/// What the viewer has to show right now. Local files resolve synchronously;
+/// pull request files arrive over the network, hence `Loading`/`Failed`.
+#[derive(Clone, PartialEq)]
+enum Pane {
+    Empty,
+    Loading,
+    Failed(String),
+    Ready {
+        rel: PathBuf,
+        /// Left-hand side: HEAD, or the PR's merge base.
+        old: FileContent,
+        /// Right-hand side: the working tree, or the PR's head commit.
+        new: FileContent,
+    },
+}
+
+/// Everything needed to fetch one PR file, lifted out of the signal so the
+/// async block does not borrow app state.
+#[derive(Clone, PartialEq)]
+struct FetchJob {
+    repo: RepoRef,
+    base_sha: String,
+    head_sha: String,
+    path: PathBuf,
+    /// Differs from `path` for renames.
+    base_path: PathBuf,
+    status: ChangeKind,
 }
 
 fn scroll_js(line: usize) -> String {
@@ -47,55 +69,121 @@ pub fn Viewer() -> Element {
         }
     });
 
-    // Load worktree + HEAD content whenever the open file or refresh tick changes.
+    // In PR mode, pull both sides of the open file from GitHub once and cache
+    // them. Reading `open` and `workspace` here is what re-triggers this.
+    let _ = use_resource(move || {
+        let rel = st.open.read().clone();
+        let job = st.workspace.read().pr().and_then(|pr| {
+            let rel = rel.as_ref()?;
+            let f = find_file(&pr.files, rel)?;
+            Some(FetchJob {
+                repo: pr.repo.clone(),
+                base_sha: pr.base_sha.clone(),
+                head_sha: pr.head_sha.clone(),
+                path: f.path.clone(),
+                base_path: f.base_path().clone(),
+                status: f.status,
+            })
+        });
+        async move {
+            let Some(job) = job else { return };
+            let mut cache = st.pr_files;
+            // Only a completed fetch is worth keeping. A `Loading` entry here
+            // is stale by construction — switching files cancels the future
+            // that wrote it, so nothing is actually in flight — and re-reading
+            // a `Failed` one is how the user retries after a network blip.
+            if matches!(cache.peek().get(&job.path), Some(PrFileState::Ready { .. })) {
+                return;
+            }
+            let Some(token) = st.token_value() else {
+                cache.write().insert(
+                    job.path.clone(),
+                    PrFileState::Failed("Not signed in to GitHub.".to_string()),
+                );
+                return;
+            };
+            let path = job.path.clone();
+            cache.write().insert(path.clone(), PrFileState::Loading);
+
+            let fetched = tokio::task::spawn_blocking(move || {
+                // An added file has no base side; a deleted one has no head
+                // side. Skipping those saves a request that would 404 anyway.
+                let base = if job.status == ChangeKind::Added {
+                    FileContent::Absent
+                } else {
+                    file_at(&token, &job.repo, &job.base_sha, &job.base_path)?
+                };
+                let head = if job.status == ChangeKind::Deleted {
+                    FileContent::Absent
+                } else {
+                    file_at(&token, &job.repo, &job.head_sha, &job.path)?
+                };
+                anyhow::Ok((base, head))
+            })
+            .await;
+
+            let state = match fetched {
+                Ok(Ok((base, head))) => PrFileState::Ready { base, head },
+                Ok(Err(e)) => PrFileState::Failed(format!("{e:#}")),
+                Err(e) => PrFileState::Failed(format!("Fetch failed: {e}")),
+            };
+            cache.write().insert(path, state);
+        }
+    });
+
+    // Resolve the two sides of the open file, from disk or from the PR cache.
     let data = use_memo(move || {
         st.refresh_tick.read();
-        let rel = st.open.read().clone()?;
-        let root = st.root_path();
-        let work = match std::fs::read(root.join(&rel)) {
-            Ok(bytes) => {
-                if looks_binary(&bytes) {
-                    Loaded::Binary
-                } else {
-                    Loaded::Text(String::from_utf8_lossy(&bytes).into_owned())
-                }
-            }
-            Err(_) => Loaded::Missing,
+        let Some(rel) = st.open.read().clone() else {
+            return Pane::Empty;
         };
-        let head = head_file(&root, &rel);
-        Some((rel, work, head))
+        if st.workspace.read().is_pr() {
+            return match st.pr_files.read().get(&rel) {
+                None | Some(PrFileState::Loading) => Pane::Loading,
+                Some(PrFileState::Failed(e)) => Pane::Failed(e.clone()),
+                Some(PrFileState::Ready { base, head }) => Pane::Ready {
+                    rel,
+                    old: base.clone(),
+                    new: head.clone(),
+                },
+            };
+        }
+        let root = st.root_path();
+        Pane::Ready {
+            old: head_file(&root, &rel),
+            new: worktree_file(&root, &rel),
+            rel,
+        }
     });
 
     let hunks = use_memo(move || {
         let guard = data.read();
-        let (rel, work, head) = guard.as_ref()?;
+        let Pane::Ready { rel, old, new } = &*guard else {
+            return None;
+        };
         let status = st.statuses.read().get(rel).copied()?;
-        let old = match status {
-            ChangeKind::Untracked | ChangeKind::Added => String::new(),
-            _ => match head {
-                HeadFile::Text(t) => t.clone(),
-                HeadFile::Binary => return None,
-                HeadFile::Absent => String::new(),
-            },
+        // A file that is new on this side has nothing to compare against, even
+        // if a path of the same name exists in the base.
+        let old_text = match status {
+            ChangeKind::Untracked | ChangeKind::Added => "",
+            _ => old.text()?,
         };
-        let new = match work {
-            Loaded::Text(t) => t.clone(),
-            Loaded::Missing => String::new(),
-            Loaded::Binary => return None,
-        };
-        Some(diff_hunks(&old, &new))
+        Some(diff_hunks(old_text, new.text()?))
     });
 
     let source_lines = use_memo(move || {
         let guard = data.read();
-        let (rel, work, head) = guard.as_ref()?;
-        let text = match work {
-            Loaded::Text(t) => t.clone(),
-            Loaded::Missing => match head {
-                HeadFile::Text(t) => t.clone(),
+        let Pane::Ready { rel, old, new } = &*guard else {
+            return None;
+        };
+        let text = match new {
+            FileContent::Text(t) => t.clone(),
+            // Deleted: fall back to the old side so there is something to read.
+            FileContent::Absent => match old {
+                FileContent::Text(t) => t.clone(),
                 _ => return None,
             },
-            Loaded::Binary => return None,
+            FileContent::Binary => return None,
         };
         let line_count = text.lines().count();
         if text.len() > BIG_FILE_BYTES || line_count > BIG_FILE_LINES {
@@ -106,21 +194,31 @@ pub fn Viewer() -> Element {
     });
 
     let guard = data.read();
-    let Some((rel, work, _head)) = guard.as_ref() else {
-        return rsx! {
-            div { class: "viewer",
-                div { class: "welcome",
-                    div { class: "welcome-logo", "pullspace" }
-                    div { class: "welcome-sub", "a lightweight diff viewer" }
-                    div { class: "welcome-hint", "Pick a file on the left — changed files open as diffs." }
-                    div { class: "welcome-hint", "Click an identifier for Go to Definition / Find References." }
+    let (rel, new_side) = match &*guard {
+        Pane::Empty => return rsx! { Welcome {} },
+        Pane::Loading => {
+            return rsx! {
+                div { class: "viewer",
+                    div { class: "notice", "Loading from GitHub…" }
                 }
             }
-        };
+        }
+        Pane::Failed(e) => {
+            let msg = e.clone();
+            return rsx! {
+                div { class: "viewer",
+                    div { class: "notice error", "{msg}" }
+                }
+            };
+        }
+        Pane::Ready { rel, new, .. } => (rel.clone(), new.clone()),
     };
-    let rel = rel.clone();
+
     let status = st.statuses.read().get(&rel).copied();
-    let deleted_note = matches!(work, Loaded::Missing) && status == Some(ChangeKind::Deleted);
+    let deleted_note = new_side == FileContent::Absent && status == Some(ChangeKind::Deleted);
+    // Go to Definition / Find References run against the local index, which
+    // says nothing about a PR from another repository.
+    let symbols_enabled = !st.workspace.read().is_pr();
 
     // Only changed files have a diff to show.
     let mode = if status.is_none() {
@@ -137,7 +235,7 @@ pub fn Viewer() -> Element {
 
     let body = match mode {
         ViewMode::Source => match source_lines.read().as_ref() {
-            Some(SourceLines::Colored(lines)) => render_colored(st, lines),
+            Some(SourceLines::Colored(lines)) => render_colored(st, lines, symbols_enabled),
             Some(SourceLines::Plain(lines)) => render_plain(lines),
             None => rsx! { div { class: "notice", "Binary file — no preview." } },
         },
@@ -179,7 +277,7 @@ pub fn Viewer() -> Element {
                     span { class: "badge {c}", "{b}" }
                 }
                 if deleted_note {
-                    span { class: "delnote", "deleted — showing HEAD" }
+                    span { class: "delnote", "deleted — showing the old version" }
                 }
                 if let Some(ds) = diff_stats {
                     if diffable {
@@ -193,9 +291,32 @@ pub fn Viewer() -> Element {
                 {mode_btn("Split", ViewMode::Split, mode, diffable)}
             }
             if let Some(name) = selected {
-                SymBar { name }
+                if symbols_enabled {
+                    SymBar { name }
+                }
             }
             div { class: "codewrap", {body} }
+        }
+    }
+}
+
+#[component]
+fn Welcome() -> Element {
+    let st = use_context::<St>();
+    let mut gh_open = st.gh_open;
+    rsx! {
+        div { class: "viewer",
+            div { class: "welcome",
+                div { class: "welcome-logo", "pullspace" }
+                div { class: "welcome-sub", "a lightweight diff viewer" }
+                div { class: "welcome-hint", "Pick a file on the left — changed files open as diffs." }
+                div { class: "welcome-hint", "Click an identifier for Go to Definition / Find References." }
+                button {
+                    class: "primarybtn",
+                    onclick: move |_| gh_open.set(true),
+                    "Review a GitHub pull request"
+                }
+            }
         }
     }
 }
@@ -240,8 +361,8 @@ fn clickable(tok: &str) -> bool {
     tok.len() > 1 && tok.chars().next().is_some_and(|c| c.is_alphabetic() || c == '_')
 }
 
-fn token_span(st: St, color: String, is_word: bool, tok: String) -> Element {
-    if is_word && clickable(&tok) {
+fn token_span(st: St, color: String, is_word: bool, tok: String, enabled: bool) -> Element {
+    if enabled && is_word && clickable(&tok) {
         let t2 = tok.clone();
         let mut sel = st.selected;
         rsx! {
@@ -259,7 +380,7 @@ fn token_span(st: St, color: String, is_word: bool, tok: String) -> Element {
     }
 }
 
-fn render_colored(st: St, lines: &[Vec<Span>]) -> Element {
+fn render_colored(st: St, lines: &[Vec<Span>], symbols_enabled: bool) -> Element {
     let lines = lines.to_vec();
     rsx! {
         div { class: "code",
@@ -269,7 +390,7 @@ fn render_colored(st: St, lines: &[Vec<Span>]) -> Element {
                     span { class: "lc",
                         for sp in spans {
                             for (is_word, tok) in tokenize(&sp.text) {
-                                {token_span(st, sp.color.clone(), is_word, tok)}
+                                {token_span(st, sp.color.clone(), is_word, tok, symbols_enabled)}
                             }
                         }
                     }

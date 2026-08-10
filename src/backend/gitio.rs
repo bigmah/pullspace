@@ -5,6 +5,7 @@ use anyhow::Result;
 use git2::{Repository, Status, StatusOptions};
 
 use super::tree::ChangeKind;
+use super::FileContent;
 
 /// Resolve the repository work-dir root from any path inside it.
 pub fn discover_root(path: &Path) -> Result<PathBuf> {
@@ -58,37 +59,38 @@ pub fn load_statuses(root: &Path) -> HashMap<PathBuf, ChangeKind> {
     out
 }
 
-#[derive(Clone, PartialEq)]
-pub enum HeadFile {
-    Text(String),
-    Binary,
-    Absent,
-}
-
 /// Content of a file as of HEAD, or Absent if there is no HEAD (unborn branch)
 /// or the path is not in the HEAD tree.
-pub fn head_file(root: &Path, rel: &Path) -> HeadFile {
+pub fn head_file(root: &Path, rel: &Path) -> FileContent {
     let Ok(repo) = Repository::discover(root) else {
-        return HeadFile::Absent;
+        return FileContent::Absent;
     };
     let Ok(head) = repo.head() else {
-        return HeadFile::Absent;
+        return FileContent::Absent;
     };
     let Ok(tree) = head.peel_to_tree() else {
-        return HeadFile::Absent;
+        return FileContent::Absent;
     };
     let Ok(entry) = tree.get_path(rel) else {
-        return HeadFile::Absent;
+        return FileContent::Absent;
     };
     let Ok(obj) = entry.to_object(&repo) else {
-        return HeadFile::Absent;
+        return FileContent::Absent;
     };
     let Some(blob) = obj.as_blob() else {
-        return HeadFile::Absent;
+        return FileContent::Absent;
     };
     if blob.is_binary() {
-        HeadFile::Binary
+        FileContent::Binary
     } else {
-        HeadFile::Text(String::from_utf8_lossy(blob.content()).into_owned())
+        FileContent::Text(String::from_utf8_lossy(blob.content()).into_owned())
+    }
+}
+
+/// Content of a file in the working tree, or Absent if it is not on disk.
+pub fn worktree_file(root: &Path, rel: &Path) -> FileContent {
+    match std::fs::read(root.join(rel)) {
+        Ok(bytes) => FileContent::from_bytes(&bytes),
+        Err(_) => FileContent::Absent,
     }
 }

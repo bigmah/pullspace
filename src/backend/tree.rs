@@ -129,6 +129,17 @@ pub fn build_tree(root: &Path, statuses: &HashMap<PathBuf, ChangeKind>) -> FileN
     tmp.build(name, PathBuf::new(), statuses)
 }
 
+/// Build a tree from a bare set of paths. Used for a pull request, where there
+/// is no working directory to walk — every node comes from the change list, so
+/// the result is already "changed files only".
+pub fn build_tree_from_paths(label: &str, statuses: &HashMap<PathBuf, ChangeKind>) -> FileNode {
+    let mut tmp = DirTmp::default();
+    for rel in statuses.keys() {
+        tmp.insert(rel);
+    }
+    tmp.build(label.to_string(), PathBuf::new(), statuses)
+}
+
 /// Reduce the tree to only nodes that are changed or contain changes.
 pub fn filter_changed(node: &FileNode) -> Option<FileNode> {
     if node.is_dir {

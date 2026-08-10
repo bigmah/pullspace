@@ -1,0 +1,536 @@
+//! Minimal GitHub REST client: enough to list pull requests and pull the two
+//! sides of a file so the existing diff engine can render them.
+//!
+//! Everything here is blocking and side-effect free apart from the network —
+//! callers run it off the UI thread.
+
+use std::path::PathBuf;
+use std::time::Duration;
+
+use anyhow::{bail, Context, Result};
+use serde::Deserialize;
+
+use super::tree::ChangeKind;
+use super::FileContent;
+
+const API: &str = "https://api.github.com";
+const API_VERSION: &str = "2022-11-28";
+/// GitHub itself stops at 3000 files per PR; 100 per page.
+const MAX_FILE_PAGES: u32 = 30;
+
+fn agent() -> ureq::Agent {
+    ureq::Agent::config_builder()
+        .http_status_as_error(false)
+        .timeout_global(Some(Duration::from_secs(30)))
+        .user_agent("pullspace")
+        .build()
+        .into()
+}
+
+/// Percent-encode one path segment. Avoids a dependency for the handful of
+/// characters that actually show up in repo paths.
+fn encode_segment(seg: &str) -> String {
+    let mut out = String::with_capacity(seg.len());
+    for b in seg.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char)
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
+fn encode_path(path: &str) -> String {
+    path.split('/')
+        .map(encode_segment)
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+// -------------------------------------------------------------- repo target
+
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct RepoRef {
+    pub owner: String,
+    pub name: String,
+}
+
+impl std::fmt::Display for RepoRef {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}/{}", self.owner, self.name)
+    }
+}
+
+/// Accepts what a person is likely to paste: `owner/repo`, a browser URL, an
+/// SSH remote, or a link to a specific pull request.
+pub fn parse_target(input: &str) -> Option<(RepoRef, Option<u64>)> {
+    let s = input.trim();
+    if s.is_empty() {
+        return None;
+    }
+
+    // Strip scheme / host / SSH prefix down to the `owner/repo/...` tail.
+    let rest = s
+        .strip_prefix("https://")
+        .or_else(|| s.strip_prefix("http://"))
+        .map(|r| r.trim_start_matches("www."))
+        .and_then(|r| r.strip_prefix("github.com/"))
+        .or_else(|| s.strip_prefix("git@github.com:"))
+        .or_else(|| s.strip_prefix("github.com/"))
+        .unwrap_or(s);
+
+    let mut parts = rest.split('/').filter(|p| !p.is_empty());
+    let owner = parts.next()?.to_string();
+    let name = parts.next()?.trim_end_matches(".git").to_string();
+    if owner.is_empty() || name.is_empty() {
+        return None;
+    }
+
+    // `.../pull/123` (or `/pulls/123`) opens that PR directly.
+    let number = match (parts.next(), parts.next()) {
+        (Some("pull" | "pulls"), Some(n)) => n.parse::<u64>().ok(),
+        _ => None,
+    };
+    Some((RepoRef { owner, name }, number))
+}
+
+/// Pull an `owner/repo` out of a git remote URL, so a local clone can offer
+/// its own PRs without the user typing anything.
+pub fn repo_from_remote(url: &str) -> Option<RepoRef> {
+    parse_target(url).map(|(r, _)| r)
+}
+
+// ------------------------------------------------------------------ request
+
+fn get_raw(token: &str, url: &str, accept: &str) -> Result<(u16, Vec<u8>)> {
+    let mut req = agent()
+        .get(url)
+        .header("Accept", accept)
+        .header("X-GitHub-Api-Version", API_VERSION);
+    // An empty token means anonymous: public repos still work, at GitHub's
+    // much lower unauthenticated rate limit.
+    if !token.is_empty() {
+        req = req.header("Authorization", &format!("Bearer {token}"));
+    }
+    let mut res = req.call().with_context(|| format!("GET {url}"))?;
+
+    let status = res.status().as_u16();
+    let rate_remaining = res
+        .headers()
+        .get("x-ratelimit-remaining")
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v.to_string());
+    let body = res.body_mut().read_to_vec()?;
+
+    if status == 401 {
+        bail!("GitHub rejected the token (401). Sign in again.");
+    }
+    if status == 403 && rate_remaining.as_deref() == Some("0") {
+        bail!("GitHub API rate limit exceeded. Try again shortly.");
+    }
+    if status == 403 {
+        bail!("GitHub denied access (403). The token may lack the `repo` scope.");
+    }
+    Ok((status, body))
+}
+
+fn get_json<T: serde::de::DeserializeOwned>(token: &str, url: &str) -> Result<T> {
+    let (status, body) = get_raw(token, url, "application/vnd.github+json")?;
+    if status == 404 {
+        bail!("Not found (404). Check the repository name and that the token can see it.");
+    }
+    if !(200..300).contains(&status) {
+        bail!("GitHub returned HTTP {status}");
+    }
+    serde_json::from_slice(&body).with_context(|| format!("parsing response from {url}"))
+}
+
+// ------------------------------------------------------------------- models
+
+#[derive(Deserialize)]
+struct User {
+    login: String,
+}
+
+/// Verify a token and get the account it belongs to.
+pub fn viewer_login(token: &str) -> Result<String> {
+    let user: User = get_json(token, &format!("{API}/user"))?;
+    Ok(user.login)
+}
+
+#[derive(Deserialize)]
+struct RawRef {
+    #[serde(rename = "ref")]
+    name: String,
+    sha: String,
+}
+
+#[derive(Deserialize)]
+struct RawPr {
+    number: u64,
+    title: String,
+    #[serde(default)]
+    user: Option<User>,
+    #[serde(default)]
+    draft: bool,
+    state: String,
+    updated_at: String,
+    html_url: String,
+    head: RawRef,
+    base: RawRef,
+}
+
+#[derive(Clone, PartialEq, Debug)]
+pub struct PrSummary {
+    pub number: u64,
+    pub title: String,
+    pub author: String,
+    pub draft: bool,
+    pub updated_at: String,
+    pub head_ref: String,
+    pub base_ref: String,
+}
+
+fn author_of(user: &Option<User>) -> String {
+    user.as_ref()
+        .map(|u| u.login.clone())
+        .unwrap_or_else(|| "ghost".to_string())
+}
+
+/// Open pull requests, most recently updated first.
+pub fn list_prs(token: &str, repo: &RepoRef) -> Result<Vec<PrSummary>> {
+    let url = format!(
+        "{API}/repos/{}/{}/pulls?state=open&sort=updated&direction=desc&per_page=50",
+        encode_segment(&repo.owner),
+        encode_segment(&repo.name),
+    );
+    let raw: Vec<RawPr> = get_json(token, &url)?;
+    Ok(raw
+        .into_iter()
+        .map(|p| PrSummary {
+            number: p.number,
+            title: p.title,
+            author: author_of(&p.user),
+            draft: p.draft,
+            updated_at: p.updated_at,
+            head_ref: p.head.name,
+            base_ref: p.base.name,
+        })
+        .collect())
+}
+
+#[derive(Deserialize)]
+struct RawFile {
+    filename: String,
+    status: String,
+    #[serde(default)]
+    additions: usize,
+    #[serde(default)]
+    deletions: usize,
+    #[serde(default)]
+    previous_filename: Option<String>,
+}
+
+fn change_kind(status: &str) -> ChangeKind {
+    match status {
+        "added" | "copied" => ChangeKind::Added,
+        "removed" => ChangeKind::Deleted,
+        "renamed" => ChangeKind::Renamed,
+        // "modified", "changed", "unchanged" and anything new GitHub adds.
+        _ => ChangeKind::Modified,
+    }
+}
+
+#[derive(Clone, PartialEq, Debug)]
+pub struct PrFile {
+    pub path: PathBuf,
+    /// Set for renames — the path to read on the base side.
+    pub previous_path: Option<PathBuf>,
+    pub status: ChangeKind,
+    pub additions: usize,
+    pub deletions: usize,
+}
+
+impl PrFile {
+    /// Where this file lived before the change.
+    pub fn base_path(&self) -> &PathBuf {
+        self.previous_path.as_ref().unwrap_or(&self.path)
+    }
+}
+
+#[derive(Deserialize)]
+struct RawCompare {
+    merge_base_commit: RawCommit,
+}
+
+#[derive(Deserialize)]
+struct RawCommit {
+    sha: String,
+}
+
+#[derive(Clone, PartialEq, Debug)]
+pub struct PrDetail {
+    pub repo: RepoRef,
+    pub number: u64,
+    pub title: String,
+    pub author: String,
+    pub state: String,
+    pub draft: bool,
+    pub html_url: String,
+    pub head_ref: String,
+    pub base_ref: String,
+    /// The merge base — the commit GitHub's "Files changed" tab diffs against.
+    pub base_sha: String,
+    pub head_sha: String,
+    pub files: Vec<PrFile>,
+    /// True if the PR has more files than we fetched.
+    pub truncated: bool,
+}
+
+/// Load a PR: metadata, the merge base, and the full changed-file list.
+///
+/// The merge base matters — diffing against `base.sha` would show every commit
+/// that landed on the base branch since the PR was opened as part of the PR.
+pub fn load_pr(token: &str, repo: &RepoRef, number: u64) -> Result<PrDetail> {
+    let owner = encode_segment(&repo.owner);
+    let name = encode_segment(&repo.name);
+
+    let pr: RawPr = get_json(token, &format!("{API}/repos/{owner}/{name}/pulls/{number}"))?;
+
+    let compare: RawCompare = get_json(
+        token,
+        &format!(
+            "{API}/repos/{owner}/{name}/compare/{}...{}",
+            pr.base.sha, pr.head.sha
+        ),
+    )
+    .with_context(|| format!("resolving the merge base for #{number}"))?;
+
+    let mut files = Vec::new();
+    let mut truncated = false;
+    for page in 1..=MAX_FILE_PAGES {
+        let url =
+            format!("{API}/repos/{owner}/{name}/pulls/{number}/files?per_page=100&page={page}");
+        let raw: Vec<RawFile> = get_json(token, &url)?;
+        let full_page = raw.len() == 100;
+        files.extend(raw.into_iter().map(|f| PrFile {
+            path: PathBuf::from(&f.filename),
+            previous_path: f.previous_filename.map(PathBuf::from),
+            status: change_kind(&f.status),
+            additions: f.additions,
+            deletions: f.deletions,
+        }));
+        if !full_page {
+            break;
+        }
+        if page == MAX_FILE_PAGES {
+            truncated = true;
+        }
+    }
+
+    Ok(PrDetail {
+        repo: repo.clone(),
+        number: pr.number,
+        title: pr.title,
+        author: author_of(&pr.user),
+        state: pr.state,
+        draft: pr.draft,
+        html_url: pr.html_url,
+        head_ref: pr.head.name,
+        base_ref: pr.base.name,
+        base_sha: compare.merge_base_commit.sha,
+        head_sha: pr.head.sha,
+        files,
+        truncated,
+    })
+}
+
+/// One side of a file, at a specific commit. A 404 means the file does not
+/// exist there — expected for the base side of an added file.
+pub fn file_at(token: &str, repo: &RepoRef, sha: &str, path: &std::path::Path) -> Result<FileContent> {
+    let rel = path.to_string_lossy().replace('\\', "/");
+    let url = format!(
+        "{API}/repos/{}/{}/contents/{}?ref={}",
+        encode_segment(&repo.owner),
+        encode_segment(&repo.name),
+        encode_path(&rel),
+        encode_segment(sha),
+    );
+    // The `raw` media type returns file bytes instead of base64-in-JSON.
+    let (status, body) = get_raw(token, &url, "application/vnd.github.raw")?;
+    if status == 404 {
+        return Ok(FileContent::Absent);
+    }
+    if !(200..300).contains(&status) {
+        bail!("GitHub returned HTTP {status} for {rel}");
+    }
+    Ok(FileContent::from_bytes(&body))
+}
+
+/// The `owner/repo` for a local clone's `origin` (or the only remote), if it
+/// points at GitHub.
+pub fn repo_from_local(root: &std::path::Path) -> Option<RepoRef> {
+    let repo = git2::Repository::discover(root).ok()?;
+    let names = repo.remotes().ok()?;
+    // `remotes()` yields Result<Option<&str>> per entry; keep only real names.
+    let list: Vec<String> = names
+        .iter()
+        .filter_map(|r| r.ok().flatten())
+        .map(String::from)
+        .collect();
+    let preferred = list
+        .iter()
+        .find(|n| n.as_str() == "origin")
+        .or_else(|| list.first())?;
+    let remote = repo.find_remote(preferred.as_str()).ok()?;
+    let url = remote.url().ok()?;
+    if !url.contains("github.com") {
+        return None;
+    }
+    repo_from_remote(url)
+}
+
+/// Turn a PR's file list into the status map the tree and viewer already speak.
+pub fn statuses_of(files: &[PrFile]) -> std::collections::HashMap<PathBuf, ChangeKind> {
+    files.iter().map(|f| (f.path.clone(), f.status)).collect()
+}
+
+pub fn find_file<'a>(files: &'a [PrFile], path: &std::path::Path) -> Option<&'a PrFile> {
+    files.iter().find(|f| f.path == path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_owner_repo() {
+        let (r, n) = parse_target("rust-lang/rust").unwrap();
+        assert_eq!(r.owner, "rust-lang");
+        assert_eq!(r.name, "rust");
+        assert_eq!(n, None);
+    }
+
+    #[test]
+    fn parses_browser_url() {
+        let (r, n) = parse_target("https://github.com/DioxusLabs/dioxus").unwrap();
+        assert_eq!(r.to_string(), "DioxusLabs/dioxus");
+        assert_eq!(n, None);
+    }
+
+    #[test]
+    fn parses_pull_request_url() {
+        let (r, n) = parse_target("https://github.com/rust-lang/rust/pull/12345").unwrap();
+        assert_eq!(r.to_string(), "rust-lang/rust");
+        assert_eq!(n, Some(12345));
+    }
+
+    #[test]
+    fn parses_ssh_remote() {
+        let (r, _) = parse_target("git@github.com:owner/name.git").unwrap();
+        assert_eq!(r.to_string(), "owner/name");
+    }
+
+    #[test]
+    fn parses_https_remote_with_git_suffix() {
+        let r = repo_from_remote("https://github.com/owner/name.git").unwrap();
+        assert_eq!(r.to_string(), "owner/name");
+    }
+
+    #[test]
+    fn rejects_junk() {
+        assert!(parse_target("").is_none());
+        assert!(parse_target("   ").is_none());
+        assert!(parse_target("just-an-owner").is_none());
+    }
+
+    #[test]
+    fn encodes_awkward_paths() {
+        assert_eq!(encode_path("src/main.rs"), "src/main.rs");
+        assert_eq!(encode_path("a b/c#d.rs"), "a%20b/c%23d.rs");
+        // Separators survive; segment contents do not.
+        assert_eq!(encode_path("dir/sub dir/f.rs"), "dir/sub%20dir/f.rs");
+    }
+
+    #[test]
+    fn maps_github_statuses() {
+        assert_eq!(change_kind("added"), ChangeKind::Added);
+        assert_eq!(change_kind("removed"), ChangeKind::Deleted);
+        assert_eq!(change_kind("renamed"), ChangeKind::Renamed);
+        assert_eq!(change_kind("modified"), ChangeKind::Modified);
+        assert_eq!(change_kind("changed"), ChangeKind::Modified);
+    }
+
+    #[test]
+    fn renamed_files_read_the_old_path_on_the_base_side() {
+        let f = PrFile {
+            path: PathBuf::from("new.rs"),
+            previous_path: Some(PathBuf::from("old.rs")),
+            status: ChangeKind::Renamed,
+            additions: 1,
+            deletions: 1,
+        };
+        assert_eq!(f.base_path(), &PathBuf::from("old.rs"));
+
+        let plain = PrFile {
+            path: PathBuf::from("same.rs"),
+            previous_path: None,
+            status: ChangeKind::Modified,
+            additions: 0,
+            deletions: 0,
+        };
+        assert_eq!(plain.base_path(), &PathBuf::from("same.rs"));
+    }
+
+    /// Talks to github.com, so it is not part of the normal run:
+    /// `cargo test -- --ignored live_pr_round_trip --nocapture`.
+    /// Anonymous, so it is subject to the 60 req/hour unauthenticated limit.
+    #[test]
+    #[ignore = "hits the network"]
+    fn live_pr_round_trip() {
+        // A long-merged PR, so the shape of the response is stable.
+        let repo = RepoRef {
+            owner: "DioxusLabs".to_string(),
+            name: "dioxus".to_string(),
+        };
+        let pr = load_pr("", &repo, 1).expect("load PR");
+        assert_eq!(pr.number, 1);
+        assert!(!pr.base_sha.is_empty(), "merge base resolved");
+        assert!(!pr.files.is_empty(), "PR has files");
+
+        let f = &pr.files[0];
+        let head = file_at("", &repo, &pr.head_sha, &f.path).expect("head side");
+        assert!(
+            matches!(head, FileContent::Text(_) | FileContent::Binary),
+            "head content present"
+        );
+        let base = file_at("", &repo, &pr.base_sha, f.base_path()).expect("base side");
+        // Absent is legitimate here — it just means the file was added.
+        let _ = base;
+    }
+
+    #[test]
+    fn file_list_becomes_a_status_map() {
+        let files = vec![
+            PrFile {
+                path: PathBuf::from("a.rs"),
+                previous_path: None,
+                status: ChangeKind::Added,
+                additions: 3,
+                deletions: 0,
+            },
+            PrFile {
+                path: PathBuf::from("b.rs"),
+                previous_path: None,
+                status: ChangeKind::Deleted,
+                additions: 0,
+                deletions: 7,
+            },
+        ];
+        let map = statuses_of(&files);
+        assert_eq!(map.get(&PathBuf::from("a.rs")), Some(&ChangeKind::Added));
+        assert_eq!(map.get(&PathBuf::from("b.rs")), Some(&ChangeKind::Deleted));
+    }
+}

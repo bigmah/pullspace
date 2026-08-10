@@ -1807,20 +1807,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "gittit"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "dioxus",
- "git2",
- "ignore",
- "regex",
- "similar",
- "syntect",
- "tokio",
-]
-
-[[package]]
 name = "glib"
 version = "0.18.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3438,6 +3424,20 @@ dependencies = [
  "quote",
  "syn 2.0.119",
  "version_check",
+]
+
+[[package]]
+name = "pullspace"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "dioxus",
+ "git2",
+ "ignore",
+ "regex",
+ "similar",
+ "syntect",
+ "tokio",
 ]
 
 [[package]]

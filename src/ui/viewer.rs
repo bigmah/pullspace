@@ -110,7 +110,7 @@ pub fn Viewer() -> Element {
         return rsx! {
             div { class: "viewer",
                 div { class: "welcome",
-                    div { class: "welcome-logo", "gittit" }
+                    div { class: "welcome-logo", "pullspace" }
                     div { class: "welcome-sub", "a lightweight diff viewer" }
                     div { class: "welcome-hint", "Pick a file on the left — changed files open as diffs." }
                     div { class: "welcome-hint", "Click an identifier for Go to Definition / Find References." }

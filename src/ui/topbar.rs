@@ -15,7 +15,7 @@ pub fn TopBar() -> Element {
 
     rsx! {
         div { class: "topbar",
-            span { class: "brand", "gittit" }
+            span { class: "brand", "pullspace" }
             span { class: "repopath", title: "{root_str}", "{root_str}" }
             input {
                 class: "searchbox",

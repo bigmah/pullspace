@@ -1,4 +1,4 @@
-# gittit
+# pullspace
 
 A lightweight, IDE-style code diff viewer written entirely in Rust, with a
 [Dioxus](https://dioxuslabs.com) UI.
@@ -35,8 +35,8 @@ cargo run --release -- /path/to/repo   # open a specific repo
 Optional extras:
 
 ```sh
-gittit /path/to/repo src/lib.rs              # open straight into a file
-gittit /path/to/repo src/lib.rs --mode=inline  # source | inline | split
+pullspace /path/to/repo src/lib.rs              # open straight into a file
+pullspace /path/to/repo src/lib.rs --mode=inline  # source | inline | split
 ```
 
 The `⟳` button re-reads git status and the file tree after you make changes

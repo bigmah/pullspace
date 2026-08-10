@@ -7,7 +7,7 @@ use dioxus::desktop::{Config, LogicalSize, WindowBuilder};
 
 fn main() {
     let window = WindowBuilder::new()
-        .with_title("gittit")
+        .with_title("pullspace")
         .with_inner_size(LogicalSize::new(1440.0, 920.0));
     dioxus::LaunchBuilder::desktop()
         .with_cfg(Config::new().with_window(window))

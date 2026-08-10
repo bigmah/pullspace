@@ -129,15 +129,93 @@ pub fn build_tree(root: &Path, statuses: &HashMap<PathBuf, ChangeKind>) -> FileN
     tmp.build(name, PathBuf::new(), statuses)
 }
 
-/// Build a tree from a bare set of paths. Used for a pull request, where there
-/// is no working directory to walk — every node comes from the change list, so
-/// the result is already "changed files only".
-pub fn build_tree_from_paths(label: &str, statuses: &HashMap<PathBuf, ChangeKind>) -> FileNode {
+/// Build a tree from an explicit path list. Used for a pull request, where
+/// there is no working directory to walk — `paths` is the repository tree at
+/// the PR's head.
+///
+/// Status paths are merged in the same way [`build_tree`] merges them over the
+/// worktree: a file deleted by the PR is absent from the head tree but still
+/// belongs in the explorer. Passing an empty `paths` degrades to a
+/// changed-files-only tree.
+pub fn build_tree_from_paths<'a>(
+    label: &str,
+    paths: impl IntoIterator<Item = &'a Path>,
+    statuses: &HashMap<PathBuf, ChangeKind>,
+) -> FileNode {
     let mut tmp = DirTmp::default();
+    for rel in paths {
+        tmp.insert(rel);
+    }
     for rel in statuses.keys() {
         tmp.insert(rel);
     }
     tmp.build(label.to_string(), PathBuf::new(), statuses)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn statuses(pairs: &[(&str, ChangeKind)]) -> HashMap<PathBuf, ChangeKind> {
+        pairs
+            .iter()
+            .map(|(p, k)| (PathBuf::from(p), *k))
+            .collect()
+    }
+
+    fn names(node: &FileNode) -> Vec<String> {
+        let mut out = Vec::new();
+        for c in &node.children {
+            out.push(c.path.display().to_string());
+            out.extend(names(c));
+        }
+        out
+    }
+
+    #[test]
+    fn unchanged_files_are_kept_and_changed_ones_badged() {
+        let paths = [Path::new("src/a.rs"), Path::new("src/b.rs")];
+        let st = statuses(&[("src/a.rs", ChangeKind::Modified)]);
+        let tree = build_tree_from_paths("pr", paths, &st);
+
+        let listed = names(&tree);
+        assert!(listed.contains(&"src/b.rs".to_string()), "{listed:?}");
+
+        let src = tree.children.iter().find(|c| c.is_dir).unwrap();
+        let a = src.children.iter().find(|c| c.name == "a.rs").unwrap();
+        let b = src.children.iter().find(|c| c.name == "b.rs").unwrap();
+        assert_eq!(a.status, Some(ChangeKind::Modified));
+        assert_eq!(b.status, None);
+        assert!(src.contains_changes, "parent dir marked so it auto-expands");
+    }
+
+    #[test]
+    fn files_deleted_by_the_pr_still_appear() {
+        // A deleted file is absent from the head tree, but must stay visible.
+        let paths = [Path::new("keep.rs")];
+        let st = statuses(&[("gone.rs", ChangeKind::Deleted)]);
+        let tree = build_tree_from_paths("pr", paths, &st);
+        let listed = names(&tree);
+        assert!(listed.contains(&"gone.rs".to_string()), "{listed:?}");
+    }
+
+    #[test]
+    fn empty_path_list_degrades_to_changed_files_only() {
+        let st = statuses(&[("only.rs", ChangeKind::Added)]);
+        let tree = build_tree_from_paths("pr", std::iter::empty(), &st);
+        assert_eq!(names(&tree), vec!["only.rs".to_string()]);
+    }
+
+    #[test]
+    fn changes_filter_strips_unchanged_files() {
+        let paths = [Path::new("src/a.rs"), Path::new("docs/b.md")];
+        let st = statuses(&[("src/a.rs", ChangeKind::Modified)]);
+        let tree = build_tree_from_paths("pr", paths, &st);
+        let filtered = filter_changed(&tree).expect("something changed");
+        let listed = names(&filtered);
+        assert!(listed.contains(&"src/a.rs".to_string()), "{listed:?}");
+        assert!(!listed.contains(&"docs/b.md".to_string()), "{listed:?}");
+    }
 }
 
 /// Reduce the tree to only nodes that are changed or contain changes.

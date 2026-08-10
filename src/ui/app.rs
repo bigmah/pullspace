@@ -355,20 +355,18 @@ pub fn App() -> Element {
     let tree: Memo<Option<FileNode>> = use_memo(move || {
         st.refresh_tick.read();
         let statuses = st.statuses.read().clone();
-        match st.workspace.read().pr() {
-            // A PR's file list is already "changed files only".
-            Some(pr) => Some(build_tree_from_paths(
+        let root = match st.workspace.read().pr() {
+            Some(pr) => build_tree_from_paths(
                 &format!("{} #{}", pr.repo, pr.number),
+                pr.tree.iter().map(|p| p.as_path()),
                 &statuses,
-            )),
-            None => {
-                let root = build_tree(&st.root.read(), &statuses);
-                if *st.changes_only.read() {
-                    filter_changed(&root)
-                } else {
-                    Some(root)
-                }
-            }
+            ),
+            None => build_tree(&st.root.read(), &statuses),
+        };
+        if *st.changes_only.read() {
+            filter_changed(&root)
+        } else {
+            Some(root)
         }
     });
     use_context_provider(|| tree);

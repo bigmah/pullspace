@@ -47,13 +47,19 @@ outside the app.
 ## Reviewing GitHub pull requests
 
 The top-bar chip on the right opens the GitHub panel. Type `owner/repo` to list
-its open pull requests, or paste a pull request URL to jump straight to one. The
-PR's changed files replace the file tree, and each file opens in the same Split
-/ Inline diff views — diffed against the **merge base**, so you see the PR's own
-changes and not everything that landed on the base branch since it was opened.
+its open pull requests, or paste a pull request URL to jump straight to one.
+
+The explorer then shows the **whole repository** at the PR's head commit, just
+like a local checkout: changed files carry the usual `M`/`A`/`D`/`R` badges,
+their directories get a dot and auto-expand, and `Δ` narrows the tree to the
+changed files. Unchanged files open as plain highlighted source; changed ones
+open in the same Split / Inline diff views, against the **merge base** — so you
+see the PR's own changes, not everything that landed on the base branch since it
+was opened.
 
 The repository does not have to be cloned locally; file contents come from the
-API. `✕ close PR` returns to the local working tree.
+API, fetched per file as you open them. `✕ close PR` returns to the local
+working tree.
 
 ### Signing in
 
@@ -122,7 +128,9 @@ data source.
 - In PR mode, search / Go to Definition / Find References are disabled — they
   walk the local working tree, which the PR's files are not part of.
 - Pull requests are loaded as a snapshot; `⟳` does not re-poll GitHub.
-- PRs over 3000 files are truncated (GitHub's own cap); the top bar says so.
+- The top bar flags a partial explorer: `truncated` (over GitHub's 3000-file
+  cap per PR), `partial tree` (repo past GitHub's recursive-tree limit — about
+  60k files), or `changed files only` (the tree could not be read at all).
 - Files over ~400 KB / 6k lines render without highlighting for speed;
   binary files are detected and not rendered.
 - Search results are capped at 400 hits.

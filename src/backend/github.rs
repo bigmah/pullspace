@@ -15,6 +15,9 @@ use super::FileContent;
 
 const API: &str = "https://api.github.com";
 const API_VERSION: &str = "2022-11-28";
+/// ureq defaults to 10 MB, which a recursive tree blows past on large repos —
+/// rust-lang/rust alone answers with ~20 MB. Bounded, but generously.
+const MAX_RESPONSE_BYTES: u64 = 64 * 1024 * 1024;
 /// GitHub itself stops at 3000 files per PR; 100 per page.
 const MAX_FILE_PAGES: u32 = 30;
 
@@ -122,7 +125,11 @@ fn get_raw(token: &str, url: &str, accept: &str) -> Result<(u16, Vec<u8>)> {
         .get("x-ratelimit-remaining")
         .and_then(|v| v.to_str().ok())
         .map(|v| v.to_string());
-    let body = res.body_mut().read_to_vec()?;
+    let body = res
+        .body_mut()
+        .with_config()
+        .limit(MAX_RESPONSE_BYTES)
+        .read_to_vec()?;
 
     if status == 401 {
         bail!("GitHub rejected the token (401). Sign in again.");
@@ -261,6 +268,46 @@ impl PrFile {
 }
 
 #[derive(Deserialize)]
+struct RawTree {
+    #[serde(default)]
+    tree: Vec<RawTreeEntry>,
+    /// GitHub sets this when the repo exceeds its tree limits.
+    #[serde(default)]
+    truncated: bool,
+}
+
+#[derive(Deserialize)]
+struct RawTreeEntry {
+    path: String,
+    #[serde(rename = "type")]
+    kind: String,
+}
+
+/// Every file in the repository as of `sha`, in one request, so a pull request
+/// can be browsed like a checkout rather than just a list of changes.
+///
+/// The bool is GitHub's `truncated` flag — true past 100k entries / 7 MB, where
+/// it silently returns a partial tree.
+pub fn repo_tree(token: &str, repo: &RepoRef, sha: &str) -> Result<(Vec<PathBuf>, bool)> {
+    let url = format!(
+        "{API}/repos/{}/{}/git/trees/{}?recursive=1",
+        encode_segment(&repo.owner),
+        encode_segment(&repo.name),
+        encode_segment(sha),
+    );
+    let raw: RawTree = get_json(token, &url)?;
+    let paths = raw
+        .tree
+        .into_iter()
+        // "tree" entries are directories and "commit" entries are submodules;
+        // the file tree is rebuilt from the blob paths alone.
+        .filter(|e| e.kind == "blob")
+        .map(|e| PathBuf::from(e.path))
+        .collect();
+    Ok((paths, raw.truncated))
+}
+
+#[derive(Deserialize)]
 struct RawCompare {
     merge_base_commit: RawCommit,
 }
@@ -287,9 +334,15 @@ pub struct PrDetail {
     pub files: Vec<PrFile>,
     /// True if the PR has more files than we fetched.
     pub truncated: bool,
+    /// Every file in the repo at `head_sha`, so the explorer can show the whole
+    /// tree and not just what changed. Empty if the tree could not be read.
+    pub tree: Vec<PathBuf>,
+    /// True if GitHub returned only part of the repository tree.
+    pub tree_truncated: bool,
 }
 
-/// Load a PR: metadata, the merge base, and the full changed-file list.
+/// Load a PR: metadata, the merge base, the changed-file list, and the full
+/// repository tree at the PR's head.
 ///
 /// The merge base matters — diffing against `base.sha` would show every commit
 /// that landed on the base branch since the PR was opened as part of the PR.
@@ -330,6 +383,10 @@ pub fn load_pr(token: &str, repo: &RepoRef, number: u64) -> Result<PrDetail> {
         }
     }
 
+    // Browsing the whole repo is a convenience, not the point of the screen —
+    // if the tree cannot be read, fall back to listing just the changed files.
+    let (tree, tree_truncated) = repo_tree(token, repo, &pr.head.sha).unwrap_or_default();
+
     Ok(PrDetail {
         repo: repo.clone(),
         number: pr.number,
@@ -344,6 +401,8 @@ pub fn load_pr(token: &str, repo: &RepoRef, number: u64) -> Result<PrDetail> {
         head_sha: pr.head.sha,
         files,
         truncated,
+        tree,
+        tree_truncated,
     })
 }
 
@@ -499,6 +558,16 @@ mod tests {
         assert_eq!(pr.number, 1);
         assert!(!pr.base_sha.is_empty(), "merge base resolved");
         assert!(!pr.files.is_empty(), "PR has files");
+
+        // The repo tree must be a superset of the changed files (deletions
+        // aside), or the explorer would be missing files the PR touches.
+        assert!(!pr.tree.is_empty(), "repo tree loaded");
+        assert!(pr.tree.len() > pr.files.len(), "tree is the whole repo");
+        for f in &pr.files {
+            if f.status != ChangeKind::Deleted {
+                assert!(pr.tree.contains(&f.path), "{:?} missing from tree", f.path);
+            }
+        }
 
         let f = &pr.files[0];
         let head = file_at("", &repo, &pr.head_sha, &f.path).expect("head side");

@@ -20,6 +20,29 @@ pub fn TopBar() -> Element {
     let pr = workspace.pr().cloned();
     let in_pr = pr.is_some();
 
+    // Say so when the explorer is showing less than the whole repository,
+    // rather than letting a missing file look like it does not exist.
+    let warn = workspace.pr().and_then(|pr| {
+        if pr.truncated {
+            Some((
+                "truncated",
+                "This PR changes more files than GitHub will list; only the first 3000 were loaded",
+            ))
+        } else if pr.tree_truncated {
+            Some((
+                "partial tree",
+                "This repository is past GitHub's tree limit, so some unchanged files are missing from the explorer",
+            ))
+        } else if pr.tree.is_empty() {
+            Some((
+                "changed files only",
+                "The repository tree could not be read, so the explorer lists only the files this PR changes",
+            ))
+        } else {
+            None
+        }
+    });
+
     // Search and the symbol index walk the working tree, which a PR is not
     // part of — say so rather than returning confusing local results.
     let (search_placeholder, search_disabled) = if in_pr {
@@ -67,8 +90,8 @@ pub fn TopBar() -> Element {
                     span { class: "prnum", "{pr.repo} #{pr.number}" }
                     span { class: "prcrumbtitle", "{pr.title}" }
                 }
-                if pr.truncated {
-                    span { class: "prwarn", title: "Only the first 3000 files were loaded", "truncated" }
+                if let Some((label, why)) = warn {
+                    span { class: "prwarn", title: "{why}", "{label}" }
                 }
                 button {
                     class: "iconbtn",

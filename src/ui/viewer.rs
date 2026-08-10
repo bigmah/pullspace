@@ -46,7 +46,8 @@ struct FetchJob {
     path: PathBuf,
     /// Differs from `path` for renames.
     base_path: PathBuf,
-    status: ChangeKind,
+    /// `None` for a file the PR does not touch — browsable, but not a diff.
+    status: Option<ChangeKind>,
 }
 
 fn scroll_js(line: usize) -> String {
@@ -75,14 +76,16 @@ pub fn Viewer() -> Element {
         let rel = st.open.read().clone();
         let job = st.workspace.read().pr().and_then(|pr| {
             let rel = rel.as_ref()?;
-            let f = find_file(&pr.files, rel)?;
+            // Unchanged files are in the repo tree but not the PR's file list;
+            // they still open, just as plain source.
+            let f = find_file(&pr.files, rel);
             Some(FetchJob {
                 repo: pr.repo.clone(),
                 base_sha: pr.base_sha.clone(),
                 head_sha: pr.head_sha.clone(),
-                path: f.path.clone(),
-                base_path: f.base_path().clone(),
-                status: f.status,
+                path: rel.clone(),
+                base_path: f.map_or_else(|| rel.clone(), |f| f.base_path().clone()),
+                status: f.map(|f| f.status),
             })
         });
         async move {
@@ -106,14 +109,14 @@ pub fn Viewer() -> Element {
             cache.write().insert(path.clone(), PrFileState::Loading);
 
             let fetched = tokio::task::spawn_blocking(move || {
-                // An added file has no base side; a deleted one has no head
-                // side. Skipping those saves a request that would 404 anyway.
-                let base = if job.status == ChangeKind::Added {
-                    FileContent::Absent
-                } else {
-                    file_at(&token, &job.repo, &job.base_sha, &job.base_path)?
+                // An added file has no base side, a deleted one has no head
+                // side, and an untouched file is never diffed — so in each case
+                // skip a request that would be wasted or 404 anyway.
+                let base = match job.status {
+                    None | Some(ChangeKind::Added) => FileContent::Absent,
+                    Some(_) => file_at(&token, &job.repo, &job.base_sha, &job.base_path)?,
                 };
-                let head = if job.status == ChangeKind::Deleted {
+                let head = if job.status == Some(ChangeKind::Deleted) {
                     FileContent::Absent
                 } else {
                     file_at(&token, &job.repo, &job.head_sha, &job.path)?

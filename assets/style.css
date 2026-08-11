@@ -437,6 +437,49 @@ body {
   font-size: 10.5px;
 }
 
+/* ---------- html preview ---------- */
+
+.previewwrap { display: flex; flex-direction: column; align-items: flex-start; }
+
+.previewbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  position: sticky;
+  left: 0;
+  flex: none;
+}
+
+.previewsafe {
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--added);
+  border: 1px solid rgba(79, 191, 122, 0.45);
+  border-radius: 3px;
+  padding: 0 5px;
+}
+
+.previewnote {
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--modified);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 0 5px;
+}
+
+/* The page is drawn at twice its CSS size for sharpness; the width it is shown
+   at comes from the render itself. Never wider than the pane. */
+.previewimg {
+  display: block;
+  max-width: calc(100% - 24px);
+  height: auto;
+  margin: 0 12px 24px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+}
+
 /* ---------- conversation pane ---------- */
 
 .convpane {

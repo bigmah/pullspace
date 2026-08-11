@@ -5,6 +5,7 @@ use dioxus::prelude::*;
 use crate::backend::difftool::{diff_hunks, stats, to_rows, Hunk, Line, LineKind};
 use crate::backend::gitio::{head_file, worktree_file};
 use crate::backend::highlight::{highlight, Span};
+use crate::backend::htmlview;
 use crate::backend::tree::ChangeKind;
 use crate::backend::FileContent;
 
@@ -18,6 +19,16 @@ const BIG_FILE_LINES: usize = 6_000;
 enum SourceLines {
     Colored(Vec<Vec<Span>>),
     Plain(Vec<String>),
+}
+
+/// A rendered HTML page, ready to hand to an `<img>`.
+#[derive(Clone, PartialEq)]
+struct Shot {
+    uri: String,
+    /// The width to show it at — half what it was drawn at.
+    css_width: u32,
+    clipped: bool,
+    blocked: usize,
 }
 
 /// What the viewer has to show right now. Local files resolve synchronously;
@@ -131,6 +142,41 @@ pub fn Viewer() -> Element {
         }
     });
 
+    // Draw the page, off the UI thread and only while the preview is the mode
+    // being asked for. Keyed on the file's own text, so a reload that changes
+    // it redraws and one that does not costs nothing.
+    let preview = use_resource(move || {
+        let wanted = *st.view_mode.read() == ViewMode::Preview;
+        let source = match &*data.read() {
+            Pane::Ready { rel, old, new } if wanted && htmlview::is_html(rel) => match (new, old) {
+                (FileContent::Text(t), _) => Some(t.clone()),
+                // Deleted by the PR: draw the version that is going away.
+                (FileContent::Absent, FileContent::Text(t)) => Some(t.clone()),
+                _ => None,
+            },
+            _ => None,
+        };
+        async move {
+            let text = source?;
+            let done = tokio::task::spawn_blocking(move || htmlview::render(&text)).await;
+            Some(match done {
+                Ok(Ok(p)) => Ok(Shot {
+                    uri: htmlview::data_uri(&p.png),
+                    css_width: p.css_size().0,
+                    clipped: p.clipped,
+                    blocked: p.blocked,
+                }),
+                Ok(Err(e)) => Err(format!("{e:#}")),
+                // Blitz is a young engine. A page that trips it takes the
+                // blocking task down, not the app — so say so and carry on.
+                Err(e) if e.is_panic() => {
+                    Err("This page could not be laid out — its source is still readable in Source view.".to_string())
+                }
+                Err(e) => Err(e.to_string()),
+            })
+        }
+    });
+
     let guard = data.read();
     let (rel, new_side) = match &*guard {
         Pane::Empty => return rsx! { Welcome {} },
@@ -158,11 +204,12 @@ pub fn Viewer() -> Element {
     // the local repository, or this pull request's own checkout.
     let symbols_enabled = st.scan_root.read().dir().is_some();
 
-    // Only changed files have a diff to show.
-    let mode = if status.is_none() {
-        ViewMode::Source
-    } else {
-        *st.view_mode.read()
+    let previewable = htmlview::is_html(&rel);
+    // Only changed files have a diff to show, and only HTML has a page to draw.
+    let mode = match *st.view_mode.read() {
+        ViewMode::Preview if !previewable => ViewMode::Source,
+        ViewMode::Inline | ViewMode::Split if status.is_none() => ViewMode::Source,
+        m => m,
     };
 
     let rel_str = rel.display().to_string();
@@ -186,6 +233,12 @@ pub fn Viewer() -> Element {
             Some(h) if h.is_empty() => rsx! { div { class: "notice", "No differences." } },
             Some(h) => render_split(h),
             None => rsx! { div { class: "notice", "Binary file — cannot diff." } },
+        },
+        ViewMode::Preview => match &*preview.read() {
+            None => rsx! { div { class: "notice", "Drawing the page…" } },
+            Some(None) => rsx! { div { class: "notice", "Nothing to draw — this file has no text." } },
+            Some(Some(Err(e))) => rsx! { div { class: "notice error", "{e}" } },
+            Some(Some(Ok(shot))) => render_preview(shot),
         },
     };
 
@@ -227,6 +280,9 @@ pub fn Viewer() -> Element {
                 {mode_btn("Source", ViewMode::Source, mode, true)}
                 {mode_btn("Inline", ViewMode::Inline, mode, diffable)}
                 {mode_btn("Split", ViewMode::Split, mode, diffable)}
+                if previewable {
+                    {mode_btn("Preview", ViewMode::Preview, mode, true)}
+                }
             }
             if let Some(name) = selected {
                 if symbols_enabled {
@@ -336,6 +392,47 @@ fn render_colored(st: St, lines: &[Vec<Span>], symbols_enabled: bool) -> Element
             }
         }
     }
+}
+
+/// The page as a picture, over a bar saying what it is and is not.
+///
+/// "scripts disabled" is not a disclaimer to be buried: this is a drawing of
+/// the page, not the page running, and anyone judging a change by it should
+/// know that up front.
+fn render_preview(shot: &Shot) -> Element {
+    let uri = shot.uri.clone();
+    let blocked = shot.blocked;
+    let clipped = shot.clipped;
+    rsx! {
+        div { class: "previewwrap",
+            div { class: "previewbar",
+                span {
+                    class: "previewsafe",
+                    title: "Drawn by Blitz, which has no JavaScript engine — nothing in this page can run",
+                    "scripts disabled"
+                }
+                if blocked > 0 {
+                    span {
+                        class: "previewnote",
+                        title: "Stylesheets, images and fonts hosted elsewhere are not fetched",
+                        "{blocked} remote resource{plural(blocked)} blocked"
+                    }
+                }
+                if clipped {
+                    span { class: "previewnote", "page too tall — cut off below" }
+                }
+            }
+            img {
+                class: "previewimg",
+                style: "width:{shot.css_width}px",
+                src: "{uri}",
+            }
+        }
+    }
+}
+
+fn plural(n: usize) -> &'static str {
+    if n == 1 { "" } else { "s" }
 }
 
 fn render_plain(lines: &[String]) -> Element {

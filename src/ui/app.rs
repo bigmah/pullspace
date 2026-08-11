@@ -25,6 +25,8 @@ pub enum ViewMode {
     Source,
     Inline,
     Split,
+    /// An HTML file drawn as the page it describes. Offered for HTML only.
+    Preview,
 }
 
 #[derive(Clone, PartialEq)]
@@ -501,6 +503,7 @@ pub fn App() -> Element {
             a.strip_prefix("--mode=").map(|m| match m {
                 "inline" => ViewMode::Inline,
                 "split" => ViewMode::Split,
+                "preview" => ViewMode::Preview,
                 _ => ViewMode::Source,
             })
         });

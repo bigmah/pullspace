@@ -172,6 +172,49 @@ fn SignIn(error: Option<String>) -> Element {
     }
 }
 
+/// Put `text` on the clipboard, reporting whether it worked.
+///
+/// `navigator.clipboard` needs a secure context, which a desktop webview
+/// serving from its own scheme is not always considered to be, so fall back to
+/// the old selection-based command. The outcome comes back either way, because
+/// a Copy button that says "Copied" without having copied anything is worse
+/// than no button — the user only finds out at the point of pasting.
+async fn copy_to_clipboard(text: &str) -> bool {
+    let literal = serde_json::to_string(text).unwrap_or_else(|_| "\"\"".to_string());
+    let mut eval = document::eval(&format!(
+        r#"(async function() {{
+            const text = {literal};
+            try {{
+                if (window.isSecureContext && navigator.clipboard) {{
+                    await navigator.clipboard.writeText(text);
+                    dioxus.send(true);
+                    return;
+                }}
+            }} catch (e) {{}}
+            try {{
+                const ta = document.createElement('textarea');
+                ta.value = text;
+                ta.setAttribute('readonly', '');
+                ta.style.position = 'fixed';
+                ta.style.opacity = '0';
+                document.body.appendChild(ta);
+                ta.select();
+                ta.setSelectionRange(0, ta.value.length);
+                const ok = document.execCommand('copy');
+                document.body.removeChild(ta);
+                dioxus.send(!!ok);
+                return;
+            }} catch (e) {{}}
+            dioxus.send(false);
+        }})();"#
+    ));
+    // Every path above reports back, but a script that fails to reach any of
+    // them would leave the button waiting forever. Time out into the honest
+    // answer instead.
+    let answered = tokio::time::timeout(Duration::from_secs(3), eval.recv::<bool>()).await;
+    matches!(answered, Ok(Ok(true)))
+}
+
 #[component]
 fn DevicePrompt(user_code: String, verification_uri: String, note: String) -> Element {
     let st = use_context::<St>();
@@ -179,11 +222,46 @@ fn DevicePrompt(user_code: String, verification_uri: String, note: String) -> El
     let uri = verification_uri.clone();
     let show_code = !user_code.is_empty();
 
+    // None until the button is pressed; then whether it actually copied.
+    let mut copied = use_signal(|| None::<bool>);
+    let code = user_code.clone();
+    let shortcut = if cfg!(target_os = "macos") { "⌘C" } else { "Ctrl+C" };
+    let copy_label = match *copied.read() {
+        None => "Copy".to_string(),
+        Some(true) => "Copied ✓".to_string(),
+        Some(false) => format!("Copy failed — select it and press {shortcut}"),
+    };
+
     rsx! {
         div { class: "ghsection",
             if show_code {
                 div { class: "ghlabel", "Enter this code at GitHub" }
-                div { class: "ghcode", "{user_code}" }
+                div { class: "ghcoderow",
+                    div {
+                        class: "ghcode",
+                        // Clicking selects the whole code, so the keyboard
+                        // route works even if the clipboard call does not.
+                        title: "Click to select, or use Copy",
+                        "{user_code}"
+                    }
+                    button {
+                        class: "copybtn",
+                        onclick: move |_| {
+                            let text = code.clone();
+                            async move {
+                                let ok = copy_to_clipboard(&text).await;
+                                copied.set(Some(ok));
+                                if ok {
+                                    // Back to "Copy" so a second copy still
+                                    // looks like it did something.
+                                    tokio::time::sleep(Duration::from_secs(2)).await;
+                                    copied.set(None);
+                                }
+                            }
+                        },
+                        "{copy_label}"
+                    }
+                }
                 button {
                     class: "primarybtn",
                     onclick: move |_| open_browser(&uri),

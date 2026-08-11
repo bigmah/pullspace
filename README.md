@@ -131,7 +131,8 @@ client ID, which is public information, and you register that once:
 3. Create the app, then on its settings page tick **Enable Device Flow**.
    Sign-in fails with a clear message if you skip this.
 4. Copy the **Client ID** into the panel and press *Sign in with GitHub*. Enter
-   the code shown, in the browser tab that opens.
+   the code shown, in the browser tab that opens — *Copy* puts it on the
+   clipboard, and clicking the code itself selects the whole thing.
 
 The token is written to `~/.config/pullspace/auth.json` with `0600`
 permissions, and the client ID to `config.json` beside it. *Sign out* deletes

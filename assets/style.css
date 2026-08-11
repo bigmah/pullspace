@@ -654,6 +654,27 @@ body {
 .linkbtn:hover { text-decoration: underline; }
 
 /* The device-flow code the user types into github.com. */
+.ghcoderow {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+}
+
+.ghcoderow .ghcode { align-self: stretch; }
+
+.copybtn {
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--fg-dim);
+  cursor: pointer;
+  font-size: 11.5px;
+  padding: 3px 10px;
+}
+
+.copybtn:hover { background: var(--bg-2); color: var(--fg); }
+
 .ghcode {
   font-family: var(--mono);
   font-size: 26px;

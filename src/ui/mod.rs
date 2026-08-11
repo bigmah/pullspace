@@ -1,5 +1,6 @@
 mod app;
 mod bottom;
+mod conversation;
 mod filetree;
 mod github;
 mod prcache;

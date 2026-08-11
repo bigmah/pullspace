@@ -20,6 +20,9 @@ const API_VERSION: &str = "2022-11-28";
 const MAX_RESPONSE_BYTES: u64 = 64 * 1024 * 1024;
 /// GitHub itself stops at 3000 files per PR; 100 per page.
 const MAX_FILE_PAGES: u32 = 30;
+/// 100 comments per page, per kind. A thread past this is one nobody is
+/// reading to the end of anyway, and the pane says when it was cut short.
+const MAX_COMMENT_PAGES: u32 = 5;
 
 fn agent() -> ureq::Agent {
     ureq::Agent::config_builder()
@@ -385,6 +388,9 @@ struct RawRef {
 struct RawPr {
     number: u64,
     title: String,
+    /// The description. Null on a pull request opened without one.
+    #[serde(default)]
+    body: Option<String>,
     #[serde(default)]
     user: Option<User>,
     #[serde(default)]
@@ -529,6 +535,10 @@ pub struct PrDetail {
     pub repo: RepoRef,
     pub number: u64,
     pub title: String,
+    /// The description, as markdown source — empty when there is none. Carried
+    /// on the pull request itself, so the conversation pane has something to
+    /// show before its own request comes back.
+    pub body: String,
     pub author: String,
     pub state: String,
     pub draft: bool,
@@ -596,6 +606,7 @@ pub fn load_pr(token: &str, repo: &RepoRef, number: u64) -> Result<PrDetail> {
         repo: repo.clone(),
         number: pr.number,
         title: pr.title,
+        body: pr.body.unwrap_or_default(),
         author: author_of(&pr.user),
         state: pr.state,
         draft: pr.draft,
@@ -608,6 +619,189 @@ pub fn load_pr(token: &str, repo: &RepoRef, number: u64) -> Result<PrDetail> {
         truncated,
         tree: Vec::new(),
         tree_truncated: false,
+    })
+}
+
+// ------------------------------------------------------------- conversation
+
+/// Where a piece of writing on a pull request came from. GitHub keeps these on
+/// three separate endpoints, and they read differently enough to be worth
+/// telling apart once they are back in one list.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum CommentKind {
+    /// The pull request's own discussion thread.
+    Discussion,
+    /// What a reviewer wrote when submitting a review.
+    Review,
+    /// Left on a line of the diff.
+    Inline,
+}
+
+#[derive(Clone, PartialEq, Debug)]
+pub struct Comment {
+    pub kind: CommentKind,
+    pub author: String,
+    /// ISO 8601, as GitHub sends it — kept whole because it is what the
+    /// three lists are merged on.
+    pub created_at: String,
+    /// Markdown source. Empty for a bare approval, which is still worth showing.
+    pub body: String,
+    pub html_url: String,
+    /// `approved`, `changes requested`, … for a review; empty otherwise.
+    pub verdict: String,
+    /// The file a line comment hangs off, and the line in the head commit.
+    pub path: Option<PathBuf>,
+    pub line: Option<usize>,
+}
+
+/// Everything written on a pull request, oldest first.
+#[derive(Clone, PartialEq, Debug, Default)]
+pub struct Thread {
+    pub comments: Vec<Comment>,
+    /// True when one of the lists ran past [`MAX_COMMENT_PAGES`].
+    pub truncated: bool,
+}
+
+/// One JSON shape for all three endpoints: they agree on the fields that
+/// matter and each leaves the rest out, which `Option` already handles.
+#[derive(Deserialize)]
+struct RawComment {
+    #[serde(default)]
+    user: Option<User>,
+    #[serde(default)]
+    body: Option<String>,
+    #[serde(default)]
+    created_at: Option<String>,
+    /// Reviews date themselves with this instead.
+    #[serde(default)]
+    submitted_at: Option<String>,
+    #[serde(default)]
+    html_url: String,
+    /// Reviews only: `APPROVED`, `CHANGES_REQUESTED`, `COMMENTED`, `PENDING`.
+    #[serde(default)]
+    state: Option<String>,
+    /// Line comments only.
+    #[serde(default)]
+    path: Option<String>,
+    #[serde(default)]
+    line: Option<usize>,
+    /// Where the comment was left when it was written — the fallback for one
+    /// whose lines have since been rewritten, which GitHub answers with a null
+    /// `line`.
+    #[serde(default)]
+    original_line: Option<usize>,
+}
+
+/// GitHub's review states, in the words the pane uses.
+fn verdict_label(state: &str) -> String {
+    match state.to_ascii_uppercase().as_str() {
+        "APPROVED" => "approved".to_string(),
+        "CHANGES_REQUESTED" => "changes requested".to_string(),
+        "DISMISSED" => "dismissed".to_string(),
+        "COMMENTED" => String::new(),
+        other => other.to_ascii_lowercase().replace('_', " "),
+    }
+}
+
+fn comment_of(raw: RawComment, kind: CommentKind) -> Comment {
+    Comment {
+        kind,
+        author: author_of(&raw.user),
+        created_at: raw.created_at.or(raw.submitted_at).unwrap_or_default(),
+        // Trailing blank lines are common in a template-filled description and
+        // would otherwise be rendered as empty space.
+        body: raw.body.unwrap_or_default().trim_end().to_string(),
+        html_url: raw.html_url,
+        verdict: raw.state.as_deref().map(verdict_label).unwrap_or_default(),
+        path: raw.path.map(PathBuf::from),
+        line: raw.line.or(raw.original_line),
+    }
+}
+
+/// Read a list endpoint page by page. The bool is true when there was more
+/// than [`MAX_COMMENT_PAGES`] worth.
+fn get_paged<T: serde::de::DeserializeOwned>(token: &str, base: &str) -> Result<(Vec<T>, bool)> {
+    let mut out = Vec::new();
+    for page in 1..=MAX_COMMENT_PAGES {
+        let url = format!("{base}?per_page=100&page={page}");
+        let raw: Vec<T> = get_json(token, &url)?;
+        let full_page = raw.len() == 100;
+        out.extend(raw);
+        if !full_page {
+            return Ok((out, false));
+        }
+    }
+    Ok((out, true))
+}
+
+/// A submitted review with nothing to say is just the envelope its line
+/// comments arrived in — those are fetched separately, so showing the envelope
+/// as well would double every one of them.
+fn review_is_noise(raw: &RawComment) -> bool {
+    let empty = raw.body.as_deref().unwrap_or_default().trim().is_empty();
+    let state = raw.state.as_deref().unwrap_or_default().to_ascii_uppercase();
+    // A pending review is a draft, visible only to the person writing it.
+    state == "PENDING" || (empty && state != "APPROVED" && state != "CHANGES_REQUESTED")
+}
+
+/// The whole conversation: the discussion, the review summaries, and the
+/// comments left on lines of the diff, merged into one list in the order they
+/// were written.
+///
+/// Three requests, because GitHub keeps the three on separate endpoints. A
+/// failure on any of them fails the lot — a conversation with a third of itself
+/// silently missing is worse than one that says it could not be loaded.
+pub fn pr_comments(token: &str, repo: &RepoRef, number: u64) -> Result<Thread> {
+    let owner = encode_segment(&repo.owner);
+    let name = encode_segment(&repo.name);
+
+    let mut comments = Vec::new();
+    let mut truncated = false;
+
+    let (discussion, more): (Vec<RawComment>, bool) = get_paged(
+        token,
+        &format!("{API}/repos/{owner}/{name}/issues/{number}/comments"),
+    )
+    .with_context(|| format!("reading the discussion on #{number}"))?;
+    truncated |= more;
+    comments.extend(
+        discussion
+            .into_iter()
+            .map(|c| comment_of(c, CommentKind::Discussion)),
+    );
+
+    let (inline, more): (Vec<RawComment>, bool) = get_paged(
+        token,
+        &format!("{API}/repos/{owner}/{name}/pulls/{number}/comments"),
+    )
+    .with_context(|| format!("reading the line comments on #{number}"))?;
+    truncated |= more;
+    comments.extend(
+        inline
+            .into_iter()
+            .map(|c| comment_of(c, CommentKind::Inline)),
+    );
+
+    let (reviews, more): (Vec<RawComment>, bool) = get_paged(
+        token,
+        &format!("{API}/repos/{owner}/{name}/pulls/{number}/reviews"),
+    )
+    .with_context(|| format!("reading the reviews of #{number}"))?;
+    truncated |= more;
+    comments.extend(
+        reviews
+            .into_iter()
+            .filter(|r| !review_is_noise(r))
+            .map(|c| comment_of(c, CommentKind::Review)),
+    );
+
+    // ISO 8601 in UTC, which sorts as text. A stable sort keeps a review and
+    // the line comments it was submitted with in the order they came back.
+    comments.sort_by(|a, b| a.created_at.cmp(&b.created_at));
+
+    Ok(Thread {
+        comments,
+        truncated,
     })
 }
 
@@ -857,6 +1051,117 @@ mod tests {
     }
 
     #[test]
+    fn discussion_comments_carry_who_and_when() {
+        let raw: RawComment = serde_json::from_str(
+            r#"{"user":{"login":"octocat"},"body":"Looks good to me\n\n",
+                "created_at":"2026-08-01T09:12:00Z",
+                "html_url":"https://github.com/o/n/pull/1#issuecomment-9"}"#,
+        )
+        .unwrap();
+        let c = comment_of(raw, CommentKind::Discussion);
+        assert_eq!(c.author, "octocat");
+        assert_eq!(c.created_at, "2026-08-01T09:12:00Z");
+        // Trailing blank lines would render as empty space in the pane.
+        assert_eq!(c.body, "Looks good to me");
+        assert!(c.verdict.is_empty());
+        assert_eq!(c.path, None);
+    }
+
+    #[test]
+    fn reviews_date_themselves_with_submitted_at() {
+        let raw: RawComment = serde_json::from_str(
+            r#"{"user":{"login":"reviewer"},"body":"","state":"APPROVED",
+                "submitted_at":"2026-08-02T10:00:00Z","html_url":"u"}"#,
+        )
+        .unwrap();
+        assert!(!review_is_noise(&raw), "a bare approval still says something");
+        let c = comment_of(raw, CommentKind::Review);
+        assert_eq!(c.created_at, "2026-08-02T10:00:00Z");
+        assert_eq!(c.verdict, "approved");
+    }
+
+    #[test]
+    fn empty_reviews_that_only_wrap_line_comments_are_dropped() {
+        let wrapper: RawComment =
+            serde_json::from_str(r#"{"body":"","state":"COMMENTED","submitted_at":"t"}"#).unwrap();
+        assert!(review_is_noise(&wrapper));
+
+        let spoken: RawComment =
+            serde_json::from_str(r#"{"body":"one nit","state":"COMMENTED","submitted_at":"t"}"#)
+                .unwrap();
+        assert!(!review_is_noise(&spoken));
+
+        // A draft nobody else can see.
+        let pending: RawComment =
+            serde_json::from_str(r#"{"body":"wip","state":"PENDING","submitted_at":"t"}"#).unwrap();
+        assert!(review_is_noise(&pending));
+
+        let rejected: RawComment =
+            serde_json::from_str(r#"{"body":"","state":"CHANGES_REQUESTED"}"#).unwrap();
+        assert!(!review_is_noise(&rejected));
+        assert_eq!(verdict_label("CHANGES_REQUESTED"), "changes requested");
+    }
+
+    #[test]
+    fn line_comments_keep_a_line_to_jump_to() {
+        let fresh: RawComment = serde_json::from_str(
+            r#"{"user":{"login":"a"},"body":"nit","path":"src/main.rs","line":42,
+                "original_line":7,"created_at":"t","html_url":"u"}"#,
+        )
+        .unwrap();
+        let c = comment_of(fresh, CommentKind::Inline);
+        assert_eq!(c.path, Some(PathBuf::from("src/main.rs")));
+        assert_eq!(c.line, Some(42));
+
+        // Outdated: the lines it was written against are gone, so GitHub sends
+        // a null `line` and only remembers where it started out.
+        let stale: RawComment = serde_json::from_str(
+            r#"{"body":"nit","path":"src/old.rs","line":null,"original_line":7}"#,
+        )
+        .unwrap();
+        let c = comment_of(stale, CommentKind::Inline);
+        assert_eq!(c.line, Some(7));
+    }
+
+    #[test]
+    fn a_pull_request_without_a_description_reads_as_empty() {
+        let raw: RawPr = serde_json::from_str(
+            r#"{"number":1,"title":"t","body":null,"state":"open","updated_at":"t",
+                "html_url":"u","head":{"ref":"h","sha":"1"},"base":{"ref":"b","sha":"2"}}"#,
+        )
+        .unwrap();
+        assert_eq!(raw.body.unwrap_or_default(), "");
+    }
+
+    /// Hits the network: `cargo test -- --ignored live_pr_conversation`.
+    #[test]
+    #[ignore = "hits the network"]
+    fn live_pr_conversation() {
+        let repo = RepoRef {
+            owner: "DioxusLabs".to_string(),
+            name: "dioxus".to_string(),
+        };
+        // Merged, and approved by a reviewer — so there is something in the
+        // thread and it is not going to change again.
+        let thread = pr_comments("", &repo, 5533).expect("conversation");
+        assert!(!thread.truncated, "a small thread is not truncated");
+        assert!(
+            thread
+                .comments
+                .iter()
+                .any(|c| c.kind == CommentKind::Review && c.verdict == "approved"),
+            "the approval is in the thread: {:?}",
+            thread.comments
+        );
+        // Everyone in it is named, and merging three lists is only worth doing
+        // if the result comes out in order.
+        assert!(thread.comments.iter().all(|c| !c.author.is_empty()));
+        let mut sorted = thread.comments.clone();
+        sorted.sort_by(|a, b| a.created_at.cmp(&b.created_at));
+        assert_eq!(sorted, thread.comments);
+    }
+
+    #[test]
     fn file_list_becomes_a_status_map() {
         let files = vec![
             PrFile {
@@ -879,3 +1184,4 @@ mod tests {
         assert_eq!(map.get(&PathBuf::from("b.rs")), Some(&ChangeKind::Deleted));
     }
 }
+

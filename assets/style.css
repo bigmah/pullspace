@@ -437,6 +437,149 @@ body {
   font-size: 10.5px;
 }
 
+/* ---------- conversation pane ---------- */
+
+.convpane {
+  width: 360px;
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-1);
+  border-left: 1px solid var(--border);
+  min-height: 0;
+}
+
+.conv-hdr {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 34px;
+  padding: 0 6px 0 12px;
+  border-bottom: 1px solid var(--border);
+  flex: none;
+}
+
+.convcount {
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--fg-faint);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 0 5px;
+}
+
+.conv-body { overflow-y: auto; flex: 1; padding-bottom: 24px; }
+
+/* Folded away: a strip wide enough to click, and the label turned on its side
+   so it is still readable rather than an unexplained arrow. */
+.convrail {
+  width: 30px;
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding-top: 6px;
+  background: var(--bg-1);
+  border-left: 1px solid var(--border);
+  cursor: pointer;
+  user-select: none;
+}
+
+.convrail:hover { background: var(--bg-2); }
+
+.convrail-label {
+  writing-mode: vertical-rl;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 1.2px;
+  color: var(--fg-faint);
+}
+
+.convrail-count { font-family: var(--mono); color: var(--accent); letter-spacing: 0; }
+
+.convitem {
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+.convdesc { background: var(--bg-2); }
+
+.convmeta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.convwho {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--fg);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.convkind {
+  font-size: 10px;
+  color: var(--fg-faint);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 0 5px;
+  flex: none;
+  white-space: nowrap;
+}
+
+.convkind.ok { color: var(--added); border-color: rgba(79, 191, 122, 0.45); }
+.convkind.bad { color: var(--deleted); border-color: rgba(224, 108, 117, 0.45); }
+
+.convdate {
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--fg-faint);
+  flex: none;
+}
+
+.convtitle {
+  font-size: 13px;
+  color: var(--fg);
+  line-height: 1.4;
+  margin-top: 6px;
+}
+
+/* Markdown, shown as written: wrapped, but with its own line breaks and
+   indentation left alone. */
+.convtext {
+  margin-top: 6px;
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--fg-dim);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+
+.convnone { margin-top: 6px; font-size: 12px; color: var(--fg-faint); }
+
+.convloc {
+  margin-top: 6px;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--accent);
+  cursor: pointer;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.convloc:hover { text-decoration: underline; }
+
+.convpane .gherror { margin: 12px; }
+
 /* ---------- github: top bar chips ---------- */
 
 .ghchip {

@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use dioxus::prelude::*;
 
 use crate::backend::auth::{Token, TokenSource};
-use crate::backend::github::{statuses_of, PrDetail, PrSummary, RepoRef, RepoView};
+use crate::backend::github::{statuses_of, PrDetail, PrSummary, RepoRef, RepoView, Thread};
 use crate::backend::gitio::{discover_root, load_statuses};
 use crate::backend::search::{search_repo, text_query, word_query, Hit};
 use crate::backend::symbols::{build_index, find_definitions, Symbol};
@@ -12,6 +12,7 @@ use crate::backend::tree::{build_tree, build_tree_from_paths, filter_changed, Ch
 use crate::backend::FileContent;
 
 use super::bottom::Bottom;
+use super::conversation::ConvPane;
 use super::filetree::FileTreePane;
 use super::github::GhPanel;
 use super::topbar::TopBar;
@@ -157,6 +158,17 @@ pub enum PrSource {
     },
 }
 
+/// What the conversation pane has to show for the open pull request.
+///
+/// The description arrives with the pull request itself, so this is only about
+/// the comments — the pane has something to read either way.
+#[derive(Clone, PartialEq)]
+pub enum Conversation {
+    Loading,
+    Ready(Box<Thread>),
+    Failed(String),
+}
+
 /// Both sides of one file in a pull request, fetched on demand.
 #[derive(Clone, PartialEq)]
 pub enum PrFileState {
@@ -198,6 +210,10 @@ pub struct St {
     /// Per-file base/head content for the open PR.
     pub pr_files: Signal<HashMap<PathBuf, PrFileState>>,
     pub pr_source: Signal<PrSource>,
+    /// The open PR's comments. Folded away rather than unmounted, so the pane
+    /// comes back instantly and without a second trip to GitHub.
+    pub conv: Signal<Conversation>,
+    pub conv_open: Signal<bool>,
 }
 
 impl St {
@@ -339,6 +355,10 @@ impl St {
         // way: this is where a reload picks up what was pushed.
         let mut cache = self.pr_files;
         cache.set(HashMap::new());
+        // Dropped here rather than when the new one lands, so the pane never
+        // shows the last pull request's comments under this one's title.
+        let mut conv = self.conv;
+        conv.set(Conversation::Loading);
         let mut src = self.pr_source;
         src.set(source);
         self.set_scan_root(checkout);
@@ -522,6 +542,8 @@ pub fn App() -> Element {
             workspace: Signal::new(Workspace::Local),
             pr_files: Signal::new(HashMap::new()),
             pr_source: Signal::new(PrSource::Api),
+            conv: Signal::new(Conversation::Loading),
+            conv_open: Signal::new(true),
         }
     });
 
@@ -598,6 +620,20 @@ pub fn App() -> Element {
         spawn_forever(super::prcache::prefetch(st, number, jobs, st.api_token()));
     });
 
+    // Pull the conversation as soon as a pull request opens — three requests,
+    // next to the tree and every changed file, and the pane is the first thing
+    // read on a review. Re-runs on `⟳`, which is how a reply written since
+    // shows up.
+    use_effect(move || {
+        let target = st
+            .workspace
+            .read()
+            .pr()
+            .map(|pr| (pr.repo.clone(), pr.number));
+        let Some((repo, number)) = target else { return };
+        spawn_forever(super::conversation::load(st, repo, number));
+    });
+
     // Build the symbol index off the UI thread, for whatever is being browsed
     // — the local repository, or a pull request checked out on disk. Reading
     // `scan_root` here is what re-triggers it; an in-flight build for the
@@ -626,6 +662,7 @@ pub fn App() -> Element {
                     Viewer {}
                     Bottom {}
                 }
+                ConvPane {}
             }
             if *st.gh_open.read() {
                 GhPanel {}

@@ -187,6 +187,8 @@ struct RawRepo {
     stargazers_count: u64,
     #[serde(default)]
     pushed_at: Option<String>,
+    #[serde(default)]
+    default_branch: String,
 }
 
 #[derive(Deserialize)]
@@ -303,6 +305,73 @@ pub fn my_repos(token: &str, limit: u32) -> Result<Vec<RepoHit>> {
     );
     let raw: Vec<RawRepo> = get_json(token, &url)?;
     Ok(raw.into_iter().filter_map(hit_of).collect())
+}
+
+/// A repository's default branch and the commit at its tip.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct RepoHead {
+    pub branch: String,
+    pub sha: String,
+}
+
+/// Where "just open the repository" points: the tip of the default branch.
+///
+/// Two requests, because the repository record names the branch but not its
+/// head. A repository with no commits has nothing to browse, and says so rather
+/// than surfacing a bare 404.
+pub fn repo_head(token: &str, repo: &RepoRef) -> Result<RepoHead> {
+    let owner = encode_segment(&repo.owner);
+    let name = encode_segment(&repo.name);
+
+    let raw: RawRepo = get_json(token, &format!("{API}/repos/{owner}/{name}"))?;
+    let branch = if raw.default_branch.is_empty() {
+        // Every non-empty repository has one; fall back to the symbolic name
+        // rather than refusing over a field GitHub is expected to send.
+        "HEAD".to_string()
+    } else {
+        raw.default_branch
+    };
+
+    let commit: RawCommit = get_json(
+        token,
+        &format!(
+            "{API}/repos/{owner}/{name}/commits/{}",
+            encode_segment(&branch)
+        ),
+    )
+    .with_context(|| format!("reading the tip of {branch} — {repo} may have no commits yet"))?;
+
+    Ok(RepoHead {
+        branch,
+        sha: commit.sha,
+    })
+}
+
+/// A repository being browsed on its own, with no pull request in the picture.
+///
+/// The same shape the explorer already reads out of a [`PrDetail`], minus
+/// everything that only a pull request has: nothing is changed, so there is no
+/// diff, no base side and no changed-file list.
+#[derive(Clone, PartialEq, Debug)]
+pub struct RepoView {
+    pub repo: RepoRef,
+    /// The branch `head_sha` came from, for the breadcrumb.
+    pub branch: String,
+    pub head_sha: String,
+    /// Every file in the repository at `head_sha`.
+    pub tree: Vec<PathBuf>,
+    /// True if GitHub returned only part of the tree.
+    pub tree_truncated: bool,
+}
+
+impl RepoView {
+    /// Where this is on github.com.
+    pub fn html_url(&self) -> String {
+        format!(
+            "https://github.com/{}/{}/tree/{}",
+            self.repo.owner, self.repo.name, self.branch
+        )
+    }
 }
 
 #[derive(Deserialize)]
@@ -747,6 +816,26 @@ mod tests {
         let base = file_at("", &repo, &pr.base_sha, f.base_path()).expect("base side");
         // Absent is legitimate here — it just means the file was added.
         let _ = base;
+    }
+
+    /// Also hits the network: `cargo test -- --ignored live_repo_head`.
+    ///
+    /// The path a repository with no open pull requests takes: resolve the
+    /// default branch, then list it.
+    #[test]
+    #[ignore = "hits the network"]
+    fn live_repo_head() {
+        let repo = RepoRef {
+            owner: "DioxusLabs".to_string(),
+            name: "dioxus".to_string(),
+        };
+        let head = repo_head("", &repo).expect("default branch");
+        assert!(!head.branch.is_empty(), "GitHub names the default branch");
+        assert_eq!(head.sha.len(), 40, "a full commit sha: {}", head.sha);
+
+        let (tree, _) = repo_tree("", &repo, &head.sha).expect("repo tree");
+        assert!(tree.len() > 1, "the whole repository, not one file");
+        assert!(tree.contains(&PathBuf::from("Cargo.toml")));
     }
 
     /// Also hits the network: `cargo test -- --ignored live_repo_search`.

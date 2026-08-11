@@ -2,8 +2,8 @@ use dioxus::prelude::*;
 
 use crate::backend::auth::open_browser;
 
-use super::app::{Account, PrList, PrSource, St};
-use super::github::open_pr;
+use super::app::{Account, PrList, PrSource, St, Workspace};
+use super::github::{browse_repo, open_pr};
 use super::prcache::warmed;
 
 #[component]
@@ -20,26 +20,27 @@ pub fn TopBar() -> Element {
 
     let workspace = st.workspace.read().clone();
     let pr = workspace.pr().cloned();
-    let in_pr = pr.is_some();
+    let browsing = workspace.repo().cloned();
     let pr_target = workspace.pr().map(|p| (p.repo.clone(), p.number));
+    let repo_target = workspace.repo().map(|v| v.repo.clone());
 
-    // Reloading a pull request goes to GitHub and can fetch objects, so it has
-    // to say so; reloading the local tree is synchronous and needs no notice.
+    // Reloading from GitHub can fetch objects, so it has to say so; reloading
+    // the local tree is synchronous and needs no notice.
     let (reload_note, reload_error) = match &*st.prs.read() {
         PrList::Loading(note) => (Some(note.clone()), None),
         PrList::Failed(e) => (None, Some(e.clone())),
         _ => (None, None),
     };
     let reloading = reload_note.is_some();
-    let refresh_title = if in_pr {
-        "Reload this pull request from GitHub"
-    } else {
-        "Reload git status & file tree"
+    let refresh_title = match &workspace {
+        Workspace::Pr(_) => "Reload this pull request from GitHub",
+        Workspace::Repo(_) => "Reload this repository from GitHub",
+        Workspace::Local => "Reload git status & file tree",
     };
 
     // Where file contents come from — worth showing, since it is the
     // difference between instant and a round trip per file.
-    let source = workspace.pr().map(|_| match &*st.pr_source.read() {
+    let source = workspace.is_remote().then(|| match &*st.pr_source.read() {
         PrSource::Local { borrowed: true, .. } => (
             "local",
             "Reading from the clone you already had — no network per file",
@@ -62,26 +63,31 @@ pub fn TopBar() -> Element {
 
     // Say so when the explorer is showing less than the whole repository,
     // rather than letting a missing file look like it does not exist.
-    let warn = workspace.pr().and_then(|pr| {
-        if pr.truncated {
-            Some((
-                "truncated",
-                "This PR changes more files than GitHub will list; only the first 3000 were loaded",
-            ))
-        } else if pr.tree_truncated {
-            Some((
-                "partial tree",
-                "This repository is past GitHub's tree limit, so some unchanged files are missing from the explorer",
-            ))
-        } else if pr.tree.is_empty() {
-            Some((
-                "changed files only",
-                "The repository tree could not be read, so the explorer lists only the files this PR changes",
-            ))
-        } else {
-            None
+    let partial_tree = (
+        "partial tree",
+        "This repository is past GitHub's tree limit, so some files are missing from the explorer",
+    );
+    let warn = match &workspace {
+        Workspace::Pr(pr) => {
+            if pr.truncated {
+                Some((
+                    "truncated",
+                    "This PR changes more files than GitHub will list; only the first 3000 were loaded",
+                ))
+            } else if pr.tree_truncated {
+                Some(partial_tree)
+            } else if pr.tree.is_empty() {
+                Some((
+                    "changed files only",
+                    "The repository tree could not be read, so the explorer lists only the files this PR changes",
+                ))
+            } else {
+                None
+            }
         }
-    });
+        Workspace::Repo(view) => view.tree_truncated.then_some(partial_tree),
+        Workspace::Local => None,
+    };
 
     // Search and the symbol index walk a directory. Locally that is the
     // repository; for a pull request it is the checkout made when it opened.
@@ -162,8 +168,42 @@ pub fn TopBar() -> Element {
                 button {
                     class: "linkbtn",
                     title: "Back to the local working tree",
-                    onclick: move |_| st.leave_pr(),
+                    onclick: move |_| st.leave_remote(),
                     "✕ close PR"
+                }
+            } else if let Some(view) = browsing {
+                span {
+                    class: "prcrumb",
+                    title: "{view.repo} at {view.branch} — no pull request, just the code",
+                    span { class: "prnum", "{view.repo}" }
+                    span { class: "prcrumbtitle", "@ {view.branch}" }
+                }
+                if let Some((label, why)) = source {
+                    span { class: "prsrc", title: "{why}", "{label}" }
+                }
+                if let Some((label, why)) = warn {
+                    span { class: "prwarn", title: "{why}", "{label}" }
+                }
+                if let Some(note) = reload_note.clone() {
+                    span { class: "prwarm", "{note}" }
+                }
+                if let Some(e) = reload_error.clone() {
+                    span { class: "prwarn", title: "{e}", "reload failed" }
+                }
+                button {
+                    class: "iconbtn",
+                    title: "Open on github.com",
+                    onclick: {
+                        let url = view.html_url();
+                        move |_| open_browser(&url)
+                    },
+                    "↗"
+                }
+                button {
+                    class: "linkbtn",
+                    title: "Back to the local working tree",
+                    onclick: move |_| st.leave_remote(),
+                    "✕ close repo"
                 }
             } else {
                 span { class: "repopath", title: "{root_str}", "{root_str}" }
@@ -196,13 +236,16 @@ pub fn TopBar() -> Element {
                 class: "iconbtn",
                 title: "{refresh_title}",
                 disabled: reloading,
-                onclick: move |_| match pr_target.clone() {
+                onclick: move |_| match (pr_target.clone(), repo_target.clone()) {
                     // Root scope: reloading replaces the workspace, and this
                     // button is re-rendered underneath the task that did it.
-                    Some((repo, number)) => {
+                    (Some((repo, number)), _) => {
                         spawn_forever(open_pr(st, repo, number));
                     }
-                    None => st.refresh(),
+                    (_, Some(repo)) => {
+                        spawn_forever(browse_repo(st, repo));
+                    }
+                    _ => st.refresh(),
                 },
                 "⟳"
             }

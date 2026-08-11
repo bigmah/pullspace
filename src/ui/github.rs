@@ -9,8 +9,8 @@ use crate::backend::auth::{
     Token, TokenSource,
 };
 use crate::backend::github::{
-    list_prs, load_pr, my_repos, parse_target, repo_tree, search_repos, viewer_login, PrSummary,
-    RepoHit, RepoRef,
+    list_prs, load_pr, my_repos, parse_target, repo_head, repo_tree, search_repos, viewer_login,
+    PrSummary, RepoHit, RepoRef, RepoView,
 };
 use crate::backend::mirror;
 
@@ -404,6 +404,7 @@ fn SignedIn(login: String, source: TokenSource) -> Element {
                 PrList::Failed(e) => rsx! { div { class: "gherror", "{e}" } },
                 PrList::Ready { repo, items } if items.is_empty() => rsx! {
                     div { class: "ghnote", "No open pull requests in {repo}." }
+                    BrowseRow { repo: repo.clone(), no_prs: true }
                 },
                 PrList::Ready { repo, items } => rsx! {
                     div { class: "ghlabel", "{items.len()} open in {repo}" }
@@ -412,6 +413,7 @@ fn SignedIn(login: String, source: TokenSource) -> Element {
                             PrRow { key: "{pr.number}", repo: repo.clone(), pr: pr.clone() }
                         }
                     }
+                    BrowseRow { repo: repo.clone(), no_prs: false }
                 },
             }
         }
@@ -651,6 +653,34 @@ fn RepoRow(hit: RepoHit, active: bool, open: Signal<bool>) -> Element {
     }
 }
 
+/// Open the repository itself, at its default branch.
+///
+/// A repository with no open pull requests is still worth reading, and so is
+/// the code around the one you are reviewing — so this is offered either way:
+/// as the only way in when the list is empty, and as a quieter link when the
+/// pull requests are what you probably came for.
+#[component]
+fn BrowseRow(repo: RepoRef, no_prs: bool) -> Element {
+    let st = use_context::<St>();
+    let class = if no_prs { "primarybtn" } else { "linkbtn" };
+    let label = if no_prs {
+        format!("Browse {repo}")
+    } else {
+        "Browse the whole repository →".to_string()
+    };
+    rsx! {
+        button {
+            class,
+            title: "Open {repo} at its default branch, with no pull request",
+            // Root scope: loading replaces the list this button lives in.
+            onclick: move |_| {
+                spawn_forever(browse_repo(st, repo.clone()));
+            },
+            "{label}"
+        }
+    }
+}
+
 #[component]
 fn PrRow(repo: RepoRef, pr: PrSummary) -> Element {
     let st = use_context::<St>();
@@ -713,6 +743,109 @@ async fn load_repo_prs(st: St, repo: RepoRef) {
         Ok(Err(e)) => prs.set(PrList::Failed(format!("{e:#}"))),
         Err(e) => prs.set(PrList::Failed(e.to_string())),
     }
+}
+
+/// Open a repository with no pull request involved: its default branch, synced
+/// and checked out exactly as a pull request's head commit would be.
+///
+/// This is what makes a repository with nothing open reachable at all, and it
+/// is the same three steps as [`open_pr`] minus the diff: settle the source
+/// before the tree, because a local repository lists its own instantly.
+///
+/// `⟳` runs this again on an open repository, which is how a browse picks up
+/// commits pushed since — the branch tip moves, and everything downstream of it
+/// is keyed by commit.
+pub(super) async fn browse_repo(st: St, repo: RepoRef) {
+    let token = st.api_token();
+    let mut prs = st.prs;
+
+    prs.set(PrList::Loading("Reading the repository…".to_string()));
+    let target = repo.clone();
+    let tok = token.clone();
+    let head = match tokio::task::spawn_blocking(move || repo_head(&tok, &target)).await {
+        Ok(Ok(h)) => h,
+        Ok(Err(e)) => return prs.set(PrList::Failed(format!("{e:#}"))),
+        Err(e) => return prs.set(PrList::Failed(e.to_string())),
+    };
+
+    prs.set(PrList::Loading(
+        "Syncing the repository (first time may take a moment)…".to_string(),
+    ));
+    let target = repo.clone();
+    let branch = head.branch.clone();
+    let sha = head.sha.clone();
+    let own = st.root_path();
+    let tok = token.clone();
+    let local = tokio::task::spawn_blocking(move || {
+        mirror::prepare_branch(&target, &branch, &sha, &tok, Some(&own))
+    })
+    .await;
+
+    let source = match local {
+        Ok(Ok(repo_on_disk)) => PrSource::Local {
+            git_dir: repo_on_disk.git_dir,
+            borrowed: repo_on_disk.borrowed,
+        },
+        // The API path works, it is just slower per file.
+        _ => PrSource::Api,
+    };
+
+    prs.set(PrList::Loading("Reading the file tree…".to_string()));
+    let target = repo.clone();
+    let sha = head.sha.clone();
+    let src = source.clone();
+    let tree = tokio::task::spawn_blocking(move || match &src {
+        PrSource::Local { git_dir, .. } => {
+            mirror::tree_paths(git_dir, &sha).map(|p| (p, false)).ok()
+        }
+        PrSource::Api => repo_tree(&token, &target, &sha).ok(),
+    })
+    .await;
+
+    // A pull request with no readable tree still has its changed files to show.
+    // A repository has nothing at all, so this is where it stops — with the
+    // list still on screen, rather than on an explorer that looks empty.
+    let Ok(Some((paths, tree_truncated))) = tree else {
+        return prs.set(PrList::Failed(format!(
+            "Could not read the file list for {repo}."
+        )));
+    };
+
+    let checkout = match &source {
+        PrSource::Local { git_dir, .. } => {
+            prs.set(PrList::Loading("Checking out the repository…".to_string()));
+            let git_dir = git_dir.clone();
+            let target = repo.clone();
+            let sha = head.sha.clone();
+            match tokio::task::spawn_blocking(move || mirror::materialize(&git_dir, &target, &sha))
+                .await
+            {
+                Ok(Ok(dir)) => ScanRoot::Dir(dir),
+                Ok(Err(e)) => ScanRoot::Unavailable(format!(
+                    "Search is off: this repository could not be checked out — {e:#}"
+                )),
+                Err(e) => ScanRoot::Unavailable(format!(
+                    "Search is off: the checkout did not finish — {e}"
+                )),
+            }
+        }
+        PrSource::Api => ScanRoot::Unavailable(
+            "Search needs a local copy — this repository is read over the GitHub API".to_string(),
+        ),
+    };
+
+    prs.set(PrList::Idle);
+    st.enter_repo(
+        RepoView {
+            repo,
+            branch: head.branch,
+            head_sha: head.sha,
+            tree: paths,
+            tree_truncated,
+        },
+        source,
+        checkout,
+    );
 }
 
 /// Open a PR: metadata from the API, then contents from a local clone if one

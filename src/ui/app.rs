@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use dioxus::prelude::*;
 
 use crate::backend::auth::{Token, TokenSource};
-use crate::backend::github::{statuses_of, PrDetail, PrSummary, RepoRef};
+use crate::backend::github::{statuses_of, PrDetail, PrSummary, RepoRef, RepoView};
 use crate::backend::gitio::{discover_root, load_statuses};
 use crate::backend::search::{search_repo, text_query, word_query, Hit};
 use crate::backend::symbols::{build_index, find_definitions, Symbol};
@@ -50,24 +50,37 @@ pub enum BottomPanel {
     },
 }
 
-/// What the explorer and viewer are showing: the local working tree, or a pull
-/// request fetched from GitHub.
+/// What the explorer and viewer are showing: the local working tree, a pull
+/// request fetched from GitHub, or a GitHub repository browsed on its own.
 #[derive(Clone, PartialEq)]
 pub enum Workspace {
     Local,
     Pr(Box<PrDetail>),
+    /// A repository with no pull request in view — because it has none open,
+    /// or because reading the code is the point.
+    Repo(Box<RepoView>),
 }
 
 impl Workspace {
     pub fn pr(&self) -> Option<&PrDetail> {
         match self {
             Workspace::Pr(pr) => Some(pr),
-            Workspace::Local => None,
+            _ => None,
         }
     }
 
-    pub fn is_pr(&self) -> bool {
-        matches!(self, Workspace::Pr(_))
+    pub fn repo(&self) -> Option<&RepoView> {
+        match self {
+            Workspace::Repo(view) => Some(view),
+            _ => None,
+        }
+    }
+
+    /// Anything read from GitHub rather than from the working tree. The two
+    /// remote cases share a file cache, a source and a scan root, so most of
+    /// the app only needs to know which side of this line it is on.
+    pub fn is_remote(&self) -> bool {
+        !matches!(self, Workspace::Local)
     }
 }
 
@@ -204,9 +217,9 @@ impl St {
     }
 
     pub fn refresh(&self) {
-        // A pull request is a fixed snapshot; reloading git status would
+        // What came from GitHub is a fixed snapshot; reloading git status would
         // replace its file list with the local working tree's.
-        if self.workspace.peek().is_pr() {
+        if self.workspace.peek().is_remote() {
             return;
         }
         let root = self.root_path();
@@ -259,20 +272,20 @@ impl St {
     /// browsable too, just without statuses or diffs.
     pub fn open_repo(&self, path: PathBuf) {
         let root = discover_root(&path).unwrap_or(path);
-        if root == *self.root.peek() && !self.workspace.peek().is_pr() {
+        if root == *self.root.peek() && !self.workspace.peek().is_remote() {
             self.refresh();
             return;
         }
         let mut r = self.root;
         r.set(root.clone());
 
-        self.leave_pr_state();
+        self.leave_remote_state();
         self.clear_view();
 
         self.refresh();
     }
 
-    fn leave_pr_state(&self) {
+    fn leave_remote_state(&self) {
         let mut ws = self.workspace;
         ws.set(Workspace::Local);
         let mut cache = self.pr_files;
@@ -288,15 +301,32 @@ impl St {
     /// made; it takes the place of the working tree for search and the symbol
     /// index, so those work on a pull request exactly as they do locally.
     pub fn enter_pr(&self, pr: PrDetail, source: PrSource, checkout: ScanRoot) {
-        // Loading the pull request that is already open is a reload, so keep
-        // the file being read and the tree as it was expanded — resetting the
-        // view out from under someone who asked for fresh data is not what
-        // they asked for. Only what describes the old commit is dropped.
         let reload = self
             .workspace
             .peek()
             .pr()
             .is_some_and(|open| open.repo == pr.repo && open.number == pr.number);
+        self.enter_remote(Workspace::Pr(Box::new(pr)), reload, source, checkout);
+    }
+
+    /// Show a repository on its own — no pull request, so no changed files and
+    /// no diffs, just the code at `view.head_sha`.
+    pub fn enter_repo(&self, view: RepoView, source: PrSource, checkout: ScanRoot) {
+        let reload = self
+            .workspace
+            .peek()
+            .repo()
+            .is_some_and(|open| open.repo == view.repo);
+        self.enter_remote(Workspace::Repo(Box::new(view)), reload, source, checkout);
+    }
+
+    /// Swap in something fetched from GitHub, whichever kind it is.
+    ///
+    /// `reload` means the same thing is already open, so the file being read
+    /// and the tree as it was expanded are kept — resetting the view out from
+    /// under someone who asked for fresh data is not what they asked for. Only
+    /// what describes the old commit is dropped.
+    fn enter_remote(&self, ws: Workspace, reload: bool, source: PrSource, checkout: ScanRoot) {
         if reload {
             let mut sel = self.selected;
             sel.set(None);
@@ -313,9 +343,10 @@ impl St {
         src.set(source);
         self.set_scan_root(checkout);
         let mut statuses = self.statuses;
-        statuses.set(statuses_of(&pr.files));
-        let mut ws = self.workspace;
-        ws.set(Workspace::Pr(Box::new(pr)));
+        // A repository browsed on its own has nothing changed in it.
+        statuses.set(ws.pr().map(|pr| statuses_of(&pr.files)).unwrap_or_default());
+        let mut w = self.workspace;
+        w.set(ws);
         let mut gh = self.gh_open;
         gh.set(false);
         let mut tick = self.refresh_tick;
@@ -324,8 +355,8 @@ impl St {
     }
 
     /// Back to the local working tree.
-    pub fn leave_pr(&self) {
-        self.leave_pr_state();
+    pub fn leave_remote(&self) {
+        self.leave_remote_state();
         self.clear_view();
         self.refresh();
     }
@@ -497,13 +528,18 @@ pub fn App() -> Element {
     let tree: Memo<Option<FileNode>> = use_memo(move || {
         st.refresh_tick.read();
         let statuses = st.statuses.read().clone();
-        let root = match st.workspace.read().pr() {
-            Some(pr) => build_tree_from_paths(
+        let root = match &*st.workspace.read() {
+            Workspace::Pr(pr) => build_tree_from_paths(
                 &format!("{} #{}", pr.repo, pr.number),
                 pr.tree.iter().map(|p| p.as_path()),
                 &statuses,
             ),
-            None => build_tree(&st.root.read(), &statuses),
+            Workspace::Repo(view) => build_tree_from_paths(
+                &format!("{} @ {}", view.repo, view.branch),
+                view.tree.iter().map(|p| p.as_path()),
+                &statuses,
+            ),
+            Workspace::Local => build_tree(&st.root.read(), &statuses),
         };
         if *st.changes_only.read() {
             filter_changed(&root)

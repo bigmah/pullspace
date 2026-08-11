@@ -166,14 +166,61 @@ pub struct LocalRepo {
     pub borrowed: bool,
 }
 
-/// Make `sha` readable from a repository on disk.
-///
-/// Prefers a clone the user already has. Fetching `pull/N/head` also brings
-/// its whole ancestry, which includes the merge base — so one fetch makes both
-/// sides of the diff readable.
+/// A ref on the remote, and the leaf under [`REF_NS`] it is parked at locally.
+struct Wanted {
+    src: String,
+    leaf: String,
+}
+
+/// A pull request's head. Fetching it also brings its whole ancestry, which
+/// includes the merge base — so one fetch makes both sides of the diff readable.
+fn pr_ref(repo: &RepoRef, number: u64) -> Wanted {
+    Wanted {
+        src: format!("refs/pull/{number}/head"),
+        leaf: format!("{}/{}/pr/{number}", safe(&repo.owner), safe(&repo.name)),
+    }
+}
+
+/// A branch, for browsing a repository with no pull request involved.
+fn branch_ref(repo: &RepoRef, branch: &str) -> Wanted {
+    Wanted {
+        src: format!("refs/heads/{branch}"),
+        leaf: format!(
+            "{}/{}/branch/{}",
+            safe(&repo.owner),
+            safe(&repo.name),
+            safe(branch),
+        ),
+    }
+}
+
+/// Make a pull request's `sha` readable from a repository on disk.
 pub fn prepare(
     repo: &RepoRef,
     number: u64,
+    sha: &str,
+    token: &str,
+    own_clone: Option<&Path>,
+) -> Result<LocalRepo> {
+    prepare_ref(repo, &pr_ref(repo, number), sha, token, own_clone)
+}
+
+/// [`prepare`] for a branch tip: what opening a repository on its own needs.
+pub fn prepare_branch(
+    repo: &RepoRef,
+    branch: &str,
+    sha: &str,
+    token: &str,
+    own_clone: Option<&Path>,
+) -> Result<LocalRepo> {
+    prepare_ref(repo, &branch_ref(repo, branch), sha, token, own_clone)
+}
+
+/// Make `sha` readable from a repository on disk, fetching `want` if it is not
+/// there already. Prefers a clone the user already has.
+fn prepare_ref(
+    repo: &RepoRef,
+    want: &Wanted,
     sha: &str,
     token: &str,
     own_clone: Option<&Path>,
@@ -182,7 +229,7 @@ pub fn prepare(
         && is_clone_of(root, repo)
         && let Ok(git_dir) = git_dir_of(root)
     {
-        ensure_commit(&git_dir, repo, number, sha, token)?;
+        ensure_commit(&git_dir, repo, want, sha, token)?;
         return Ok(LocalRepo {
             git_dir,
             borrowed: true,
@@ -195,7 +242,7 @@ pub fn prepare(
         evict_to_fit(&[mirror_key(repo)]);
         clone_mirror(repo, &dir, token)?;
     }
-    ensure_commit(&dir, repo, number, sha, token)?;
+    ensure_commit(&dir, repo, want, sha, token)?;
     touch(repo, &dir);
     Ok(LocalRepo {
         git_dir: dir,
@@ -220,7 +267,7 @@ fn clone_mirror(repo: &RepoRef, dir: &Path, token: &str) -> Result<()> {
 fn ensure_commit(
     git_dir: &Path,
     repo: &RepoRef,
-    number: u64,
+    want: &Wanted,
     sha: &str,
     token: &str,
 ) -> Result<()> {
@@ -229,17 +276,13 @@ fn ensure_commit(
     }
     let dir_s = git_dir.to_string_lossy().into_owned();
     let url = clone_url(repo);
-    let refspec = format!(
-        "+refs/pull/{number}/head:{REF_NS}/{}/{}/pr/{number}",
-        safe(&repo.owner),
-        safe(&repo.name),
-    );
+    let refspec = format!("+{}:{REF_NS}/{}", want.src, want.leaf);
     git(
         &["-C", &dir_s, "fetch", "--no-tags", "--quiet", &url, &refspec],
         token,
     )?;
     if !has_commit(git_dir, sha) {
-        bail!("fetched pull request #{number} but commit {sha} is still missing");
+        bail!("fetched {} but commit {sha} is still missing", want.src);
     }
     Ok(())
 }
@@ -697,6 +740,22 @@ mod tests {
         assert!(!REF_NS.starts_with("refs/heads"));
         assert!(!REF_NS.starts_with("refs/remotes"));
         assert!(!REF_NS.starts_with("refs/tags"));
+    }
+
+    #[test]
+    fn pull_requests_and_branches_land_on_different_refs() {
+        let r = repo("Owner", "Name");
+        let pr = pr_ref(&r, 7);
+        let branch = branch_ref(&r, "main");
+        assert_eq!(pr.src, "refs/pull/7/head");
+        assert_eq!(branch.src, "refs/heads/main");
+        // Parking a branch must not overwrite a pull request of the same repo.
+        assert_ne!(pr.leaf, branch.leaf);
+        // A branch name with a slash is fetched as written, but flattened on
+        // the way into our namespace so it cannot add levels of its own.
+        let nested = branch_ref(&r, "feat/thing");
+        assert_eq!(nested.src, "refs/heads/feat/thing");
+        assert_eq!(nested.leaf, "Owner/Name/branch/feat-thing");
     }
 
     #[test]

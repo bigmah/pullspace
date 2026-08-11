@@ -56,12 +56,12 @@ pub fn Viewer() -> Element {
         }
     });
 
-    // In PR mode the open file usually arrives already warmed, from the
+    // On a pull request the open file usually arrives already warmed, from the
     // background prefetch or the tree's hover handler. This covers the rest —
     // and is a no-op when the content is cached or on its way.
     use_effect(move || {
         let rel = st.open.read().clone();
-        if !st.workspace.read().is_pr() {
+        if !st.workspace.read().is_remote() {
             return;
         }
         if let Some(rel) = rel {
@@ -75,7 +75,7 @@ pub fn Viewer() -> Element {
         let Some(rel) = st.open.read().clone() else {
             return Pane::Empty;
         };
-        if st.workspace.read().is_pr() {
+        if st.workspace.read().is_remote() {
             return match st.pr_files.read().get(&rel) {
                 None | Some(PrFileState::Loading) => Pane::Loading,
                 Some(PrFileState::Failed(e)) => Pane::Failed(e.clone()),

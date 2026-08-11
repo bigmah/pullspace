@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 
 use dioxus::prelude::*;
 
-use crate::backend::github::{file_at, find_file, PrDetail, RepoRef};
+use crate::backend::github::{file_at, find_file, PrDetail, RepoRef, RepoView};
 use crate::backend::mirror;
 use crate::backend::tree::ChangeKind;
 use crate::backend::FileContent;
@@ -46,6 +46,19 @@ impl FetchJob {
             path: rel.to_path_buf(),
             base_path: f.map_or_else(|| rel.to_path_buf(), |f| f.base_path().clone()),
             status: f.map(|f| f.status),
+        }
+    }
+
+    /// For a path in a repository being browsed on its own. Nothing is changed
+    /// here, so there is only ever one side to read.
+    pub fn browsing(view: &RepoView, rel: &Path) -> Self {
+        FetchJob {
+            repo: view.repo.clone(),
+            base_sha: String::new(),
+            head_sha: view.head_sha.clone(),
+            path: rel.to_path_buf(),
+            base_path: rel.to_path_buf(),
+            status: None,
         }
     }
 }
@@ -123,12 +136,16 @@ pub fn ensure_file(st: St, job: FetchJob) {
     });
 }
 
-/// [`ensure_file`] for callers that only have a path. A no-op outside PR mode.
+/// [`ensure_file`] for callers that only have a path. A no-op on the local
+/// working tree, whose files are read straight off disk.
 pub fn ensure_path(st: St, rel: &Path) {
     let job = {
         let ws = st.workspace.peek();
-        let Some(pr) = ws.pr() else { return };
-        FetchJob::new(pr, rel)
+        match (ws.pr(), ws.repo()) {
+            (Some(pr), _) => FetchJob::new(pr, rel),
+            (_, Some(view)) => FetchJob::browsing(view, rel),
+            _ => return,
+        }
     };
     ensure_file(st, job);
 }

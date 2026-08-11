@@ -115,6 +115,10 @@ body {
   background: var(--bg-1);
   border-right: 1px solid var(--border);
   min-height: 0;
+  /* The explorer is a list of things to click, not prose. Left on `auto` the
+     webview hands back an I-beam over every label in it. */
+  cursor: default;
+  user-select: none;
 }
 
 .side-hdr {
@@ -132,9 +136,11 @@ body {
   color: var(--fg-faint);
 }
 
-.tree { overflow-y: auto; flex: 1; padding-bottom: 20px; }
+/* Every row in here opens something, so the whole strip reads as clickable —
+   including the indent to the left of a name and the gap below the last row. */
+.tree { overflow-y: auto; flex: 1; padding-bottom: 20px; cursor: pointer; }
 
-.tree-empty { color: var(--fg-faint); padding: 14px; font-size: 12px; }
+.tree-empty { color: var(--fg-faint); padding: 14px; font-size: 12px; cursor: default; }
 
 .row {
   display: flex;

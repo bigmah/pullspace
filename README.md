@@ -24,8 +24,9 @@ IDE-ish niceties:
 - **Find References** — whole-word search for the clicked identifier across
   the repo.
 - Jumped-to lines scroll into view and flash.
-- **GitHub pull requests** — sign in once, then review any PR in the same two
-  panes. See [Reviewing GitHub pull requests](#reviewing-github-pull-requests).
+- **GitHub pull requests** — sign in once, search for a repository by name, and
+  review any of its PRs in the same two panes. See
+  [Reviewing GitHub pull requests](#reviewing-github-pull-requests).
 
 ## Running
 
@@ -47,8 +48,14 @@ reviewing one.
 
 ## Reviewing GitHub pull requests
 
-The top-bar chip on the right opens the GitHub panel. Type `owner/repo` to list
-its open pull requests, or paste a pull request URL to jump straight to one.
+The top-bar chip on the right opens the GitHub panel. Type part of a repository
+name and pick it from the results — `↑`/`↓` and `Enter`, or click — to list its
+open pull requests. With the box empty it offers your own repositories, most
+recently pushed first, so the usual ones are one click away.
+
+Nothing has to be typed in full: `owner/repo` still works, an exact one is
+pinned to the top of the results, and pasting a pull request URL jumps straight
+to that PR.
 
 The explorer then shows the **whole repository** at the PR's head commit, just
 like a local checkout: changed files carry the usual `M`/`A`/`D`/`R` badges,
@@ -162,7 +169,7 @@ src/
   backend/          UI-agnostic engine
     mod.rs          FileContent: one side of a diff, whatever its source
     auth.rs         GitHub device flow, token storage & discovery
-    github.rs       GitHub REST: PR lists, PR files, blob content
+    github.rs       GitHub REST: repo search, PR lists, PR files, blob content
     mirror.rs       local clones, bare mirrors, checkouts; git2 object reads
     gitio.rs        git2: repo discovery, statuses, HEAD blob content
     tree.rs         file-tree model built from the worktree + git status
@@ -172,7 +179,7 @@ src/
     search.rs       repo-wide text/word search (ignore walker)
   ui/               Dioxus components
     app.rs          state (signals + context), root layout
-    github.rs       sign-in and pull request picker overlay
+    github.rs       sign-in, repository search, pull request picker overlay
     prcache.rs      PR file cache: prefetch, hover warming, source choice
     topbar.rs       brand, search, index status, account chip, refresh
     filetree.rs     recursive tree with status badges

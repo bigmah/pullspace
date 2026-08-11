@@ -9,7 +9,8 @@ use crate::backend::auth::{
     Token, TokenSource,
 };
 use crate::backend::github::{
-    list_prs, load_pr, parse_target, repo_tree, viewer_login, PrSummary, RepoRef,
+    list_prs, load_pr, my_repos, parse_target, repo_tree, search_repos, viewer_login, PrSummary,
+    RepoHit, RepoRef,
 };
 use crate::backend::mirror;
 
@@ -377,8 +378,6 @@ async fn finish_sign_in(st: St, token: String) {
 #[component]
 fn SignedIn(login: String, source: TokenSource) -> Element {
     let st = use_context::<St>();
-    let mut repo_input = st.repo_input;
-    let repo_value = repo_input.read().clone();
     let prs = st.prs.read().clone();
     let revocable = source.revocable();
 
@@ -395,35 +394,11 @@ fn SignedIn(login: String, source: TokenSource) -> Element {
                 }
             }
         }
-        div { class: "ghsection",
-            div { class: "ghlabel", "Repository or pull request" }
-            div { class: "ghrow",
-                input {
-                    class: "ghinput",
-                    r#type: "text",
-                    placeholder: "owner/repo  ·  or a link to a pull request",
-                    spellcheck: "false",
-                    value: "{repo_value}",
-                    oninput: move |e| repo_input.set(e.value()),
-                    // Root scope so closing the panel mid-load does not strand
-                    // the list on "Loading…".
-                    onkeydown: move |e| {
-                        if e.key() == Key::Enter {
-                            spawn_forever(open_target(st));
-                        }
-                    },
-                }
-                button {
-                    class: "primarybtn",
-                    onclick: move |_| { spawn_forever(open_target(st)); },
-                    "Load"
-                }
-            }
-        }
+        RepoPicker {}
         div { class: "ghsection prsection",
             match prs {
                 PrList::Idle => rsx! {
-                    div { class: "ghnote", "Enter a repository to list its open pull requests." }
+                    div { class: "ghnote", "Pick a repository to list its open pull requests." }
                 },
                 PrList::Loading(note) => rsx! { div { class: "ghnote", "{note}" } },
                 PrList::Failed(e) => rsx! { div { class: "gherror", "{e}" } },
@@ -438,6 +413,239 @@ fn SignedIn(login: String, source: TokenSource) -> Element {
                         }
                     }
                 },
+            }
+        }
+    }
+}
+
+// ------------------------------------------------------------- repo picker
+
+/// How many repositories to offer at once. Enough to recognise the one you
+/// meant, few enough that the list stays a glance rather than a second search.
+const SUGGESTION_LIMIT: u32 = 8;
+
+/// Long enough that typing a repository name costs one request, not eight.
+const SEARCH_DEBOUNCE: Duration = Duration::from_millis(250);
+
+/// What the last lookup turned up, and what it was looking for.
+///
+/// The query travels with the results because the box runs ahead of them: it is
+/// the only way the list can tell "nothing matches this" from "the answer for
+/// what you have typed is still on its way".
+#[derive(Clone, PartialEq)]
+struct Suggestions {
+    query: String,
+    items: Vec<RepoHit>,
+    error: Option<String>,
+}
+
+/// The suggestions on offer, read from outside the render pass.
+fn suggested(found: &Resource<Option<Suggestions>>) -> Vec<RepoHit> {
+    match &*found.peek() {
+        Some(Some(s)) => s.items.clone(),
+        _ => Vec::new(),
+    }
+}
+
+/// Take a repository from the list: put its name in the box, close the list,
+/// and show its open pull requests.
+fn choose(st: St, mut open: Signal<bool>, repo: RepoRef) {
+    let mut input = st.repo_input;
+    input.set(repo.to_string());
+    open.set(false);
+    // Root scope: closing the list unmounts the row that was clicked.
+    spawn_forever(load_repo_prs(st, repo));
+}
+
+/// Star counts run long, and the exact number is not what anyone reads.
+fn stars_label(stars: u64) -> String {
+    match stars {
+        0 => String::new(),
+        n if n < 1000 => n.to_string(),
+        n if n < 100_000 => format!("{:.1}k", n as f64 / 1000.0),
+        n => format!("{}k", n / 1000),
+    }
+}
+
+/// The repository box: type a name and pick from what GitHub matches, or paste
+/// an `owner/repo` or pull request link straight in.
+///
+/// Searching is what the box is for — a link is the fallback, not the price of
+/// entry. With nothing typed it offers the account's own repositories, since
+/// the pull requests you have been asked to look at are nearly always on one.
+#[component]
+fn RepoPicker() -> Element {
+    let st = use_context::<St>();
+    let mut repo_input = st.repo_input;
+    let typed = repo_input.read().clone();
+
+    // The list is only up while a repository is being chosen. Picking one, or
+    // pressing Load, puts it away rather than leaving half the panel covered by
+    // results nobody is reading any more.
+    let mut open = use_signal(|| false);
+    let mut highlight = use_signal(|| 0usize);
+
+    let found = use_resource(move || {
+        // Read the dependencies here, in the synchronous part: a change to
+        // either cancels the lookup in flight and starts the next one.
+        let showing = *open.read();
+        let query = st.repo_input.read().trim().to_string();
+        let token = st.api_token();
+        async move {
+            if !showing {
+                return None;
+            }
+            // Debounce: the next keystroke drops this task where it stands, so
+            // nothing reaches GitHub until the typing stops.
+            tokio::time::sleep(SEARCH_DEBOUNCE).await;
+            let q = query.clone();
+            let hits = tokio::task::spawn_blocking(move || {
+                if q.is_empty() {
+                    my_repos(&token, SUGGESTION_LIMIT)
+                } else {
+                    search_repos(&token, &q, SUGGESTION_LIMIT)
+                }
+            })
+            .await;
+            Some(match hits {
+                Ok(Ok(items)) => Suggestions {
+                    query,
+                    items,
+                    error: None,
+                },
+                Ok(Err(e)) => Suggestions {
+                    query,
+                    items: Vec::new(),
+                    error: Some(format!("{e:#}")),
+                },
+                Err(e) => Suggestions {
+                    query,
+                    items: Vec::new(),
+                    error: Some(e.to_string()),
+                },
+            })
+        }
+    });
+
+    let showing = *open.read();
+    let current = found.cloned().flatten();
+    let settled = current.as_ref().is_some_and(|s| s.query == typed.trim());
+    let items = current.as_ref().map(|s| s.items.clone()).unwrap_or_default();
+    let error = current.as_ref().and_then(|s| s.error.clone());
+    let hi = (*highlight.read()).min(items.len().saturating_sub(1));
+
+    rsx! {
+        div { class: "ghsection",
+            div { class: "ghlabel", "Repository or pull request" }
+            div { class: "ghrow",
+                input {
+                    class: "ghinput",
+                    r#type: "text",
+                    placeholder: "search repositories · owner/repo · or a link to a pull request",
+                    spellcheck: "false",
+                    autocomplete: "off",
+                    value: "{typed}",
+                    onfocus: move |_| open.set(true),
+                    oninput: move |e| {
+                        repo_input.set(e.value());
+                        open.set(true);
+                        highlight.set(0);
+                    },
+                    onkeydown: move |e| {
+                        // Whatever is on screen, rather than the render that
+                        // produced this handler — the list moves under it.
+                        let items = suggested(&found);
+                        let at = (*highlight.peek()).min(items.len().saturating_sub(1));
+                        match e.key() {
+                            Key::ArrowDown if !items.is_empty() => {
+                                e.prevent_default();
+                                highlight.set((at + 1).min(items.len() - 1));
+                            }
+                            Key::ArrowUp if !items.is_empty() => {
+                                e.prevent_default();
+                                highlight.set(at.saturating_sub(1));
+                            }
+                            Key::Escape => open.set(false),
+                            Key::Enter => match items.get(at) {
+                                // What is highlighted in the list wins…
+                                Some(hit) => choose(st, open, hit.repo.clone()),
+                                // …but a pasted link, or a name typed out in
+                                // full, never needed the list. Root scope so
+                                // closing the panel mid-load does not strand
+                                // it on "Loading…".
+                                None => {
+                                    open.set(false);
+                                    spawn_forever(open_target(st));
+                                }
+                            },
+                            _ => {}
+                        }
+                    },
+                }
+                button {
+                    class: "primarybtn",
+                    onclick: move |_| {
+                        open.set(false);
+                        spawn_forever(open_target(st));
+                    },
+                    "Load"
+                }
+            }
+            if showing {
+                if let Some(e) = error {
+                    div { class: "gherror", "{e}" }
+                } else if !items.is_empty() {
+                    div { class: "repolist",
+                        for (i , hit) in items.iter().enumerate() {
+                            RepoRow { key: "{hit.repo}", hit: hit.clone(), active: i == hi, open }
+                        }
+                    }
+                } else if !settled {
+                    div { class: "ghnote", "Searching GitHub…" }
+                } else if typed.trim().is_empty() {
+                    div { class: "ghnote",
+                        "Type a name to search GitHub, or paste a link to a pull request."
+                    }
+                } else {
+                    div { class: "ghnote", "No repositories match “{typed}”." }
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn RepoRow(hit: RepoHit, active: bool, open: Signal<bool>) -> Element {
+    let st = use_context::<St>();
+    let repo = hit.repo.clone();
+    let class = if active { "repoitem on" } else { "repoitem" };
+    let stars = stars_label(hit.stars);
+    rsx! {
+        div {
+            class: "{class}",
+            onclick: move |_| choose(st, open, repo.clone()),
+            div { class: "repotop",
+                span { class: "reponame", "{hit.repo}" }
+                if hit.private {
+                    span { class: "repotag", "private" }
+                }
+                if hit.fork {
+                    span { class: "repotag", "fork" }
+                }
+                if hit.archived {
+                    span { class: "repotag", "archived" }
+                }
+                if !stars.is_empty() {
+                    span { class: "repostars", "★ {stars}" }
+                }
+            }
+            // The date is the fallback rather than a second line: for the
+            // account's own repositories — often private and undescribed — how
+            // recently one moved is exactly what picks it out of the list.
+            if !hit.description.is_empty() {
+                div { class: "repodesc", "{hit.description}" }
+            } else if !hit.pushed.is_empty() {
+                div { class: "repodesc", "pushed {hit.pushed}" }
             }
         }
     }
@@ -483,15 +691,21 @@ async fn open_target(st: St) {
     let mut prs = st.prs;
     let Some((repo, number)) = parse_target(&raw) else {
         prs.set(PrList::Failed(
-            "Enter owner/repo, or paste a GitHub URL.".to_string(),
+            "That is not a repository — pick one from the list, or paste a GitHub link."
+                .to_string(),
         ));
         return;
     };
     if let Some(number) = number {
         return open_pr(st, repo, number).await;
     }
+    load_repo_prs(st, repo).await;
+}
 
+/// Show a repository's open pull requests.
+async fn load_repo_prs(st: St, repo: RepoRef) {
     let token = st.api_token();
+    let mut prs = st.prs;
     prs.set(PrList::Loading("Loading pull requests…".to_string()));
     let target = repo.clone();
     match tokio::task::spawn_blocking(move || list_prs(&token, &target)).await {

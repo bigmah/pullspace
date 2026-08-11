@@ -170,6 +170,141 @@ pub fn viewer_login(token: &str) -> Result<String> {
     Ok(user.login)
 }
 
+// ----------------------------------------------------------- finding a repo
+
+#[derive(Deserialize)]
+struct RawRepo {
+    full_name: String,
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(default)]
+    private: bool,
+    #[serde(default)]
+    fork: bool,
+    #[serde(default)]
+    archived: bool,
+    #[serde(default)]
+    stargazers_count: u64,
+    #[serde(default)]
+    pushed_at: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct RawSearch {
+    #[serde(default)]
+    items: Vec<RawRepo>,
+}
+
+/// A repository offered as a suggestion in the picker.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct RepoHit {
+    pub repo: RepoRef,
+    pub description: String,
+    pub private: bool,
+    pub fork: bool,
+    pub archived: bool,
+    pub stars: u64,
+    /// `YYYY-MM-DD` of the last push, empty when GitHub did not say.
+    pub pushed: String,
+}
+
+/// `full_name` is the only field we cannot do without — everything else is
+/// decoration, so a response missing it is the one that gets dropped.
+fn hit_of(raw: RawRepo) -> Option<RepoHit> {
+    let (owner, name) = raw.full_name.split_once('/')?;
+    if owner.is_empty() || name.is_empty() {
+        return None;
+    }
+    Some(RepoHit {
+        repo: RepoRef {
+            owner: owner.to_string(),
+            name: name.to_string(),
+        },
+        description: raw.description.unwrap_or_default(),
+        private: raw.private,
+        fork: raw.fork,
+        archived: raw.archived,
+        stars: raw.stargazers_count,
+        // The rest of the timestamp is the time of day, which says nothing
+        // useful about how current a repository is.
+        pushed: raw
+            .pushed_at
+            .map(|d| d.chars().take(10).collect())
+            .unwrap_or_default(),
+    })
+}
+
+/// Repositories matching free text, best match first — so a repository can be
+/// found by name rather than pasted as a link.
+///
+/// An exact `owner/name` is looked up directly as well and pinned to the top:
+/// search runs off an index that a brand-new, renamed or private repository may
+/// not be in yet, and the name typed in full is not a guess to be ranked.
+pub fn search_repos(token: &str, query: &str, limit: u32) -> Result<Vec<RepoHit>> {
+    let q = query.trim();
+    if q.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut out = Vec::new();
+    if let Some((repo, _)) = parse_target(q) {
+        let url = format!(
+            "{API}/repos/{}/{}",
+            encode_segment(&repo.owner),
+            encode_segment(&repo.name),
+        );
+        // A 404 here is the ordinary case — half of a repository name typed so
+        // far is not a repository — so the error is the answer, not a failure.
+        if let Ok(raw) = get_json::<RawRepo>(token, &url) {
+            out.extend(hit_of(raw));
+        }
+    }
+    // A complete name that resolves is the answer. Searching for it as well
+    // would bury it under near-misses, and a pasted URL would go to the index
+    // as `https github com owner name pull 3`.
+    if !out.is_empty() && q.contains('/') {
+        return Ok(out);
+    }
+
+    // GitHub's index does not read `owner/name` as a path, so the slash is only
+    // noise in the query that reaches it.
+    let text = q.replace('/', " ");
+    let url = format!(
+        "{API}/search/repositories?q={}&per_page={limit}",
+        encode_segment(text.trim()),
+    );
+    match get_json::<RawSearch>(token, &url) {
+        Ok(raw) => {
+            for hit in raw.items.into_iter().filter_map(hit_of) {
+                if !out.iter().any(|h: &RepoHit| h.repo == hit.repo) {
+                    out.push(hit);
+                }
+            }
+        }
+        // Search has its own, much smaller rate limit than the rest of the API.
+        // Spending it should not cost us a repository already in hand.
+        Err(e) if out.is_empty() => return Err(e),
+        Err(_) => {}
+    }
+    out.truncate(limit as usize);
+    Ok(out)
+}
+
+/// The signed-in account's repositories, most recently pushed first — what the
+/// picker offers before anything is typed, since the pull requests you are
+/// asked to review are nearly always on one of them.
+pub fn my_repos(token: &str, limit: u32) -> Result<Vec<RepoHit>> {
+    if token.is_empty() {
+        return Ok(Vec::new());
+    }
+    let url = format!(
+        "{API}/user/repos?sort=pushed&direction=desc&per_page={limit}\
+         &affiliation=owner,collaborator,organization_member"
+    );
+    let raw: Vec<RawRepo> = get_json(token, &url)?;
+    Ok(raw.into_iter().filter_map(hit_of).collect())
+}
+
 #[derive(Deserialize)]
 struct RawRef {
     #[serde(rename = "ref")]
@@ -507,6 +642,35 @@ mod tests {
     }
 
     #[test]
+    fn search_hits_split_the_full_name() {
+        let raw: RawRepo = serde_json::from_str(
+            r#"{"full_name":"DioxusLabs/dioxus","description":"Fullstack UI",
+                "private":false,"fork":false,"archived":false,
+                "stargazers_count":21000,"pushed_at":"2026-08-01T12:33:04Z"}"#,
+        )
+        .unwrap();
+        let hit = hit_of(raw).unwrap();
+        assert_eq!(hit.repo.to_string(), "DioxusLabs/dioxus");
+        assert_eq!(hit.stars, 21000);
+        // The time of day is dropped; the date is what the row shows.
+        assert_eq!(hit.pushed, "2026-08-01");
+    }
+
+    #[test]
+    fn search_hits_survive_a_bare_response() {
+        // Everything but `full_name` is optional, and a hit without one is not
+        // a repository we could open.
+        let raw: RawRepo = serde_json::from_str(r#"{"full_name":"owner/name"}"#).unwrap();
+        let hit = hit_of(raw).unwrap();
+        assert_eq!(hit.repo.to_string(), "owner/name");
+        assert!(hit.description.is_empty());
+        assert!(hit.pushed.is_empty());
+
+        let orphan: RawRepo = serde_json::from_str(r#"{"full_name":"no-slash"}"#).unwrap();
+        assert!(hit_of(orphan).is_none());
+    }
+
+    #[test]
     fn encodes_awkward_paths() {
         assert_eq!(encode_path("src/main.rs"), "src/main.rs");
         assert_eq!(encode_path("a b/c#d.rs"), "a%20b/c%23d.rs");
@@ -583,6 +747,24 @@ mod tests {
         let base = file_at("", &repo, &pr.base_sha, f.base_path()).expect("base side");
         // Absent is legitimate here — it just means the file was added.
         let _ = base;
+    }
+
+    /// Also hits the network: `cargo test -- --ignored live_repo_search`.
+    #[test]
+    #[ignore = "hits the network"]
+    fn live_repo_search() {
+        // A name, not a link — the whole point of the picker's search box.
+        let hits = search_repos("", "dioxus", 8).expect("search");
+        assert!(!hits.is_empty(), "a common name finds something");
+        assert!(
+            hits.iter().any(|h| h.repo.name.contains("dioxus")),
+            "results are actually about the query: {hits:?}"
+        );
+
+        // A complete name resolves exactly, and answers with itself alone.
+        let exact = search_repos("", "DioxusLabs/dioxus", 8).expect("exact");
+        assert_eq!(exact.len(), 1);
+        assert_eq!(exact[0].repo.to_string(), "DioxusLabs/dioxus");
     }
 
     #[test]

@@ -13,7 +13,7 @@ use crate::backend::github::{
 };
 use crate::backend::mirror;
 
-use super::app::{Account, PrList, PrSource, St};
+use super::app::{Account, PrList, PrSource, ScanRoot, St};
 
 /// Docs for creating the OAuth app this needs.
 const NEW_APP_URL: &str = "https://github.com/settings/applications/new";
@@ -58,24 +58,36 @@ pub fn GhPanel() -> Element {
     }
 }
 
-/// Mirrored repositories are the one thing pullspace keeps on disk that the
+/// Mirrors and checkouts are the one thing pullspace keeps on disk that the
 /// user might want back, so show the size and offer to drop it.
 #[component]
 fn CacheFooter() -> Element {
     let mut cleared = use_signal(|| false);
-    let (bytes, repos) = use_memo(move || {
+    let stats = use_memo(move || {
         cleared.read();
         mirror::cache_stats()
     })();
 
-    if repos == 0 {
+    if stats.is_empty() {
         return rsx! {};
     }
-    let label = format!(
-        "Mirrored {repos} {} · {}",
-        if repos == 1 { "repository" } else { "repositories" },
-        mirror::human_bytes(bytes),
-    );
+    let mut parts = Vec::new();
+    if stats.repos > 0 {
+        parts.push(format!(
+            "Mirrored {} {}",
+            stats.repos,
+            if stats.repos == 1 { "repository" } else { "repositories" },
+        ));
+    }
+    if stats.checkouts > 0 {
+        parts.push(format!(
+            "{} {}",
+            stats.checkouts,
+            if stats.checkouts == 1 { "checkout" } else { "checkouts" },
+        ));
+    }
+    parts.push(mirror::human_bytes(stats.bytes));
+    let label = parts.join(" · ");
     rsx! {
         div { class: "ghsection ghcache",
             span { class: "ghnote", "{label}" }
@@ -470,6 +482,39 @@ async fn open_pr(st: St, repo: RepoRef, number: u64) {
         detail.tree_truncated = truncated;
     }
 
+    // Check the head commit out as ordinary files, so search, Go to Definition
+    // and Find References work on a pull request exactly as they do on a local
+    // repository — they walk a directory, and this is one.
+    let checkout = match &source {
+        PrSource::Local { git_dir, .. } => {
+            prs.set(PrList::Loading(
+                "Checking out the pull request…".to_string(),
+            ));
+            let git_dir = git_dir.clone();
+            let target = repo.clone();
+            let head = detail.head_sha.clone();
+            match tokio::task::spawn_blocking(move || mirror::materialize(&git_dir, &target, &head))
+                .await
+            {
+                Ok(Ok(dir)) => ScanRoot::Dir(dir),
+                // The pull request is perfectly reviewable without a checkout,
+                // so this is not worth refusing to open it over — but it is
+                // worth saying, or search just looks broken.
+                Ok(Err(e)) => ScanRoot::Unavailable(format!(
+                    "Search is off: this pull request could not be checked out — {e:#}"
+                )),
+                Err(e) => ScanRoot::Unavailable(format!(
+                    "Search is off: the checkout did not finish — {e}"
+                )),
+            }
+        }
+        // Nothing on disk to check out of. The pull request still opens; the
+        // features that need a directory are the ones that go quiet.
+        PrSource::Api => ScanRoot::Unavailable(
+            "Search needs a local copy — this pull request is read over the GitHub API".to_string(),
+        ),
+    };
+
     prs.set(PrList::Idle);
-    st.enter_pr(detail, source);
+    st.enter_pr(detail, source, checkout);
 }

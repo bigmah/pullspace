@@ -5,6 +5,11 @@
 //! HTTP round trip. Repositories the user does not already have are mirrored
 //! under the cache directory instead, bounded by a total size cap.
 //!
+//! [`materialize`] then writes the pull request's head commit out as ordinary
+//! files. That is what lets search, the symbol index and anything else that
+//! walks a directory treat a pull request exactly like a local checkout —
+//! they take a path, and a checkout is a path.
+//!
 //! Network git goes through the `git` CLI rather than git2, because this
 //! crate's git2 is built without the `https` feature — enabling it would pull
 //! in `openssl-sys` and its build-time headaches, and anyone reviewing pull
@@ -26,10 +31,15 @@ use super::FileContent;
 /// HEAD, the index, or the working tree.
 const REF_NS: &str = "refs/pullspace";
 
-/// Total ceiling for mirrored repositories. Override with
-/// `PULLSPACE_CACHE_MAX_GB`. Clones the user already had are never counted
+/// Total ceiling for mirrored repositories and checked-out commits. Override
+/// with `PULLSPACE_CACHE_MAX_GB`. Clones the user already had are never counted
 /// against this, and never evicted — they are not ours to delete.
 const DEFAULT_CAP_GB: u64 = 5;
+
+/// Checkouts kept per repository. Reviewing tends to circle a handful of pull
+/// requests in the same repository, so keeping a few means switching back is
+/// free; keeping every commit ever reviewed would not be.
+const CHECKOUTS_PER_REPO: usize = 3;
 
 /// GitHub treats owner and repo names case-insensitively.
 fn same_repo(a: &RepoRef, b: &RepoRef) -> bool {
@@ -61,15 +71,30 @@ fn safe(component: &str) -> String {
         .collect()
 }
 
+/// Directory name for a repository. Lower-cased for the same reason
+/// [`same_repo`] ignores case: GitHub does, so `DioxusLabs/dioxus` and
+/// `dioxuslabs/dioxus` must land on one directory — and on the one index key
+/// that [`dir_for`] maps back to it.
+fn slug(repo: &RepoRef) -> String {
+    format!("{}__{}", safe(&repo.owner), safe(&repo.name)).to_lowercase()
+}
+
 fn mirror_dir(repo: &RepoRef) -> Option<PathBuf> {
-    cache_root().map(|r| {
-        r.join("repos")
-            .join(format!("{}__{}.git", safe(&repo.owner), safe(&repo.name)))
-    })
+    cache_root().map(|r| r.join("repos").join(format!("{}.git", slug(repo))))
 }
 
 fn clone_url(repo: &RepoRef) -> String {
     format!("https://github.com/{}/{}.git", repo.owner, repo.name)
+}
+
+fn checkouts_root(repo: &RepoRef) -> Option<PathBuf> {
+    cache_root().map(|r| r.join("checkouts").join(slug(repo)))
+}
+
+/// Where one commit's files live. Keyed by commit, so pushing to a pull
+/// request under review produces a new checkout rather than a stale one.
+fn checkout_dir(repo: &RepoRef, sha: &str) -> Option<PathBuf> {
+    checkouts_root(repo).map(|r| r.join(safe(sha)))
 }
 
 // --------------------------------------------------------------- git runner
@@ -167,7 +192,7 @@ pub fn prepare(
     let dir = mirror_dir(repo).ok_or_else(|| anyhow!("no cache directory available"))?;
     if !dir.join("HEAD").exists() {
         // Make room before taking more, not after.
-        evict_to_fit();
+        evict_to_fit(&[mirror_key(repo)]);
         clone_mirror(repo, &dir, token)?;
     }
     ensure_commit(&dir, repo, number, sha, token)?;
@@ -241,37 +266,182 @@ pub fn blob_at(git_dir: &Path, sha: &str, rel: &Path) -> Result<FileContent> {
     })
 }
 
+/// Every file in a tree, with the blob to read it from.
+///
+/// Blobs only: `tree` entries are directories, and `commit` entries are
+/// submodules, whose objects live in another repository entirely. Both the
+/// explorer's file list and the checkout are built from this, so they cannot
+/// disagree about what the repository contains.
+fn blob_entries(tree: &git2::Tree) -> Vec<(String, git2::Oid)> {
+    let mut out = Vec::new();
+    let _ = tree.walk(git2::TreeWalkMode::PreOrder, |dir, entry| {
+        if entry.kind() == Some(git2::ObjectType::Blob)
+            && let Ok(name) = entry.name()
+        {
+            out.push((format!("{dir}{name}"), entry.id()));
+        }
+        git2::TreeWalkResult::Ok
+    });
+    out
+}
+
 /// Every file in the repository at `sha`. Unlike the API's tree endpoint this
 /// has no size limit, so large repositories list in full.
 pub fn tree_paths(git_dir: &Path, sha: &str) -> Result<Vec<PathBuf>> {
     let repo = git2::Repository::open(git_dir)?;
     let commit = repo.find_commit(git2::Oid::from_str(sha)?)?;
-    let mut out = Vec::new();
-    commit
-        .tree()?
-        .walk(git2::TreeWalkMode::PreOrder, |dir, entry| {
-            if entry.kind() == Some(git2::ObjectType::Blob)
-                && let Ok(name) = entry.name()
-            {
-                out.push(PathBuf::from(format!("{dir}{name}")));
+    Ok(blob_entries(&commit.tree()?)
+        .into_iter()
+        .map(|(path, _)| PathBuf::from(path))
+        .collect())
+}
+
+// ------------------------------------------------------------- materialising
+
+/// Join a path that came out of the object database onto `base`, refusing
+/// anything that could climb out of it. Git will not put `..` or an absolute
+/// path in a tree, but this writes data fetched from a remote onto disk.
+fn safe_join(base: &Path, rel: &str) -> Option<PathBuf> {
+    let mut out = base.to_path_buf();
+    for part in rel.split('/') {
+        if part.is_empty() || part == "." || part == ".." || part.contains('\\') {
+            return None;
+        }
+        out.push(part);
+    }
+    Some(out)
+}
+
+/// Write the tree at `sha` into `dest` as ordinary files.
+///
+/// The blobs are written out directly rather than through libgit2's checkout,
+/// which insists on resolving submodules and needs a working tree to do it —
+/// so it refuses on a bare mirror, which is precisely what a repository the
+/// user does not already have gets. Nothing here needs submodules resolved:
+/// they are separate repositories whose objects a mirror does not have, and a
+/// pull request diffs the gitlink, never their contents. They are skipped.
+///
+/// Writing blobs also means no index is opened at all, so pointing this at a
+/// clone the user already had cannot disturb it, and the bytes on disk are the
+/// blob's own — no filters — matching what the diff views show. The executable
+/// bit is not reproduced; nothing that reads a checkout cares.
+///
+/// Written to a sibling temporary directory and renamed into place, so an
+/// interrupted checkout is never left behind looking complete.
+fn checkout_into(git_dir: &Path, sha: &str, dest: &Path) -> Result<()> {
+    let (parent, name) = dest
+        .parent()
+        .zip(dest.file_name())
+        .ok_or_else(|| anyhow!("{} is not a usable checkout path", dest.display()))?;
+    std::fs::create_dir_all(parent)?;
+    let tmp = parent.join(format!(".{}.partial", name.to_string_lossy()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp)?;
+
+    let write_all = || -> Result<()> {
+        let repo = git2::Repository::open(git_dir)?;
+        let commit = repo.find_commit(git2::Oid::from_str(sha)?)?;
+        for (rel, oid) in blob_entries(&commit.tree()?) {
+            let Some(path) = safe_join(&tmp, &rel) else {
+                continue;
+            };
+            if let Some(dir) = path.parent() {
+                std::fs::create_dir_all(dir)?;
             }
-            git2::TreeWalkResult::Ok
-        })?;
-    Ok(out)
+            let blob = repo.find_blob(oid)?;
+            std::fs::write(&path, blob.content())
+                .with_context(|| format!("writing {rel}"))?;
+        }
+        Ok(())
+    };
+    if let Err(e) = write_all() {
+        let _ = std::fs::remove_dir_all(&tmp);
+        return Err(e).with_context(|| format!("checking out {sha}"));
+    }
+    if let Err(e) = std::fs::rename(&tmp, dest) {
+        let _ = std::fs::remove_dir_all(&tmp);
+        // Losing the race with another checkout of the same commit is fine —
+        // the directory it left is the one we were about to write.
+        if !dest.is_dir() {
+            return Err(e).with_context(|| format!("moving the checkout into {}", dest.display()));
+        }
+    }
+    Ok(())
+}
+
+/// A directory holding the repository at `sha`, checked out on demand.
+///
+/// Everything that walks a working tree — search, the symbol index — takes a
+/// path, so handing it this makes a pull request behave like a local
+/// repository. Repeat visits reuse the checkout.
+pub fn materialize(git_dir: &Path, repo: &RepoRef, sha: &str) -> Result<PathBuf> {
+    let dest = checkout_dir(repo, sha).ok_or_else(|| anyhow!("no cache directory available"))?;
+    let key = checkout_key(repo, sha);
+    if dest.is_dir() {
+        touch_checkout(&key, &dest);
+        return Ok(dest);
+    }
+    // Make room before taking more, but never at the expense of the mirror
+    // this checkout is about to come out of.
+    evict_to_fit(&[key.clone(), mirror_key(repo)]);
+    checkout_into(git_dir, sha, &dest)?;
+    touch_checkout(&key, &dest);
+    prune_checkouts(repo);
+    Ok(dest)
 }
 
 // ------------------------------------------------------------ cache budget
 
 #[derive(Default, Serialize, Deserialize)]
 struct Index {
+    /// Bare mirrors, keyed `owner/repo`.
     #[serde(default)]
     repos: HashMap<String, Entry>,
+    /// Checked-out commits, keyed `owner/repo@sha`. Counted against the same
+    /// cap as the mirrors — a checkout of a large repository is not small.
+    #[serde(default)]
+    checkouts: HashMap<String, Entry>,
+}
+
+impl Index {
+    fn total(&self) -> u64 {
+        self.repos
+            .values()
+            .chain(self.checkouts.values())
+            .map(|e| e.bytes)
+            .sum()
+    }
 }
 
 #[derive(Clone, Serialize, Deserialize)]
 struct Entry {
     last_used: u64,
     bytes: u64,
+}
+
+fn mirror_key(repo: &RepoRef) -> String {
+    repo.to_string().to_lowercase()
+}
+
+fn checkout_key(repo: &RepoRef, sha: &str) -> String {
+    format!("{}@{}", mirror_key(repo), sha)
+}
+
+/// The directory an index key stands for — the inverse of the two above.
+fn dir_for(key: &str) -> Option<PathBuf> {
+    let (repo_part, sha) = match key.split_once('@') {
+        Some((repo, sha)) => (repo, Some(sha)),
+        None => (key, None),
+    };
+    let (owner, name) = repo_part.split_once('/')?;
+    let repo = RepoRef {
+        owner: owner.to_string(),
+        name: name.to_string(),
+    };
+    match sha {
+        Some(sha) => checkout_dir(&repo, sha),
+        None => mirror_dir(&repo),
+    }
 }
 
 fn index_path() -> Option<PathBuf> {
@@ -324,65 +494,136 @@ fn cap_bytes() -> u64 {
     gb * 1024 * 1024 * 1024
 }
 
-fn touch(repo: &RepoRef, dir: &Path) {
-    let mut idx = load_index();
-    idx.repos.insert(
-        repo.to_string().to_lowercase(),
+fn record(map: &mut HashMap<String, Entry>, key: String, dir: &Path) {
+    map.insert(
+        key,
         Entry {
             last_used: now(),
             bytes: dir_size(dir),
         },
     );
+}
+
+fn touch(repo: &RepoRef, dir: &Path) {
+    let mut idx = load_index();
+    record(&mut idx.repos, mirror_key(repo), dir);
     save_index(&idx);
 }
 
-/// Drop least-recently-used mirrors until the cache is under its cap.
-fn evict_to_fit() {
+fn touch_checkout(key: &str, dir: &Path) {
+    let mut idx = load_index();
+    match idx.checkouts.get_mut(key) {
+        // A checkout is one fixed commit, so its size cannot have changed —
+        // reopening a pull request should not re-walk the whole directory to
+        // learn that. Only the recency moves.
+        Some(entry) => entry.last_used = now(),
+        None => record(&mut idx.checkouts, key.to_string(), dir),
+    }
+    save_index(&idx);
+}
+
+/// Drop least-recently-used entries until the cache is under its cap.
+///
+/// Checkouts go before mirrors: replacing a checkout is a local operation
+/// against the mirror beside it, where replacing a mirror is a download.
+/// Anything in `protect` is left alone — that is what the caller is about to
+/// use, and evicting it would be undone immediately.
+fn evict_to_fit(protect: &[String]) {
     let cap = cap_bytes();
     let mut idx = load_index();
-    let mut total: u64 = idx.repos.values().map(|e| e.bytes).sum();
+    let mut total = idx.total();
     if total <= cap {
         return;
     }
 
-    let mut by_age: Vec<(String, Entry)> =
-        idx.repos.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-    by_age.sort_by_key(|(_, e)| e.last_used);
+    // (is_mirror, last_used) orders checkouts ahead of mirrors, each oldest
+    // first.
+    let mut victims: Vec<(bool, u64, String, u64)> = idx
+        .checkouts
+        .iter()
+        .map(|(k, e)| (false, e.last_used, k.clone(), e.bytes))
+        .chain(idx.repos.iter().map(|(k, e)| (true, e.last_used, k.clone(), e.bytes)))
+        .filter(|(_, _, key, _)| !protect.contains(key))
+        .collect();
+    victims.sort_by_key(|(is_mirror, last_used, _, _)| (*is_mirror, *last_used));
 
-    for (key, entry) in by_age {
+    for (is_mirror, _, key, bytes) in victims {
         if total <= cap {
             break;
         }
-        if let Some((owner, name)) = key.split_once('/') {
-            let target = RepoRef {
-                owner: owner.to_string(),
-                name: name.to_string(),
-            };
-            if let Some(dir) = mirror_dir(&target) {
-                let _ = std::fs::remove_dir_all(&dir);
-            }
+        if let Some(dir) = dir_for(&key) {
+            let _ = std::fs::remove_dir_all(&dir);
         }
-        idx.repos.remove(&key);
-        total = total.saturating_sub(entry.bytes);
+        if is_mirror {
+            idx.repos.remove(&key);
+        } else {
+            idx.checkouts.remove(&key);
+        }
+        total = total.saturating_sub(bytes);
     }
     save_index(&idx);
 }
 
-/// Total size of the mirror cache, and how many repositories it holds.
-pub fn cache_stats() -> (u64, usize) {
-    let idx = load_index();
-    (idx.repos.values().map(|e| e.bytes).sum(), idx.repos.len())
+/// Keep only the most recently used checkouts of one repository, so circling a
+/// few pull requests is free while a long review session is still bounded.
+fn prune_checkouts(repo: &RepoRef) {
+    let prefix = format!("{}@", mirror_key(repo));
+    let mut idx = load_index();
+    let mut mine: Vec<(String, u64)> = idx
+        .checkouts
+        .iter()
+        .filter(|(k, _)| k.starts_with(&prefix))
+        .map(|(k, e)| (k.clone(), e.last_used))
+        .collect();
+    if mine.len() <= CHECKOUTS_PER_REPO {
+        return;
+    }
+    mine.sort_by(|a, b| b.1.cmp(&a.1)); // newest first
+    for (key, _) in mine.split_off(CHECKOUTS_PER_REPO) {
+        if let Some(dir) = dir_for(&key) {
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+        idx.checkouts.remove(&key);
+    }
+    save_index(&idx);
 }
 
-/// Delete every mirrored repository. Clones the user already had are never
-/// part of the cache, so this cannot touch their work.
+/// What the cache is holding, for the readout in the GitHub panel.
+#[derive(Clone, PartialEq, Eq, Default)]
+pub struct CacheStats {
+    pub bytes: u64,
+    pub repos: usize,
+    pub checkouts: usize,
+}
+
+impl CacheStats {
+    pub fn is_empty(&self) -> bool {
+        self.repos == 0 && self.checkouts == 0
+    }
+}
+
+pub fn cache_stats() -> CacheStats {
+    let idx = load_index();
+    CacheStats {
+        bytes: idx.total(),
+        repos: idx.repos.len(),
+        checkouts: idx.checkouts.len(),
+    }
+}
+
+/// Delete every mirrored repository and checkout. Clones the user already had
+/// are never part of the cache, so this cannot touch their work.
 pub fn clear_cache() -> Result<()> {
     let Some(root) = cache_root() else {
         return Ok(());
     };
-    let repos = root.join("repos");
-    if repos.exists() {
-        std::fs::remove_dir_all(&repos).context("removing mirrored repositories")?;
+    for (dir, what) in [
+        (root.join("repos"), "mirrored repositories"),
+        (root.join("checkouts"), "checked-out commits"),
+    ] {
+        if dir.exists() {
+            std::fs::remove_dir_all(&dir).with_context(|| format!("removing {what}"))?;
+        }
     }
     if let Some(p) = index_path() {
         let _ = std::fs::remove_file(p);
@@ -461,5 +702,188 @@ mod tests {
     #[test]
     fn missing_commit_is_not_a_panic() {
         assert!(!has_commit(Path::new("/nonexistent"), "deadbeef"));
+    }
+
+    #[test]
+    fn index_keys_round_trip_to_directories() {
+        let r = repo("Owner", "Name");
+        assert_eq!(dir_for(&mirror_key(&r)), mirror_dir(&r));
+        assert_eq!(dir_for(&checkout_key(&r, "abc123")), checkout_dir(&r, "abc123"));
+        // A checkout and its mirror are distinct entries.
+        assert_ne!(mirror_key(&r), checkout_key(&r, "abc123"));
+        assert_eq!(dir_for("nonsense"), None);
+    }
+
+    /// Checks out this very repository, which is the cheapest real git
+    /// repository to hand — and proves the source is left alone.
+    #[test]
+    fn checkout_materialises_files_without_touching_the_source() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let repo = git2::Repository::discover(root).expect("pullspace is a git repository");
+        let git_dir = repo.path().to_path_buf();
+        let head = repo
+            .head()
+            .and_then(|h| h.peel_to_commit())
+            .expect("HEAD commit")
+            .id()
+            .to_string();
+
+        let index_before = std::fs::metadata(git_dir.join("index")).and_then(|m| m.modified());
+        let dest = std::env::temp_dir().join(format!("pullspace-checkout-test-{head}"));
+        let _ = std::fs::remove_dir_all(&dest);
+
+        checkout_into(&git_dir, &head, &dest).expect("checkout");
+        assert!(dest.join("Cargo.toml").is_file(), "tracked files are written");
+        assert!(dest.join("src/main.rs").is_file());
+        // Plain files, so the ignore walker sees a directory like any other.
+        assert!(!dest.join(".git").exists(), "no repository inside the checkout");
+        // And nothing was left half-written next to it.
+        assert!(!dest.with_file_name(format!(".{head}.partial")).exists());
+
+        let index_after = std::fs::metadata(git_dir.join("index")).and_then(|m| m.modified());
+        assert_eq!(
+            index_before.ok(),
+            index_after.ok(),
+            "the source repository's index must not be written"
+        );
+
+        // Checking out again over an existing directory is a no-op, not an error.
+        checkout_into(&git_dir, &head, &dest).expect("second checkout");
+        let _ = std::fs::remove_dir_all(&dest);
+    }
+
+    #[test]
+    fn checkout_paths_cannot_escape_the_destination() {
+        let base = Path::new("/tmp/dest");
+        assert_eq!(safe_join(base, "src/main.rs"), Some(base.join("src/main.rs")));
+        assert_eq!(safe_join(base, "../../etc/passwd"), None);
+        assert_eq!(safe_join(base, "a/../b"), None);
+        assert_eq!(safe_join(base, "a//b"), None);
+        assert_eq!(safe_join(base, r"a\b"), None);
+    }
+
+    /// The failure this was written for: libgit2's own checkout refuses a tree
+    /// containing a submodule unless the repository has a working tree, and a
+    /// bare mirror — what every repository the user does not already have gets
+    /// — never does. Blobs are written directly so a submodule is simply not
+    /// its business.
+    #[test]
+    fn trees_with_submodules_check_out_of_a_bare_mirror() {
+        let dir = std::env::temp_dir().join("pullspace-submodule-test.git");
+        let _ = std::fs::remove_dir_all(&dir);
+        let repo = git2::Repository::init_bare(&dir).expect("bare repository");
+        let sig = git2::Signature::now("pullspace", "test@example.invalid").unwrap();
+
+        let readme = repo.blob(b"# hello\n").unwrap();
+        let modules = repo
+            .blob(b"[submodule \"vendor\"]\n\tpath = vendor\n\turl = ../other\n")
+            .unwrap();
+
+        // Something for the gitlink to point at. The point is that whatever it
+        // names, its *contents* are not in this repository — as they are not
+        // in a real mirror.
+        let empty = repo.treebuilder(None).unwrap();
+        let empty_tree = repo.find_tree(empty.write().unwrap()).unwrap();
+        let submodule = repo
+            .commit(None, &sig, &sig, "submodule", &empty_tree, &[])
+            .unwrap();
+
+        let mut tb = repo.treebuilder(None).unwrap();
+        let blob = i32::from(git2::FileMode::Blob);
+        tb.insert("README.md", readme, blob).unwrap();
+        tb.insert(".gitmodules", modules, blob).unwrap();
+        tb.insert("vendor", submodule, i32::from(git2::FileMode::Commit))
+            .unwrap();
+        let tree = repo.find_tree(tb.write().unwrap()).unwrap();
+        let head = repo
+            .commit(None, &sig, &sig, "root", &tree, &[])
+            .unwrap()
+            .to_string();
+
+        let dest = std::env::temp_dir().join("pullspace-submodule-checkout");
+        let _ = std::fs::remove_dir_all(&dest);
+        checkout_into(&dir, &head, &dest).expect("a submodule must not stop the checkout");
+        assert!(dest.join("README.md").is_file(), "the repository's own files");
+        assert!(
+            !dest.join("vendor").exists(),
+            "the submodule is skipped, not faked up as an empty directory"
+        );
+        // And the explorer's file list agrees about what is in there.
+        let listed = tree_paths(&dir, &head).unwrap();
+        assert!(listed.contains(&PathBuf::from("README.md")));
+        assert!(!listed.iter().any(|p| p == Path::new("vendor")));
+
+        let _ = std::fs::remove_dir_all(&dest);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A repository the user does not already have is mirrored bare, which has
+    /// no working directory of its own to check out into.
+    #[test]
+    fn bare_mirrors_can_be_checked_out() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let repo = git2::Repository::discover(root).expect("pullspace is a git repository");
+        let head = repo
+            .head()
+            .and_then(|h| h.peel_to_commit())
+            .expect("HEAD commit")
+            .id()
+            .to_string();
+
+        // Cloned from the local path, so this stays off the network.
+        let bare = std::env::temp_dir().join("pullspace-bare-mirror-test.git");
+        let _ = std::fs::remove_dir_all(&bare);
+        let out = Command::new("git")
+            .args([
+                "clone",
+                "--bare",
+                "--quiet",
+                &root.to_string_lossy(),
+                &bare.to_string_lossy(),
+            ])
+            .output()
+            .expect("running git");
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+
+        let dest = std::env::temp_dir().join("pullspace-bare-checkout-test");
+        let _ = std::fs::remove_dir_all(&dest);
+        checkout_into(&bare, &head, &dest).expect("checking out of a bare mirror");
+        assert!(dest.join("Cargo.toml").is_file(), "bare mirrors materialise too");
+
+        let _ = std::fs::remove_dir_all(&dest);
+        let _ = std::fs::remove_dir_all(&bare);
+    }
+
+    /// The point of checking out at all: the tools that walk a working tree
+    /// cannot tell a checkout from the repository it came from.
+    #[test]
+    fn a_checkout_is_searchable_and_indexable() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let repo = git2::Repository::discover(root).expect("pullspace is a git repository");
+        let head = repo
+            .head()
+            .and_then(|h| h.peel_to_commit())
+            .expect("HEAD commit")
+            .id()
+            .to_string();
+        let dest = std::env::temp_dir().join(format!("pullspace-scan-test-{head}"));
+        let _ = std::fs::remove_dir_all(&dest);
+        checkout_into(repo.path(), &head, &dest).expect("checkout");
+
+        let re = crate::backend::search::text_query("fn main").expect("query");
+        let hits = crate::backend::search::search_repo(&dest, &re);
+        assert!(
+            hits.iter().any(|h| h.path == Path::new("src/main.rs")),
+            "search finds main() in the checkout: {hits:?}",
+            hits = hits.iter().map(|h| h.path.display().to_string()).collect::<Vec<_>>(),
+        );
+
+        let index = crate::backend::symbols::build_index(&dest);
+        let defs = crate::backend::symbols::find_definitions(&index, "main");
+        assert!(!defs.is_empty(), "the symbol index sees the checkout's code");
+        // Paths are repo-relative, so a hit maps straight onto the PR's tree.
+        assert!(defs.iter().all(|d| d.path.is_relative()));
+
+        let _ = std::fs::remove_dir_all(&dest);
     }
 }

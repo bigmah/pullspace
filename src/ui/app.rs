@@ -29,6 +29,12 @@ pub enum ViewMode {
 #[derive(Clone, PartialEq)]
 pub enum BottomPanel {
     Hidden,
+    /// Dispatched, not yet finished. Searching walks a whole directory off the
+    /// UI thread — on a pull request just checked out, that is a real
+    /// repository's worth of files, not a handful.
+    Working {
+        title: String,
+    },
     Search {
         query: String,
         hits: Vec<Hit>,
@@ -95,6 +101,36 @@ pub enum PrList {
     Failed(String),
 }
 
+/// Where search and the symbol index look — and, when they cannot look
+/// anywhere, why not.
+///
+/// The reason travels with the state rather than being dropped, because the
+/// only thing worse than a pull request that cannot be searched is one that
+/// cannot be searched without saying so.
+#[derive(Clone, PartialEq)]
+pub enum ScanRoot {
+    /// A directory to walk: the repository, or a pull request checked out.
+    Dir(PathBuf),
+    /// Nothing on disk, and what to tell the user about it.
+    Unavailable(String),
+}
+
+impl ScanRoot {
+    pub fn dir(&self) -> Option<&PathBuf> {
+        match self {
+            ScanRoot::Dir(p) => Some(p),
+            ScanRoot::Unavailable(_) => None,
+        }
+    }
+
+    pub fn why(&self) -> Option<&str> {
+        match self {
+            ScanRoot::Unavailable(reason) => Some(reason),
+            ScanRoot::Dir(_) => None,
+        }
+    }
+}
+
 /// Where the open pull request's file contents are read from.
 #[derive(Clone, PartialEq)]
 pub enum PrSource {
@@ -120,6 +156,11 @@ pub enum PrFileState {
 #[derive(Clone, Copy)]
 pub struct St {
     pub root: Signal<PathBuf>,
+    /// What search and the symbol index walk: the repository itself, or a pull
+    /// request's head commit checked out on disk. Never the user's own
+    /// repository while a pull request is open — that would answer a question
+    /// they did not ask.
+    pub scan_root: Signal<ScanRoot>,
     pub statuses: Signal<HashMap<PathBuf, ChangeKind>>,
     pub open: Signal<Option<PathBuf>>,
     pub view_mode: Signal<ViewMode>,
@@ -177,7 +218,7 @@ impl St {
     }
 
     /// Clear everything tied to whatever was open: the file, the symbol
-    /// selection, panels, and the tree's expansion state.
+    /// selection, panels, the tree's expansion state, and the symbol index.
     fn clear_view(&self) {
         let mut open = self.open;
         open.set(None);
@@ -189,6 +230,15 @@ impl St {
         bottom.set(BottomPanel::Hidden);
         let mut expanded = self.expanded;
         expanded.set(HashMap::new());
+        // The results are gone, so the term that produced them has to go too:
+        // left behind it reads as a search still in effect, and it covers the
+        // placeholder that explains when a pull request cannot be searched.
+        let mut search_text = self.search_text;
+        search_text.set(String::new());
+        // Dropped so the top bar shows "indexing…" while the index for
+        // whatever we are switching to is built.
+        let mut index = self.index;
+        index.set(None);
     }
 
     /// Point the app at another repository, clearing everything tied to the old
@@ -205,11 +255,6 @@ impl St {
 
         self.leave_pr_state();
         self.clear_view();
-        let mut search_text = self.search_text;
-        search_text.set(String::new());
-        // Dropped so the top bar shows "indexing…" while the new index builds.
-        let mut index = self.index;
-        index.set(None);
 
         self.refresh();
     }
@@ -219,16 +264,25 @@ impl St {
         ws.set(Workspace::Local);
         let mut cache = self.pr_files;
         cache.set(HashMap::new());
+        // Back to walking the repository on disk.
+        let mut scan = self.scan_root;
+        scan.set(ScanRoot::Dir(self.root_path()));
     }
 
     /// Show a pull request instead of the working tree. `statuses` becomes the
     /// PR's change list, so the tree, badges and viewer need no special casing.
-    pub fn enter_pr(&self, pr: PrDetail, source: PrSource) {
+    ///
+    /// `checkout` is the PR's head commit as files on disk, when one could be
+    /// made; it takes the place of the working tree for search and the symbol
+    /// index, so those work on a pull request exactly as they do locally.
+    pub fn enter_pr(&self, pr: PrDetail, source: PrSource, checkout: ScanRoot) {
         self.clear_view();
         let mut cache = self.pr_files;
         cache.set(HashMap::new());
         let mut src = self.pr_source;
         src.set(source);
+        let mut scan = self.scan_root;
+        scan.set(checkout);
         let mut statuses = self.statuses;
         statuses.set(statuses_of(&pr.files));
         let mut ws = self.workspace;
@@ -271,15 +325,46 @@ impl St {
     }
 
     pub fn do_search(&self) {
-        // Search walks the working tree, which a PR's files are not part of.
-        if self.workspace.peek().is_pr() {
+        // No scan root means a pull request with no files on disk — nothing to
+        // walk. The top bar disables the box in that case.
+        let Some(root) = self.scan_root.peek().dir().cloned() else {
             return;
-        }
+        };
         let q = self.search_text.peek().clone();
         let Some(re) = text_query(&q) else { return };
-        let hits = search_repo(&self.root_path(), &re);
-        let mut b = self.bottom;
-        b.set(BottomPanel::Search { query: q, hits });
+        let title = format!("SEARCH  “{q}”");
+        self.run_scan(title, move || search_repo(&root, &re), move |hits| {
+            BottomPanel::Search { query: q, hits }
+        });
+    }
+
+    /// Walk the tree off the UI thread, showing the panel as busy meanwhile.
+    ///
+    /// The title doubles as the claim on the panel: a result is only applied
+    /// while the panel is still waiting for *this* scan, so a slow search
+    /// cannot land on top of the faster one that replaced it.
+    fn run_scan(
+        &self,
+        title: String,
+        scan: impl FnOnce() -> Vec<Hit> + Send + 'static,
+        done: impl FnOnce(Vec<Hit>) -> BottomPanel + 'static,
+    ) {
+        let st = *self;
+        let mut bottom = self.bottom;
+        bottom.set(BottomPanel::Working {
+            title: title.clone(),
+        });
+        spawn_forever(async move {
+            let hits = tokio::task::spawn_blocking(scan).await.unwrap_or_default();
+            let mut bottom = st.bottom;
+            let still_ours = matches!(
+                &*bottom.peek(),
+                BottomPanel::Working { title: t } if *t == title
+            );
+            if still_ours {
+                bottom.set(done(hits));
+            }
+        });
     }
 
     pub fn goto_def(&self, name: &str) {
@@ -304,12 +389,14 @@ impl St {
     }
 
     pub fn find_refs(&self, name: &str) {
+        let Some(root) = self.scan_root.peek().dir().cloned() else {
+            return;
+        };
         let Some(re) = word_query(name) else { return };
-        let hits = search_repo(&self.root_path(), &re);
-        let mut b = self.bottom;
-        b.set(BottomPanel::Refs {
-            name: name.to_string(),
-            hits,
+        let name = name.to_string();
+        let title = format!("REFERENCES  {name}");
+        self.run_scan(title, move || search_repo(&root, &re), move |hits| {
+            BottomPanel::Refs { name, hits }
         });
     }
 }
@@ -350,7 +437,8 @@ pub fn App() -> Element {
             .unwrap_or_default();
 
         St {
-            root: Signal::new(root),
+            root: Signal::new(root.clone()),
+            scan_root: Signal::new(ScanRoot::Dir(root)),
             statuses: Signal::new(statuses),
             open: Signal::new(open),
             view_mode: Signal::new(view_mode),
@@ -445,12 +533,16 @@ pub fn App() -> Element {
         spawn_forever(super::prcache::prefetch(st, number, jobs, st.api_token()));
     });
 
-    // Build the symbol index off the UI thread, once at startup and again for
-    // each repo opened afterwards. Reading `root` here is what re-triggers it;
-    // an in-flight build for the previous repo is cancelled.
+    // Build the symbol index off the UI thread, for whatever is being browsed
+    // — the local repository, or a pull request checked out on disk. Reading
+    // `scan_root` here is what re-triggers it; an in-flight build for the
+    // previous one is cancelled.
     let _ = use_resource(move || {
-        let root = st.root.read().clone();
+        let root = st.scan_root.read().dir().cloned();
         async move {
+            // Nothing on disk to index. `index` stays None, and the top bar
+            // hides the readout rather than counting symbols that are not there.
+            let Some(root) = root else { return };
             let idx = tokio::task::spawn_blocking(move || build_index(&root))
                 .await
                 .unwrap_or_default();

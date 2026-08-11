@@ -67,13 +67,17 @@ pub fn TopBar() -> Element {
         }
     });
 
-    // Search and the symbol index walk the working tree, which a PR is not
-    // part of — say so rather than returning confusing local results.
-    let (search_placeholder, search_disabled) = if in_pr {
-        ("Search is unavailable while viewing a pull request", true)
-    } else {
-        ("Search in files…  (Enter)", false)
-    };
+    // Search and the symbol index walk a directory. Locally that is the
+    // repository; for a pull request it is the checkout made when it opened.
+    // When there isn't one, the state carries the reason — show it rather than
+    // leaving a dead search box to be puzzled over.
+    let scan_why = st.scan_root.read().why().map(str::to_string);
+    let scannable = scan_why.is_none();
+    let search_placeholder = scan_why
+        .clone()
+        .unwrap_or_else(|| "Search in files…  (Enter)".to_string());
+    // The placeholder only shows while the box is empty; the tooltip always does.
+    let search_title = scan_why.unwrap_or_default();
 
     let account_label = match &*st.account.read() {
         Account::Checking => "checking…".to_string(),
@@ -146,8 +150,9 @@ pub fn TopBar() -> Element {
                 class: "searchbox",
                 r#type: "text",
                 placeholder: "{search_placeholder}",
+                title: "{search_title}",
                 spellcheck: "false",
-                disabled: search_disabled,
+                disabled: !scannable,
                 value: "{search_text}",
                 oninput: move |e| search_text.set(e.value()),
                 onkeydown: move |e| {
@@ -156,7 +161,7 @@ pub fn TopBar() -> Element {
                     }
                 },
             }
-            if !in_pr {
+            if scannable {
                 span { class: "idxstate", "{index_label}" }
             }
             button {

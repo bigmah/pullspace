@@ -154,9 +154,9 @@ pub fn Viewer() -> Element {
 
     let status = st.statuses.read().get(&rel).copied();
     let deleted_note = new_side == FileContent::Absent && status == Some(ChangeKind::Deleted);
-    // Go to Definition / Find References run against the local index, which
-    // says nothing about a PR from another repository.
-    let symbols_enabled = !st.workspace.read().is_pr();
+    // Go to Definition / Find References run against whatever was indexed —
+    // the local repository, or this pull request's own checkout.
+    let symbols_enabled = st.scan_root.read().dir().is_some();
 
     // Only changed files have a diff to show.
     let mode = if status.is_none() {

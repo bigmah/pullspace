@@ -57,6 +57,11 @@ open in the same Split / Inline diff views, against the **merge base** — so yo
 see the PR's own changes, not everything that landed on the base branch since it
 was opened.
 
+Search, Go to Definition and Find References work in a pull request exactly as
+they do locally — they run against the PR's own head commit, so a definition
+found is the definition as of that commit, not as of your checkout. This needs
+the repository on disk; see the table below.
+
 The repository does not have to be cloned locally. `✕ close PR` returns to the
 local working tree.
 
@@ -69,26 +74,43 @@ difference between instant and a network round trip per file:
 | --- | --- |
 | `local` | A clone you already had. Fetching one PR ref into it takes about a second and no meaningful disk. |
 | `mirrored` | A bare clone under `~/.cache/pullspace/repos/`, for repos you don't have. |
-| `api` | No local repo available — one HTTPS request per file. |
+| `api` | No local repo available — one HTTPS request per file, and no search. |
 
 Reading a file locally takes about 5 ms against roughly 250 ms over the API,
 and the explorer's whole file tree comes straight from the object database
 (0.7 ms, with none of the API's size limits). Revisiting a PR, or opening
 another PR on the same repo, only fetches the new objects.
 
+On either local source, opening a PR also **checks its head commit out** to
+`~/.cache/pullspace/checkouts/<owner>__<repo>/<sha>/`. That is what makes
+search and the symbol index work: they walk a directory, and this is one. It
+costs a working copy of the repository on disk, which is the deal — reviewing
+tends to circle the same few repositories, so it is paid once and reused. The
+three most recent checkouts per repository are kept.
+
+Submodules are skipped: their objects live in another repository that a mirror
+does not have, and a pull request diffs the gitlink rather than their contents
+— so they are absent from the explorer and from search, exactly as they are
+absent from the diff. When a checkout cannot be made at all (`api`, or a
+failure), the search box says why instead of quietly searching the wrong tree.
+
 Borrowing your own clone only ever **adds** objects and one ref under
 `refs/pullspace/<owner>/<repo>/pr/<n>`. Your branches, tags, HEAD, index and
-working tree are never touched. To see or remove them:
+working tree are never touched — checkouts are written to pullspace's own cache
+with no index write, never into your repository. To see or remove what was
+added:
 
 ```sh
 git for-each-ref refs/pullspace          # what pullspace added
 git for-each-ref --format='%(refname)' refs/pullspace | xargs -n1 git update-ref -d
 ```
 
-Mirrors are capped at **5 GB total**, evicting least-recently-used repos to
-stay under it; the GitHub panel shows the current size and clears it. Override
-the cap with `PULLSPACE_CACHE_MAX_GB`. Clones you already had are never counted
-against the cap and never deleted — they aren't pullspace's to remove.
+Mirrors and checkouts together are capped at **5 GB**, evicting
+least-recently-used entries to stay under it — checkouts first, since remaking
+one is a local operation where remaking a mirror is a download. The GitHub
+panel shows the current size and clears it. Override the cap with
+`PULLSPACE_CACHE_MAX_GB`. Clones you already had are never counted against the
+cap and never deleted — they aren't pullspace's to remove.
 
 Whichever source is used, opening a PR warms every file it changes, six at a
 time, so clicking through a review never waits — the top bar shows
@@ -139,7 +161,7 @@ src/
     mod.rs          FileContent: one side of a diff, whatever its source
     auth.rs         GitHub device flow, token storage & discovery
     github.rs       GitHub REST: PR lists, PR files, blob content
-    mirror.rs       local clones & bare mirrors; git2 object reads
+    mirror.rs       local clones, bare mirrors, checkouts; git2 object reads
     gitio.rs        git2: repo discovery, statuses, HEAD blob content
     tree.rs         file-tree model built from the worktree + git status
     difftool.rs     hunk/line/segment diff model (similar), split-row pairing
@@ -165,8 +187,8 @@ data source.
 
 - Local diffs are worktree vs `HEAD` (staged + unstaged combined); pull request
   diffs are merge-base vs PR head.
-- In PR mode, search / Go to Definition / Find References are disabled — they
-  walk the local working tree, which the PR's files are not part of.
+- Search / Go to Definition / Find References need files on disk, so in PR mode
+  they work on the `local` and `mirrored` sources but not on `api`.
 - Pull requests are loaded as a snapshot; `⟳` does not re-poll GitHub.
 - The top bar flags a partial explorer: `truncated` (over GitHub's 3000-file
   cap per PR), `partial tree` (repo past GitHub's recursive-tree limit — about

@@ -13,6 +13,10 @@ pub fn Bottom() -> Element {
 
     let (title, body) = match panel {
         BottomPanel::Hidden => return rsx! {},
+        BottomPanel::Working { title } => (
+            title,
+            rsx! { div { class: "panel-empty", "Searching…" } },
+        ),
         BottomPanel::Search { query, hits } => {
             let capped = hits.len() >= MAX_HITS;
             let title = format!(

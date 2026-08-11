@@ -2,7 +2,8 @@ use dioxus::prelude::*;
 
 use crate::backend::auth::open_browser;
 
-use super::app::{Account, PrSource, St};
+use super::app::{Account, PrList, PrSource, St};
+use super::github::open_pr;
 use super::prcache::warmed;
 
 #[component]
@@ -20,6 +21,21 @@ pub fn TopBar() -> Element {
     let workspace = st.workspace.read().clone();
     let pr = workspace.pr().cloned();
     let in_pr = pr.is_some();
+    let pr_target = workspace.pr().map(|p| (p.repo.clone(), p.number));
+
+    // Reloading a pull request goes to GitHub and can fetch objects, so it has
+    // to say so; reloading the local tree is synchronous and needs no notice.
+    let (reload_note, reload_error) = match &*st.prs.read() {
+        PrList::Loading(note) => (Some(note.clone()), None),
+        PrList::Failed(e) => (None, Some(e.clone())),
+        _ => (None, None),
+    };
+    let reloading = reload_note.is_some();
+    let refresh_title = if in_pr {
+        "Reload this pull request from GitHub"
+    } else {
+        "Reload git status & file tree"
+    };
 
     // Where file contents come from — worth showing, since it is the
     // difference between instant and a round trip per file.
@@ -131,6 +147,12 @@ pub fn TopBar() -> Element {
                         "warming {done}/{total}"
                     }
                 }
+                if let Some(note) = reload_note.clone() {
+                    span { class: "prwarm", "{note}" }
+                }
+                if let Some(e) = reload_error.clone() {
+                    span { class: "prwarn", title: "{e}", "reload failed" }
+                }
                 button {
                     class: "iconbtn",
                     title: "Open on github.com",
@@ -172,9 +194,16 @@ pub fn TopBar() -> Element {
             }
             button {
                 class: "iconbtn",
-                title: "Reload git status & file tree",
-                disabled: in_pr,
-                onclick: move |_| st.refresh(),
+                title: "{refresh_title}",
+                disabled: reloading,
+                onclick: move |_| match pr_target.clone() {
+                    // Root scope: reloading replaces the workspace, and this
+                    // button is re-rendered underneath the task that did it.
+                    Some((repo, number)) => {
+                        spawn_forever(open_pr(st, repo, number));
+                    }
+                    None => st.refresh(),
+                },
                 "⟳"
             }
         }

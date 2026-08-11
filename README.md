@@ -42,7 +42,8 @@ pullspace /path/to/repo src/lib.rs --mode=inline  # source | inline | split
 ```
 
 The `⟳` button re-reads git status and the file tree after you make changes
-outside the app.
+outside the app — and reloads the pull request from GitHub when you are
+reviewing one.
 
 ## Reviewing GitHub pull requests
 
@@ -189,7 +190,10 @@ data source.
   diffs are merge-base vs PR head.
 - Search / Go to Definition / Find References need files on disk, so in PR mode
   they work on the `local` and `mirrored` sources but not on `api`.
-- Pull requests are loaded as a snapshot; `⟳` does not re-poll GitHub.
+- On a pull request, `⟳` re-polls GitHub: new commits move the head, so the
+  changed-file list, the tree, the checkout and the cached contents are all
+  rebuilt from it. The file you are reading and the tree you have expanded are
+  kept, and an unmoved head reuses its checkout and symbol index.
 - The top bar flags a partial explorer: `truncated` (over GitHub's 3000-file
   cap per PR), `partial tree` (repo past GitHub's recursive-tree limit — about
   60k files, and only possible on the `api` source), or `changed files only`

@@ -429,7 +429,11 @@ async fn open_target(st: St) {
 /// The source is settled *before* the file tree is loaded, because a local
 /// repository can list its own tree instantly — asking the API first would
 /// download up to 20 MB of JSON we are about to throw away.
-async fn open_pr(st: St, repo: RepoRef, number: u64) {
+///
+/// This is also what `⟳` runs on an open pull request: reloading one means
+/// exactly this work again, since a push moves the head commit and everything
+/// downstream — objects, tree, checkout, cached contents — hangs off it.
+pub(super) async fn open_pr(st: St, repo: RepoRef, number: u64) {
     let token = st.api_token();
     let mut prs = st.prs;
 

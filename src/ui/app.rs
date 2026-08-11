@@ -235,8 +235,21 @@ impl St {
         // placeholder that explains when a pull request cannot be searched.
         let mut search_text = self.search_text;
         search_text.set(String::new());
-        // Dropped so the top bar shows "indexing…" while the index for
-        // whatever we are switching to is built.
+    }
+
+    /// Point search and the symbol index at another directory, dropping the
+    /// index built for the last one.
+    ///
+    /// A no-op when the directory is unchanged: reloading a pull request whose
+    /// head has not moved lands on the same checkout, and should not throw away
+    /// a perfectly good index to rebuild it identically.
+    fn set_scan_root(&self, next: ScanRoot) {
+        if *self.scan_root.peek() == next {
+            return;
+        }
+        let mut scan = self.scan_root;
+        scan.set(next);
+        // Dropped so the top bar shows "indexing…" while the new one builds.
         let mut index = self.index;
         index.set(None);
     }
@@ -265,8 +278,7 @@ impl St {
         let mut cache = self.pr_files;
         cache.set(HashMap::new());
         // Back to walking the repository on disk.
-        let mut scan = self.scan_root;
-        scan.set(ScanRoot::Dir(self.root_path()));
+        self.set_scan_root(ScanRoot::Dir(self.root_path()));
     }
 
     /// Show a pull request instead of the working tree. `statuses` becomes the
@@ -276,13 +288,30 @@ impl St {
     /// made; it takes the place of the working tree for search and the symbol
     /// index, so those work on a pull request exactly as they do locally.
     pub fn enter_pr(&self, pr: PrDetail, source: PrSource, checkout: ScanRoot) {
-        self.clear_view();
+        // Loading the pull request that is already open is a reload, so keep
+        // the file being read and the tree as it was expanded — resetting the
+        // view out from under someone who asked for fresh data is not what
+        // they asked for. Only what describes the old commit is dropped.
+        let reload = self
+            .workspace
+            .peek()
+            .pr()
+            .is_some_and(|open| open.repo == pr.repo && open.number == pr.number);
+        if reload {
+            let mut sel = self.selected;
+            sel.set(None);
+            let mut bottom = self.bottom;
+            bottom.set(BottomPanel::Hidden);
+        } else {
+            self.clear_view();
+        }
+        // Contents are keyed by path, not commit, so they have to go either
+        // way: this is where a reload picks up what was pushed.
         let mut cache = self.pr_files;
         cache.set(HashMap::new());
         let mut src = self.pr_source;
         src.set(source);
-        let mut scan = self.scan_root;
-        scan.set(checkout);
+        self.set_scan_root(checkout);
         let mut statuses = self.statuses;
         statuses.set(statuses_of(&pr.files));
         let mut ws = self.workspace;

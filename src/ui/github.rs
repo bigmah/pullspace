@@ -8,9 +8,12 @@ use crate::backend::auth::{
     open_browser, poll_device_flow, save_client_id, save_token, sign_out, start_device_flow,
     Token, TokenSource,
 };
-use crate::backend::github::{list_prs, load_pr, parse_target, viewer_login, PrSummary, RepoRef};
+use crate::backend::github::{
+    list_prs, load_pr, parse_target, repo_tree, viewer_login, PrSummary, RepoRef,
+};
+use crate::backend::mirror;
 
-use super::app::{Account, PrList, St};
+use super::app::{Account, PrList, PrSource, St};
 
 /// Docs for creating the OAuth app this needs.
 const NEW_APP_URL: &str = "https://github.com/settings/applications/new";
@@ -48,7 +51,43 @@ pub fn GhPanel() -> Element {
                             SignedIn { login, source }
                         },
                     }
+                    CacheFooter {}
                 }
+            }
+        }
+    }
+}
+
+/// Mirrored repositories are the one thing pullspace keeps on disk that the
+/// user might want back, so show the size and offer to drop it.
+#[component]
+fn CacheFooter() -> Element {
+    let mut cleared = use_signal(|| false);
+    let (bytes, repos) = use_memo(move || {
+        cleared.read();
+        mirror::cache_stats()
+    })();
+
+    if repos == 0 {
+        return rsx! {};
+    }
+    let label = format!(
+        "Mirrored {repos} {} · {}",
+        if repos == 1 { "repository" } else { "repositories" },
+        mirror::human_bytes(bytes),
+    );
+    rsx! {
+        div { class: "ghsection ghcache",
+            span { class: "ghnote", "{label}" }
+            span { class: "spacer" }
+            button {
+                class: "linkbtn",
+                onclick: move |_| {
+                    let _ = mirror::clear_cache();
+                    let v = *cleared.peek();
+                    cleared.set(!v);
+                },
+                "Clear"
             }
         }
     }
@@ -296,7 +335,7 @@ fn SignedIn(login: String, source: TokenSource) -> Element {
                 PrList::Idle => rsx! {
                     div { class: "ghnote", "Enter a repository to list its open pull requests." }
                 },
-                PrList::Loading => rsx! { div { class: "ghnote", "Loading…" } },
+                PrList::Loading(note) => rsx! { div { class: "ghnote", "{note}" } },
                 PrList::Failed(e) => rsx! { div { class: "gherror", "{e}" } },
                 PrList::Ready { repo, items } if items.is_empty() => rsx! {
                     div { class: "ghnote", "No open pull requests in {repo}." }
@@ -362,11 +401,8 @@ async fn open_target(st: St) {
         return open_pr(st, repo, number).await;
     }
 
-    let Some(token) = st.token_value() else {
-        prs.set(PrList::Failed("Not signed in.".to_string()));
-        return;
-    };
-    prs.set(PrList::Loading);
+    let token = st.api_token();
+    prs.set(PrList::Loading("Loading pull requests…".to_string()));
     let target = repo.clone();
     match tokio::task::spawn_blocking(move || list_prs(&token, &target)).await {
         Ok(Ok(items)) => prs.set(PrList::Ready { repo, items }),
@@ -375,22 +411,65 @@ async fn open_target(st: St) {
     }
 }
 
-/// Fetch a PR's metadata and file list, then hand it to the viewer.
+/// Open a PR: metadata from the API, then contents from a local clone if one
+/// can be had, falling back to the API.
+///
+/// The source is settled *before* the file tree is loaded, because a local
+/// repository can list its own tree instantly — asking the API first would
+/// download up to 20 MB of JSON we are about to throw away.
 async fn open_pr(st: St, repo: RepoRef, number: u64) {
-    let Some(token) = st.token_value() else {
-        let mut prs = st.prs;
-        prs.set(PrList::Failed("Not signed in.".to_string()));
-        return;
-    };
+    let token = st.api_token();
     let mut prs = st.prs;
-    prs.set(PrList::Loading);
+
+    prs.set(PrList::Loading("Loading pull request…".to_string()));
     let target = repo.clone();
-    match tokio::task::spawn_blocking(move || load_pr(&token, &target, number)).await {
-        Ok(Ok(detail)) => {
-            prs.set(PrList::Idle);
-            st.enter_pr(detail);
+    let tok = token.clone();
+    let mut detail = match tokio::task::spawn_blocking(move || load_pr(&tok, &target, number)).await
+    {
+        Ok(Ok(d)) => d,
+        Ok(Err(e)) => return prs.set(PrList::Failed(format!("{e:#}"))),
+        Err(e) => return prs.set(PrList::Failed(e.to_string())),
+    };
+
+    prs.set(PrList::Loading(
+        "Syncing the repository (first time may take a moment)…".to_string(),
+    ));
+    let target = repo.clone();
+    let head = detail.head_sha.clone();
+    let own = st.root_path();
+    let tok = token.clone();
+    let local = tokio::task::spawn_blocking(move || {
+        mirror::prepare(&target, number, &head, &tok, Some(&own))
+    })
+    .await;
+
+    let source = match local {
+        Ok(Ok(repo_on_disk)) => PrSource::Local {
+            git_dir: repo_on_disk.git_dir,
+            borrowed: repo_on_disk.borrowed,
+        },
+        // Falling back is not an error worth stopping for — the API path works,
+        // it is just slower per file.
+        _ => PrSource::Api,
+    };
+
+    prs.set(PrList::Loading("Reading the file tree…".to_string()));
+    let head = detail.head_sha.clone();
+    let target = repo.clone();
+    let src = source.clone();
+    let tree = tokio::task::spawn_blocking(move || match &src {
+        PrSource::Local { git_dir, .. } => {
+            mirror::tree_paths(git_dir, &head).map(|p| (p, false)).ok()
         }
-        Ok(Err(e)) => prs.set(PrList::Failed(format!("{e:#}"))),
-        Err(e) => prs.set(PrList::Failed(e.to_string())),
+        PrSource::Api => repo_tree(&token, &target, &head).ok(),
+    })
+    .await;
+
+    if let Ok(Some((paths, truncated))) = tree {
+        detail.tree = paths;
+        detail.tree_truncated = truncated;
     }
+
+    prs.set(PrList::Idle);
+    st.enter_pr(detail, source);
 }

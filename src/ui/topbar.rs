@@ -2,7 +2,8 @@ use dioxus::prelude::*;
 
 use crate::backend::auth::open_browser;
 
-use super::app::{Account, St};
+use super::app::{Account, PrSource, St};
+use super::prcache::warmed;
 
 #[component]
 pub fn TopBar() -> Element {
@@ -19,6 +20,29 @@ pub fn TopBar() -> Element {
     let workspace = st.workspace.read().clone();
     let pr = workspace.pr().cloned();
     let in_pr = pr.is_some();
+
+    // Where file contents come from — worth showing, since it is the
+    // difference between instant and a round trip per file.
+    let source = workspace.pr().map(|_| match &*st.pr_source.read() {
+        PrSource::Local { borrowed: true, .. } => (
+            "local",
+            "Reading from the clone you already had — no network per file",
+        ),
+        PrSource::Local { borrowed: false, .. } => (
+            "mirrored",
+            "Reading from pullspace's cached mirror — no network per file",
+        ),
+        PrSource::Api => (
+            "api",
+            "Reading over the GitHub API — one request per file",
+        ),
+    });
+
+    // Background warm-up progress, shown only while it is still running.
+    let warming = workspace.pr().and_then(|pr| {
+        let done = warmed(&st, pr);
+        (done < pr.files.len()).then_some((done, pr.files.len()))
+    });
 
     // Say so when the explorer is showing less than the whole repository,
     // rather than letting a missing file look like it does not exist.
@@ -90,8 +114,18 @@ pub fn TopBar() -> Element {
                     span { class: "prnum", "{pr.repo} #{pr.number}" }
                     span { class: "prcrumbtitle", "{pr.title}" }
                 }
+                if let Some((label, why)) = source {
+                    span { class: "prsrc", title: "{why}", "{label}" }
+                }
                 if let Some((label, why)) = warn {
                     span { class: "prwarn", title: "{why}", "{label}" }
+                }
+                if let Some((done, total)) = warming {
+                    span {
+                        class: "prwarm",
+                        title: "Caching the PR's changed files in the background",
+                        "warming {done}/{total}"
+                    }
                 }
                 button {
                     class: "iconbtn",

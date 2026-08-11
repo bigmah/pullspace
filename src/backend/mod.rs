@@ -3,6 +3,7 @@ pub mod difftool;
 pub mod github;
 pub mod gitio;
 pub mod highlight;
+pub mod mirror;
 pub mod search;
 pub mod symbols;
 pub mod tree;

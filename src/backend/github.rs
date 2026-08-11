@@ -146,7 +146,10 @@ fn get_raw(token: &str, url: &str, accept: &str) -> Result<(u16, Vec<u8>)> {
 fn get_json<T: serde::de::DeserializeOwned>(token: &str, url: &str) -> Result<T> {
     let (status, body) = get_raw(token, url, "application/vnd.github+json")?;
     if status == 404 {
-        bail!("Not found (404). Check the repository name and that the token can see it.");
+        bail!(
+            "Not found (404). Check the name — and if it is a private repository, \
+             sign in to an account that can see it."
+        );
     }
     if !(200..300).contains(&status) {
         bail!("GitHub returned HTTP {status}");
@@ -335,7 +338,9 @@ pub struct PrDetail {
     /// True if the PR has more files than we fetched.
     pub truncated: bool,
     /// Every file in the repo at `head_sha`, so the explorer can show the whole
-    /// tree and not just what changed. Empty if the tree could not be read.
+    /// tree and not just what changed. Filled in by the caller — from a local
+    /// clone when there is one, else [`repo_tree`] — and empty when neither
+    /// worked, which degrades to a changed-files-only explorer.
     pub tree: Vec<PathBuf>,
     /// True if GitHub returned only part of the repository tree.
     pub tree_truncated: bool,
@@ -383,10 +388,6 @@ pub fn load_pr(token: &str, repo: &RepoRef, number: u64) -> Result<PrDetail> {
         }
     }
 
-    // Browsing the whole repo is a convenience, not the point of the screen —
-    // if the tree cannot be read, fall back to listing just the changed files.
-    let (tree, tree_truncated) = repo_tree(token, repo, &pr.head.sha).unwrap_or_default();
-
     Ok(PrDetail {
         repo: repo.clone(),
         number: pr.number,
@@ -401,8 +402,8 @@ pub fn load_pr(token: &str, repo: &RepoRef, number: u64) -> Result<PrDetail> {
         head_sha: pr.head.sha,
         files,
         truncated,
-        tree,
-        tree_truncated,
+        tree: Vec::new(),
+        tree_truncated: false,
     })
 }
 
@@ -559,13 +560,17 @@ mod tests {
         assert!(!pr.base_sha.is_empty(), "merge base resolved");
         assert!(!pr.files.is_empty(), "PR has files");
 
+        // `load_pr` deliberately leaves the tree to the caller, so that a
+        // local clone can supply it instead of downloading it.
+        assert!(pr.tree.is_empty(), "tree is the caller's job");
+
         // The repo tree must be a superset of the changed files (deletions
         // aside), or the explorer would be missing files the PR touches.
-        assert!(!pr.tree.is_empty(), "repo tree loaded");
-        assert!(pr.tree.len() > pr.files.len(), "tree is the whole repo");
+        let (tree, _) = repo_tree("", &repo, &pr.head_sha).expect("repo tree");
+        assert!(tree.len() > pr.files.len(), "tree is the whole repo");
         for f in &pr.files {
             if f.status != ChangeKind::Deleted {
-                assert!(pr.tree.contains(&f.path), "{:?} missing from tree", f.path);
+                assert!(tree.contains(&f.path), "{:?} missing from tree", f.path);
             }
         }
 

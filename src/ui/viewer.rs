@@ -3,13 +3,13 @@ use std::path::PathBuf;
 use dioxus::prelude::*;
 
 use crate::backend::difftool::{diff_hunks, stats, to_rows, Hunk, Line, LineKind};
-use crate::backend::github::{file_at, find_file, RepoRef};
 use crate::backend::gitio::{head_file, worktree_file};
 use crate::backend::highlight::{highlight, Span};
 use crate::backend::tree::ChangeKind;
 use crate::backend::FileContent;
 
 use super::app::{PrFileState, St, ViewMode};
+use super::prcache::ensure_path;
 
 const BIG_FILE_BYTES: usize = 400_000;
 const BIG_FILE_LINES: usize = 6_000;
@@ -36,20 +36,6 @@ enum Pane {
     },
 }
 
-/// Everything needed to fetch one PR file, lifted out of the signal so the
-/// async block does not borrow app state.
-#[derive(Clone, PartialEq)]
-struct FetchJob {
-    repo: RepoRef,
-    base_sha: String,
-    head_sha: String,
-    path: PathBuf,
-    /// Differs from `path` for renames.
-    base_path: PathBuf,
-    /// `None` for a file the PR does not touch — browsable, but not a diff.
-    status: Option<ChangeKind>,
-}
-
 fn scroll_js(line: usize) -> String {
     format!(
         r#"(function(){{var n=0;function go(){{var e=document.getElementById('L{line}');if(e){{var t=e.classList.contains('anchor')?e.parentElement:e;t.scrollIntoView({{block:'center'}});t.classList.add('flash');setTimeout(function(){{t.classList.remove('flash')}},1400);}}else if(n++<25){{setTimeout(go,60);}}}}go();}})();"#
@@ -70,67 +56,16 @@ pub fn Viewer() -> Element {
         }
     });
 
-    // In PR mode, pull both sides of the open file from GitHub once and cache
-    // them. Reading `open` and `workspace` here is what re-triggers this.
-    let _ = use_resource(move || {
+    // In PR mode the open file usually arrives already warmed, from the
+    // background prefetch or the tree's hover handler. This covers the rest —
+    // and is a no-op when the content is cached or on its way.
+    use_effect(move || {
         let rel = st.open.read().clone();
-        let job = st.workspace.read().pr().and_then(|pr| {
-            let rel = rel.as_ref()?;
-            // Unchanged files are in the repo tree but not the PR's file list;
-            // they still open, just as plain source.
-            let f = find_file(&pr.files, rel);
-            Some(FetchJob {
-                repo: pr.repo.clone(),
-                base_sha: pr.base_sha.clone(),
-                head_sha: pr.head_sha.clone(),
-                path: rel.clone(),
-                base_path: f.map_or_else(|| rel.clone(), |f| f.base_path().clone()),
-                status: f.map(|f| f.status),
-            })
-        });
-        async move {
-            let Some(job) = job else { return };
-            let mut cache = st.pr_files;
-            // Only a completed fetch is worth keeping. A `Loading` entry here
-            // is stale by construction — switching files cancels the future
-            // that wrote it, so nothing is actually in flight — and re-reading
-            // a `Failed` one is how the user retries after a network blip.
-            if matches!(cache.peek().get(&job.path), Some(PrFileState::Ready { .. })) {
-                return;
-            }
-            let Some(token) = st.token_value() else {
-                cache.write().insert(
-                    job.path.clone(),
-                    PrFileState::Failed("Not signed in to GitHub.".to_string()),
-                );
-                return;
-            };
-            let path = job.path.clone();
-            cache.write().insert(path.clone(), PrFileState::Loading);
-
-            let fetched = tokio::task::spawn_blocking(move || {
-                // An added file has no base side, a deleted one has no head
-                // side, and an untouched file is never diffed — so in each case
-                // skip a request that would be wasted or 404 anyway.
-                let base = match job.status {
-                    None | Some(ChangeKind::Added) => FileContent::Absent,
-                    Some(_) => file_at(&token, &job.repo, &job.base_sha, &job.base_path)?,
-                };
-                let head = if job.status == Some(ChangeKind::Deleted) {
-                    FileContent::Absent
-                } else {
-                    file_at(&token, &job.repo, &job.head_sha, &job.path)?
-                };
-                anyhow::Ok((base, head))
-            })
-            .await;
-
-            let state = match fetched {
-                Ok(Ok((base, head))) => PrFileState::Ready { base, head },
-                Ok(Err(e)) => PrFileState::Failed(format!("{e:#}")),
-                Err(e) => PrFileState::Failed(format!("Fetch failed: {e}")),
-            };
-            cache.write().insert(path, state);
+        if !st.workspace.read().is_pr() {
+            return;
+        }
+        if let Some(rel) = rel {
+            ensure_path(st, &rel);
         }
     });
 

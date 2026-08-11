@@ -482,6 +482,30 @@ body {
   flex: none;
 }
 
+.prsrc {
+  color: var(--added);
+  font-family: var(--mono);
+  font-size: 10px;
+  border: 1px solid rgba(79, 191, 122, 0.35);
+  border-radius: 3px;
+  padding: 0 5px;
+  flex: none;
+}
+
+.prwarm {
+  color: var(--fg-faint);
+  font-family: var(--mono);
+  font-size: 10px;
+  white-space: nowrap;
+  flex: none;
+  animation: warmpulse 1.6s ease-in-out infinite;
+}
+
+@keyframes warmpulse {
+  0%, 100% { opacity: 0.45; }
+  50% { opacity: 1; }
+}
+
 /* ---------- github: overlay panel ---------- */
 
 .ghoverlay {
@@ -540,6 +564,7 @@ body {
 .ghsection:last-child { border-bottom: none; }
 
 .ghaccount { flex-direction: row; align-items: center; gap: 8px; }
+.ghcache { flex-direction: row; align-items: center; gap: 8px; }
 
 .ghwho { font-size: 12.5px; color: var(--fg); }
 .ghsrc {

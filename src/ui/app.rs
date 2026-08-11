@@ -89,9 +89,23 @@ pub enum Account {
 #[derive(Clone, PartialEq)]
 pub enum PrList {
     Idle,
-    Loading,
+    /// Carries what is happening — opening a PR can involve a clone.
+    Loading(String),
     Ready { repo: RepoRef, items: Vec<PrSummary> },
     Failed(String),
+}
+
+/// Where the open pull request's file contents are read from.
+#[derive(Clone, PartialEq)]
+pub enum PrSource {
+    /// One HTTP request per file.
+    Api,
+    /// A git repository on disk — reads are local and effectively instant.
+    Local {
+        git_dir: PathBuf,
+        /// True when this is a clone the user already had.
+        borrowed: bool,
+    },
 }
 
 /// Both sides of one file in a pull request, fetched on demand.
@@ -129,6 +143,7 @@ pub struct St {
     pub workspace: Signal<Workspace>,
     /// Per-file base/head content for the open PR.
     pub pr_files: Signal<HashMap<PathBuf, PrFileState>>,
+    pub pr_source: Signal<PrSource>,
 }
 
 impl St {
@@ -138,6 +153,13 @@ impl St {
 
     pub fn token_value(&self) -> Option<String> {
         self.token.peek().as_ref().map(|t| t.value.clone())
+    }
+
+    /// The credential to send to GitHub, empty when signed out. GitHub serves
+    /// public repositories anonymously (at a much lower rate limit), so being
+    /// signed out limits what you can reach rather than blocking the app.
+    pub fn api_token(&self) -> String {
+        self.token_value().unwrap_or_default()
     }
 
     pub fn refresh(&self) {
@@ -201,10 +223,12 @@ impl St {
 
     /// Show a pull request instead of the working tree. `statuses` becomes the
     /// PR's change list, so the tree, badges and viewer need no special casing.
-    pub fn enter_pr(&self, pr: PrDetail) {
+    pub fn enter_pr(&self, pr: PrDetail, source: PrSource) {
         self.clear_view();
         let mut cache = self.pr_files;
         cache.set(HashMap::new());
+        let mut src = self.pr_source;
+        src.set(source);
         let mut statuses = self.statuses;
         statuses.set(statuses_of(&pr.files));
         let mut ws = self.workspace;
@@ -349,6 +373,7 @@ pub fn App() -> Element {
             prs: Signal::new(PrList::Idle),
             workspace: Signal::new(Workspace::Local),
             pr_files: Signal::new(HashMap::new()),
+            pr_source: Signal::new(PrSource::Api),
         }
     });
 
@@ -406,6 +431,18 @@ pub fn App() -> Element {
                 source.label()
             ))),
         }
+    });
+
+    // Warm the cache for a pull request's changed files as soon as it opens,
+    // so clicking through the review does not wait on the network.
+    use_effect(move || {
+        let job = st
+            .workspace
+            .read()
+            .pr()
+            .map(|pr| (pr.number, super::prcache::changed_jobs(pr)));
+        let Some((number, jobs)) = job else { return };
+        spawn_forever(super::prcache::prefetch(st, number, jobs, st.api_token()));
     });
 
     // Build the symbol index off the UI thread, once at startup and again for

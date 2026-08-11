@@ -151,6 +151,22 @@ pub fn build_tree_from_paths<'a>(
     }
     tmp.build(label.to_string(), PathBuf::new(), statuses)
 }
+/// Reduce the tree to only nodes that are changed or contain changes.
+pub fn filter_changed(node: &FileNode) -> Option<FileNode> {
+    if node.is_dir {
+        let children: Vec<FileNode> = node.children.iter().filter_map(filter_changed).collect();
+        if children.is_empty() {
+            return None;
+        }
+        let mut out = node.clone();
+        out.children = children;
+        Some(out)
+    } else if node.status.is_some() {
+        Some(node.clone())
+    } else {
+        None
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -215,22 +231,5 @@ mod tests {
         let listed = names(&filtered);
         assert!(listed.contains(&"src/a.rs".to_string()), "{listed:?}");
         assert!(!listed.contains(&"docs/b.md".to_string()), "{listed:?}");
-    }
-}
-
-/// Reduce the tree to only nodes that are changed or contain changes.
-pub fn filter_changed(node: &FileNode) -> Option<FileNode> {
-    if node.is_dir {
-        let children: Vec<FileNode> = node.children.iter().filter_map(filter_changed).collect();
-        if children.is_empty() {
-            return None;
-        }
-        let mut out = node.clone();
-        out.children = children;
-        Some(out)
-    } else if node.status.is_some() {
-        Some(node.clone())
-    } else {
-        None
     }
 }

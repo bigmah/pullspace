@@ -57,9 +57,44 @@ open in the same Split / Inline diff views, against the **merge base** — so yo
 see the PR's own changes, not everything that landed on the base branch since it
 was opened.
 
-The repository does not have to be cloned locally; file contents come from the
-API, fetched per file as you open them. `✕ close PR` returns to the local
-working tree.
+The repository does not have to be cloned locally. `✕ close PR` returns to the
+local working tree.
+
+### Where the files come from
+
+The top bar shows which of three sources is in play, because it is the
+difference between instant and a network round trip per file:
+
+| Badge | Meaning |
+| --- | --- |
+| `local` | A clone you already had. Fetching one PR ref into it takes about a second and no meaningful disk. |
+| `mirrored` | A bare clone under `~/.cache/pullspace/repos/`, for repos you don't have. |
+| `api` | No local repo available — one HTTPS request per file. |
+
+Reading a file locally takes about 5 ms against roughly 250 ms over the API,
+and the explorer's whole file tree comes straight from the object database
+(0.7 ms, with none of the API's size limits). Revisiting a PR, or opening
+another PR on the same repo, only fetches the new objects.
+
+Borrowing your own clone only ever **adds** objects and one ref under
+`refs/pullspace/<owner>/<repo>/pr/<n>`. Your branches, tags, HEAD, index and
+working tree are never touched. To see or remove them:
+
+```sh
+git for-each-ref refs/pullspace          # what pullspace added
+git for-each-ref --format='%(refname)' refs/pullspace | xargs -n1 git update-ref -d
+```
+
+Mirrors are capped at **5 GB total**, evicting least-recently-used repos to
+stay under it; the GitHub panel shows the current size and clears it. Override
+the cap with `PULLSPACE_CACHE_MAX_GB`. Clones you already had are never counted
+against the cap and never deleted — they aren't pullspace's to remove.
+
+Whichever source is used, opening a PR warms every file it changes, six at a
+time, so clicking through a review never waits — the top bar shows
+`warming n/total` until it finishes. Other files are fetched when you hover
+them in the tree. They aren't prefetched wholesale: a repository can hold 60k
+of them, though on a local source they are effectively free anyway.
 
 ### Signing in
 
@@ -90,8 +125,11 @@ credential at startup, in this order:
 
 `PULLSPACE_GITHUB_CLIENT_ID` overrides the saved client ID. Signing in through
 the app takes precedence over the ambient credentials, so it always has a
-visible effect. Public repositories can be browsed with no credential at all,
-subject to GitHub's 60 requests/hour unauthenticated limit.
+visible effect.
+
+Signing in is optional for public repositories — with no credential the app
+falls back to anonymous requests, subject to GitHub's 60 requests/hour
+unauthenticated limit. Private repositories report a 404 until you sign in.
 
 ## Architecture
 
@@ -101,6 +139,7 @@ src/
     mod.rs          FileContent: one side of a diff, whatever its source
     auth.rs         GitHub device flow, token storage & discovery
     github.rs       GitHub REST: PR lists, PR files, blob content
+    mirror.rs       local clones & bare mirrors; git2 object reads
     gitio.rs        git2: repo discovery, statuses, HEAD blob content
     tree.rs         file-tree model built from the worktree + git status
     difftool.rs     hunk/line/segment diff model (similar), split-row pairing
@@ -110,6 +149,7 @@ src/
   ui/               Dioxus components
     app.rs          state (signals + context), root layout
     github.rs       sign-in and pull request picker overlay
+    prcache.rs      PR file cache: prefetch, hover warming, source choice
     topbar.rs       brand, search, index status, account chip, refresh
     filetree.rs     recursive tree with status badges
     viewer.rs       source view, inline & split diff views, symbol actions
@@ -130,7 +170,12 @@ data source.
 - Pull requests are loaded as a snapshot; `⟳` does not re-poll GitHub.
 - The top bar flags a partial explorer: `truncated` (over GitHub's 3000-file
   cap per PR), `partial tree` (repo past GitHub's recursive-tree limit — about
-  60k files), or `changed files only` (the tree could not be read at all).
+  60k files, and only possible on the `api` source), or `changed files only`
+  (the tree could not be read at all).
+- Network git shells out to the `git` CLI. This crate's `git2` is built without
+  the `https` feature, which would drag in `openssl-sys`; reading objects still
+  uses `git2`. Tokens are passed via `--config-env`, so they never appear in
+  process arguments.
 - Files over ~400 KB / 6k lines render without highlighting for speed;
   binary files are detected and not rendered.
 - Search results are capped at 400 hits.

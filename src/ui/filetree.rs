@@ -3,6 +3,7 @@ use dioxus::prelude::*;
 use crate::backend::tree::FileNode;
 
 use super::app::St;
+use super::prcache::ensure_path;
 
 #[component]
 pub fn FileTreePane() -> Element {
@@ -96,11 +97,16 @@ fn TreeNode(node: FileNode, depth: usize) -> Element {
             Some(s) => format!("fname {}", s.css()),
             None => "fname".to_string(),
         };
+        let hover_key = node.path.clone();
         rsx! {
             div {
                 class: cls,
                 style: "{indent}",
                 onclick: move |_| st.open_file(path_key.clone()),
+                // Start the fetch on the way to the click. In PR mode this is
+                // usually what makes opening a file feel instant; outside it,
+                // and for anything already cached, it does nothing.
+                onmouseenter: move |_| ensure_path(st, &hover_key),
                 span { class: "arrow", "" }
                 span { class: "{name_cls}", "{node.name}" }
                 if let Some((b, c)) = badge {

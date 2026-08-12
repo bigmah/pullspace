@@ -3,7 +3,7 @@ use std::sync::OnceLock;
 
 use syntect::easy::HighlightLines;
 use syntect::highlighting::{Theme, ThemeSet};
-use syntect::parsing::SyntaxSet;
+use syntect::parsing::{SyntaxReference, SyntaxSet};
 use syntect::util::LinesWithEndings;
 
 #[derive(Clone, PartialEq)]
@@ -41,7 +41,22 @@ pub fn highlight(path: &Path, content: &str) -> Vec<Vec<Span>> {
                 .and_then(|l| ss.find_syntax_by_first_line(l))
         })
         .unwrap_or_else(|| ss.find_syntax_plain_text());
+    run(syntax, content)
+}
 
+/// The same, for a fenced code block in markdown — where the language arrives
+/// as the word after the fence (`rust`, `sh`, `jsx`) rather than as a path.
+/// An unknown or missing one is plain text, which is what it looks like anyway.
+pub fn highlight_lang(lang: &str, content: &str) -> Vec<Vec<Span>> {
+    let ss = syntaxes();
+    let syntax = ss
+        .find_syntax_by_token(lang)
+        .unwrap_or_else(|| ss.find_syntax_plain_text());
+    run(syntax, content)
+}
+
+fn run(syntax: &SyntaxReference, content: &str) -> Vec<Vec<Span>> {
+    let ss = syntaxes();
     let mut hl = HighlightLines::new(syntax, theme());
     let mut out = Vec::new();
     for line in LinesWithEndings::from(content) {

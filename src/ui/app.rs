@@ -1,19 +1,22 @@
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use dioxus::prelude::*;
 
 use crate::backend::auth::{Token, TokenSource};
+use crate::backend::branches::{self, CompareView};
 use crate::backend::github::{statuses_of, PrDetail, PrSummary, RepoRef, RepoView, Thread};
-use crate::backend::gitio::{discover_root, load_statuses};
+use crate::backend::gitio::{discover_root, load_changes, Stage};
 use crate::backend::layout;
+use crate::backend::markdown;
 use crate::backend::search::{search_repo, text_query, word_query, Hit};
 use crate::backend::symbols::{build_index, find_definitions, Symbol};
 use crate::backend::tree::{build_tree, build_tree_from_paths, filter_changed, ChangeKind, FileNode};
 use crate::backend::FileContent;
 
 use super::bottom::Bottom;
+use super::branches::BranchPanel;
 use super::conversation::ConvPane;
 use super::filetree::FileTreePane;
 use super::github::GhPanel;
@@ -30,6 +33,73 @@ pub enum ViewMode {
     Split,
     /// An HTML file drawn as the page it describes. Offered for HTML only.
     Preview,
+}
+
+/// Which two sides a local file is diffed between — the choice `git add` makes
+/// possible, and the one `git diff`, `git diff --staged` and `git diff HEAD`
+/// are three commands for.
+///
+/// Only the working tree has this. A pull request's diff is fixed by the two
+/// commits it names, and so is a comparison's.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum DiffSide {
+    /// HEAD against the files on disk: everything since the last commit,
+    /// staged or not. What the app has always shown, and the default.
+    Worktree,
+    /// HEAD against the index: what a commit right now would contain.
+    Staged,
+    /// The index against the files on disk: what a commit right now would
+    /// leave behind.
+    Unstaged,
+}
+
+impl DiffSide {
+    pub fn label(&self) -> &'static str {
+        match self {
+            DiffSide::Worktree => "All",
+            DiffSide::Staged => "Staged",
+            DiffSide::Unstaged => "Unstaged",
+        }
+    }
+
+    pub fn why(&self) -> &'static str {
+        match self {
+            DiffSide::Worktree => {
+                "Everything since the last commit — HEAD against the files on disk (git diff HEAD)"
+            }
+            DiffSide::Staged => {
+                "What you have added — HEAD against the index (git diff --staged)"
+            }
+            DiffSide::Unstaged => {
+                "What you have not added yet — the index against the files on disk (git diff)"
+            }
+        }
+    }
+
+    /// Whether a file at `stage` has anything to show on this side.
+    pub fn exists_for(&self, stage: Stage) -> bool {
+        match self {
+            DiffSide::Worktree => true,
+            DiffSide::Staged => stage.is_staged(),
+            DiffSide::Unstaged => stage.is_unstaged(),
+        }
+    }
+
+    /// The side to actually show for a file at `stage`.
+    ///
+    /// Asking for the staged half of a file with nothing staged has one honest
+    /// answer — "no differences" — and it is a bad one: the explorer badges
+    /// that file as changed, and it is. So the half that exists is shown
+    /// instead, and the control moves to say so.
+    pub fn resolve(self, stage: Option<Stage>) -> DiffSide {
+        match stage {
+            Some(stage) if !self.exists_for(stage) => match self {
+                DiffSide::Staged => DiffSide::Unstaged,
+                _ => DiffSide::Staged,
+            },
+            _ => self,
+        }
+    }
 }
 
 #[derive(Clone, PartialEq)]
@@ -57,7 +127,8 @@ pub enum BottomPanel {
 }
 
 /// What the explorer and viewer are showing: the local working tree, a pull
-/// request fetched from GitHub, or a GitHub repository browsed on its own.
+/// request fetched from GitHub, a GitHub repository browsed on its own, or two
+/// local branches held up against each other.
 #[derive(Clone, PartialEq)]
 pub enum Workspace {
     Local,
@@ -65,6 +136,11 @@ pub enum Workspace {
     /// A repository with no pull request in view — because it has none open,
     /// or because reading the code is the point.
     Repo(Box<RepoView>),
+    /// Two revisions of the repository already on disk. Read out of the object
+    /// database rather than over the network, so it needs no cache and no
+    /// warming — but it changes what "changed" means, exactly as a pull
+    /// request does.
+    Compare(Box<CompareView>),
 }
 
 impl Workspace {
@@ -82,11 +158,20 @@ impl Workspace {
         }
     }
 
-    /// Anything read from GitHub rather than from the working tree. The two
-    /// remote cases share a file cache, a source and a scan root, so most of
-    /// the app only needs to know which side of this line it is on.
+    pub fn compare(&self) -> Option<&CompareView> {
+        match self {
+            Workspace::Compare(view) => Some(view),
+            _ => None,
+        }
+    }
+
+    /// Anything read from GitHub rather than from disk. The two remote cases
+    /// share a file cache, a source and a scan root, so most of the app only
+    /// needs to know which side of this line it is on — and a comparison, whose
+    /// files are two git blobs away, is on the near side of it with the working
+    /// tree.
     pub fn is_remote(&self) -> bool {
-        !matches!(self, Workspace::Local)
+        matches!(self, Workspace::Pr(_) | Workspace::Repo(_))
     }
 }
 
@@ -192,13 +277,31 @@ pub struct St {
     /// they did not ask.
     pub scan_root: Signal<ScanRoot>,
     pub statuses: Signal<HashMap<PathBuf, ChangeKind>>,
+    /// Which side of `git add` each local change is on. Empty whenever what is
+    /// on screen is not the working tree — there is no index in a pull request.
+    pub stages: Signal<HashMap<PathBuf, Stage>>,
     pub open: Signal<Option<PathBuf>>,
     pub view_mode: Signal<ViewMode>,
+    /// Which two sides a local diff is taken between. Ignored everywhere else,
+    /// and kept across files so that a review of what is staged stays one.
+    pub diff_side: Signal<DiffSide>,
     pub bottom: Signal<BottomPanel>,
     pub selected: Signal<Option<String>>,
     pub pending_scroll: Signal<Option<usize>>,
     pub index: Signal<Option<Vec<Symbol>>>,
+    /// Which directories of the explorer are open. Every directory has an entry
+    /// from the moment it is first drawn, so what is open is a record of what
+    /// was clicked rather than something re-derived from what has changed —
+    /// see `backend::tree::seed_expansion`.
     pub expanded: Signal<HashMap<PathBuf, bool>>,
+    /// Whether `expanded` has been filled in for what is on screen now. False
+    /// means the next tree drawn is a new one, and gets the arrival view: the
+    /// root open, and the way down to every change open with it.
+    pub tree_seeded: Signal<bool>,
+    /// The explorer's filter box: a substring of the path, narrowing the tree
+    /// to a flat list of matches. Nothing to do with `search_text`, which
+    /// searches inside files.
+    pub tree_filter: Signal<String>,
     pub changes_only: Signal<bool>,
     pub refresh_tick: Signal<u32>,
     pub search_text: Signal<String>,
@@ -208,6 +311,9 @@ pub struct St {
     pub token: Signal<Option<Token>>,
     pub account: Signal<Account>,
     pub gh_open: Signal<bool>,
+    /// Whether the branch panel — which branch this is, and which two to
+    /// compare — is up.
+    pub branch_open: Signal<bool>,
     pub client_id_input: Signal<String>,
     pub repo_input: Signal<String>,
     pub prs: Signal<PrList>,
@@ -255,12 +361,36 @@ impl St {
     pub fn refresh(&self) {
         // What came from GitHub is a fixed snapshot; reloading git status would
         // replace its file list with the local working tree's.
-        if self.workspace.peek().is_remote() {
+        let comparing = match &*self.workspace.peek() {
+            Workspace::Pr(_) | Workspace::Repo(_) => return,
+            Workspace::Compare(view) => Some((view.base.clone(), view.head.clone())),
+            Workspace::Local => None,
+        };
+        // A comparison is of two branches, either of which may have moved since
+        // it was made — so reloading one means making it again. Off the UI
+        // thread: it walks two trees, which on a large repository is not free.
+        if let Some((base, head)) = comparing {
+            let st = *self;
+            let root = self.root_path();
+            spawn_forever(async move {
+                let done =
+                    tokio::task::spawn_blocking(move || branches::compare(&root, &base, &head))
+                        .await;
+                // A failure here means a branch was deleted out from under an
+                // open comparison. The one on screen is still readable, so it
+                // stays: `⟳` is not a request to be thrown out of it.
+                if let Ok(Ok(view)) = done {
+                    st.enter_compare(view);
+                }
+            });
             return;
         }
         let root = self.root_path();
+        let changes = load_changes(&root);
         let mut statuses = self.statuses;
-        statuses.set(load_statuses(&root));
+        statuses.set(changes.kinds);
+        let mut stages = self.stages;
+        stages.set(changes.stages);
         let mut tick = self.refresh_tick;
         let v = *tick.peek();
         tick.set(v + 1);
@@ -277,13 +407,28 @@ impl St {
         ps.set(None);
         let mut bottom = self.bottom;
         bottom.set(BottomPanel::Hidden);
-        let mut expanded = self.expanded;
-        expanded.set(HashMap::new());
+        self.reset_tree_folds();
+        // Narrowing the explorer was about the files that were in it. Left
+        // behind, it hides most of whatever is being opened instead.
+        let mut tree_filter = self.tree_filter;
+        tree_filter.set(String::new());
         // The results are gone, so the term that produced them has to go too:
         // left behind it reads as a search still in effect, and it covers the
         // placeholder that explains when a pull request cannot be searched.
         let mut search_text = self.search_text;
         search_text.set(String::new());
+    }
+
+    /// Forget which directories were open, so the next tree drawn gets the
+    /// arrival view rather than the last one's folds.
+    ///
+    /// For a different tree, not a changed one: a file appearing or a status
+    /// moving must leave the explorer exactly where the reader put it.
+    pub fn reset_tree_folds(&self) {
+        let mut expanded = self.expanded;
+        expanded.set(HashMap::new());
+        let mut seeded = self.tree_seeded;
+        seeded.set(false);
     }
 
     /// Point search and the symbol index at another directory, dropping the
@@ -308,20 +453,33 @@ impl St {
     /// browsable too, just without statuses or diffs.
     pub fn open_repo(&self, path: PathBuf) {
         let root = discover_root(&path).unwrap_or(path);
-        if root == *self.root.peek() && !self.workspace.peek().is_remote() {
+        if root == *self.root.peek() && *self.workspace.peek() == Workspace::Local {
             self.refresh();
             return;
         }
         let mut r = self.root;
         r.set(root.clone());
 
-        self.leave_remote_state();
+        self.reset_to_worktree();
         self.clear_view();
 
         self.refresh();
+        self.open_local_readme();
     }
 
-    fn leave_remote_state(&self) {
+    /// Land on the working tree's own front page, when there is one and nothing
+    /// else is being read. The same thing the app starts on, so coming back to
+    /// the working tree lands where opening it would have.
+    fn open_local_readme(&self) {
+        if self.open.peek().is_some() {
+            return;
+        }
+        if let Some(readme) = local_readme(&self.root_path()) {
+            self.open_file(readme);
+        }
+    }
+
+    fn reset_to_worktree(&self) {
         let mut ws = self.workspace;
         ws.set(Workspace::Local);
         let mut cache = self.pr_files;
@@ -347,13 +505,54 @@ impl St {
 
     /// Show a repository on its own — no pull request, so no changed files and
     /// no diffs, just the code at `view.head_sha`.
+    ///
+    /// It opens on the README, drawn rather than as source. A repository with
+    /// no pull request in it is being opened to be read, and the front page is
+    /// what it is written to be read from — an empty pane with a button in it
+    /// is not the answer to "show me this repository".
     pub fn enter_repo(&self, view: RepoView, source: PrSource, checkout: ScanRoot) {
         let reload = self
             .workspace
             .peek()
             .repo()
             .is_some_and(|open| open.repo == view.repo);
+        let readme = markdown::readme_of(view.tree.iter().map(|p| p.as_path()));
         self.enter_remote(Workspace::Repo(Box::new(view)), reload, source, checkout);
+        // Not on a reload: that keeps whatever was being read, and coming back
+        // to the README is a click on the tree away.
+        if !reload && let Some(readme) = readme {
+            self.open_file(readme);
+        }
+    }
+
+    /// Show two revisions of the repository on disk against each other. The
+    /// changed files become the tree's badges and the viewer's diffs, exactly
+    /// as a pull request's do.
+    pub fn enter_compare(&self, view: CompareView) {
+        let reload = self
+            .workspace
+            .peek()
+            .compare()
+            .is_some_and(|open| open.base == view.base && open.head == view.head);
+        if !reload {
+            self.clear_view();
+            // Nothing on screen came from GitHub any more.
+            let mut cache = self.pr_files;
+            cache.set(HashMap::new());
+            self.set_scan_root(ScanRoot::Dir(self.root_path()));
+        }
+        let mut statuses = self.statuses;
+        statuses.set(view.statuses());
+        // Two commits, so nothing here is on either side of `git add`.
+        let mut stages = self.stages;
+        stages.set(HashMap::new());
+        let mut w = self.workspace;
+        w.set(Workspace::Compare(Box::new(view)));
+        let mut panel = self.branch_open;
+        panel.set(false);
+        let mut tick = self.refresh_tick;
+        let v = *tick.peek();
+        tick.set(v + 1);
     }
 
     /// Swap in something fetched from GitHub, whichever kind it is.
@@ -385,6 +584,9 @@ impl St {
         let mut statuses = self.statuses;
         // A repository browsed on its own has nothing changed in it.
         statuses.set(ws.pr().map(|pr| statuses_of(&pr.files)).unwrap_or_default());
+        // Nothing fetched from GitHub has an index behind it.
+        let mut stages = self.stages;
+        stages.set(HashMap::new());
         let mut w = self.workspace;
         w.set(ws);
         let mut gh = self.gh_open;
@@ -394,22 +596,46 @@ impl St {
         tick.set(v + 1);
     }
 
-    /// Back to the local working tree.
-    pub fn leave_remote(&self) {
-        self.leave_remote_state();
+    /// Back to the local working tree, from whatever was standing in front of
+    /// it: a pull request, a repository being browsed, or a comparison.
+    pub fn back_to_worktree(&self) {
+        self.reset_to_worktree();
         self.clear_view();
         self.refresh();
+        self.open_local_readme();
     }
 
-    /// Open a file from the tree: changed files land in split-diff view.
+    /// Open a file from the tree: changed files land in split-diff view, and
+    /// prose lands rendered — markdown is written to be read, and the source of
+    /// it is one button away.
     pub fn open_file(&self, rel: PathBuf) {
         let changed = self.statuses.peek().get(&rel).is_some();
         let mut vm = self.view_mode;
-        vm.set(if changed { ViewMode::Split } else { ViewMode::Source });
+        vm.set(match () {
+            _ if changed => ViewMode::Split,
+            _ if markdown::is_markdown(&rel) => ViewMode::Preview,
+            _ => ViewMode::Source,
+        });
         let mut sel = self.selected;
         sel.set(None);
         let mut open = self.open;
         open.set(Some(rel));
+    }
+
+    /// Whether a repo-relative path is one of the files on show. What a link in
+    /// a README is checked against before it is followed, so a stale one is
+    /// left alone rather than opening an error where the document was.
+    pub fn has_file(&self, rel: &Path) -> bool {
+        match &*self.workspace.peek() {
+            Workspace::Local => self.root_path().join(rel).is_file(),
+            // A pull request whose tree could not be read still knows the files
+            // it changes.
+            Workspace::Pr(pr) => {
+                pr.tree.iter().any(|p| p == rel) || pr.files.iter().any(|f| f.path == rel)
+            }
+            Workspace::Repo(view) => view.tree.iter().any(|p| p == rel),
+            Workspace::Compare(view) => view.tree.iter().any(|p| p == rel),
+        }
     }
 
     /// Jump to a specific line (search result, definition, reference).
@@ -501,6 +727,49 @@ impl St {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_file_falls_back_to_the_half_it_actually_has() {
+        // Asked for what is staged, in a file where nothing is.
+        assert_eq!(
+            DiffSide::Staged.resolve(Some(Stage::Unstaged)),
+            DiffSide::Unstaged
+        );
+        assert_eq!(
+            DiffSide::Unstaged.resolve(Some(Stage::Staged)),
+            DiffSide::Staged
+        );
+        // A file with both keeps whatever was asked for, and so does the view
+        // of everything since the last commit.
+        assert_eq!(DiffSide::Staged.resolve(Some(Stage::Both)), DiffSide::Staged);
+        assert_eq!(
+            DiffSide::Unstaged.resolve(Some(Stage::Both)),
+            DiffSide::Unstaged
+        );
+        assert_eq!(
+            DiffSide::Worktree.resolve(Some(Stage::Staged)),
+            DiffSide::Worktree
+        );
+        // Nothing staged either way — a pull request — is left alone.
+        assert_eq!(DiffSide::Staged.resolve(None), DiffSide::Staged);
+    }
+}
+
+/// The README of a directory on disk. One listing of the top level, which is
+/// what a repository's front page can be found in and nowhere else.
+fn local_readme(root: &Path) -> Option<PathBuf> {
+    let names: Vec<PathBuf> = std::fs::read_dir(root)
+        .ok()?
+        .flatten()
+        .filter(|e| e.file_type().is_ok_and(|t| t.is_file()))
+        .map(|e| PathBuf::from(e.file_name()))
+        .collect();
+    markdown::readme_of(names.iter().map(|p| p.as_path()))
+}
+
 #[component]
 pub fn App() -> Element {
     let st = use_context_provider(|| {
@@ -513,10 +782,16 @@ pub fn App() -> Element {
             .map(PathBuf::from)
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
         let root = discover_root(&arg).unwrap_or(arg);
-        let statuses = load_statuses(&root);
+        let changes = load_changes(&root);
+        let statuses = changes.kinds;
 
-        // Optional second positional arg: open this file (repo-relative) on launch.
-        let open = positional.get(1).map(PathBuf::from);
+        // Optional second positional arg: open this file (repo-relative) on
+        // launch. With none, the repository's own front page — the same thing
+        // opening one from GitHub lands on.
+        let open = positional
+            .get(1)
+            .map(PathBuf::from)
+            .or_else(|| local_readme(&root));
         let mode_flag = std::env::args().find_map(|a| {
             a.strip_prefix("--mode=").map(|m| match m {
                 "inline" => ViewMode::Inline,
@@ -525,11 +800,10 @@ pub fn App() -> Element {
                 _ => ViewMode::Source,
             })
         });
-        let view_mode = mode_flag.unwrap_or_else(|| {
-            match open.as_ref().map(|p| statuses.contains_key(p)) {
-                Some(true) => ViewMode::Split,
-                _ => ViewMode::Source,
-            }
+        let view_mode = mode_flag.unwrap_or_else(|| match open.as_ref() {
+            Some(p) if statuses.contains_key(p) => ViewMode::Split,
+            Some(p) if markdown::is_markdown(p) => ViewMode::Preview,
+            _ => ViewMode::Source,
         });
 
         // Pre-fill the PR picker from the clone's own remote when there is one.
@@ -545,13 +819,17 @@ pub fn App() -> Element {
             root: Signal::new(root.clone()),
             scan_root: Signal::new(ScanRoot::Dir(root)),
             statuses: Signal::new(statuses),
+            stages: Signal::new(changes.stages),
             open: Signal::new(open),
             view_mode: Signal::new(view_mode),
+            diff_side: Signal::new(DiffSide::Worktree),
             bottom: Signal::new(BottomPanel::Hidden),
             selected: Signal::new(None),
             pending_scroll: Signal::new(None),
             index: Signal::new(None),
             expanded: Signal::new(HashMap::new()),
+            tree_seeded: Signal::new(false),
+            tree_filter: Signal::new(String::new()),
             changes_only: Signal::new(false),
             refresh_tick: Signal::new(0),
             search_text: Signal::new(String::new()),
@@ -559,6 +837,7 @@ pub fn App() -> Element {
             token: Signal::new(None),
             account: Signal::new(Account::Checking),
             gh_open: Signal::new(false),
+            branch_open: Signal::new(false),
             client_id_input: Signal::new(
                 crate::backend::auth::client_id().unwrap_or_default(),
             ),
@@ -590,6 +869,11 @@ pub fn App() -> Element {
             ),
             Workspace::Repo(view) => build_tree_from_paths(
                 &format!("{} @ {}", view.repo, view.branch),
+                view.tree.iter().map(|p| p.as_path()),
+                &statuses,
+            ),
+            Workspace::Compare(view) => build_tree_from_paths(
+                &view.label(),
                 view.tree.iter().map(|p| p.as_path()),
                 &statuses,
             ),
@@ -732,6 +1016,9 @@ pub fn App() -> Element {
             }
             if *st.gh_open.read() {
                 GhPanel {}
+            }
+            if *st.branch_open.read() {
+                BranchPanel {}
             }
             DragMask {}
         }

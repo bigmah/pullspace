@@ -137,6 +137,62 @@ button { font-family: inherit; user-select: none; }
   user-select: none;
 }
 
+/* What you are looking at, in the same place whatever it is: the working tree,
+   a pull request, a repository, a comparison. Four things that draw the same
+   badges and the same diffs, and this is the one line that tells them apart. */
+.wschip {
+  font-family: var(--mono);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.6px;
+  text-transform: uppercase;
+  border-radius: 3px;
+  padding: 2px 6px;
+  flex: none;
+  white-space: nowrap;
+  user-select: none;
+}
+
+.wschip.local {
+  color: var(--fg-faint);
+  background: var(--bg-3);
+  box-shadow: inset 0 0 0 1px var(--line);
+}
+
+.wschip.pr {
+  color: var(--accent);
+  background: var(--accent-soft);
+  box-shadow: inset 0 0 0 1px var(--accent-line);
+}
+
+.wschip.repo {
+  color: var(--fg-dim);
+  background: var(--bg-3);
+  box-shadow: inset 0 0 0 1px var(--line);
+}
+
+.wschip.cmp {
+  color: var(--modified);
+  background: rgba(226, 179, 76, 0.14);
+  box-shadow: inset 0 0 0 1px rgba(226, 179, 76, 0.4);
+}
+
+/* How much is on each side of `git add`. Green for what a commit would take,
+   amber for what it would leave — the same two colours the badges use. */
+.stgcount {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  border-radius: 3px;
+  padding: 2px 6px;
+  flex: none;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.stgcount.stg { color: var(--added); background: rgba(79, 191, 122, 0.14); }
+.stgcount.unstg { color: var(--modified); background: rgba(226, 179, 76, 0.14); }
+.stgcount.clean { color: var(--fg-faint); }
+
 .repopath {
   color: var(--fg-faint);
   font-family: var(--mono);
@@ -343,6 +399,11 @@ button { font-family: inherit; user-select: none; }
      webview hands back an I-beam over every label in it. */
   cursor: default;
   user-select: none;
+  /* The indent guides. Barely there on purpose: they are for following a
+     column of names back to the folder it came out of, and anything stronger
+     draws the eye to the ruling rather than to the files. */
+  --guide: #2b2e38;
+  --step: 14px;
 }
 
 /* The same height and the same rule as the viewer's header and the
@@ -350,7 +411,7 @@ button { font-family: inherit; user-select: none; }
 .side-hdr {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  gap: 8px;
   height: var(--hdr);
   padding: 0 6px 0 12px;
   border-bottom: 1px solid var(--border);
@@ -365,6 +426,71 @@ button { font-family: inherit; user-select: none; }
   user-select: none;
 }
 
+/* How much is changed, where the eye already is for the heading. The Δ toggle
+   right beside it turns the tree down to exactly these files. */
+.side-count {
+  font-family: var(--mono);
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--modified);
+  background: rgba(226, 179, 76, 0.14);
+  border-radius: 8px;
+  padding: 1px 6px;
+  flex: none;
+}
+
+.side-hdr .iconbtn { margin-left: auto; }
+
+/* ---------- explorer filter ---------- */
+
+.tree-find {
+  position: relative;
+  display: flex;
+  align-items: center;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border-soft);
+  flex: none;
+}
+
+.findbox {
+  width: 100%;
+  height: 26px;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  color: var(--fg);
+  font-family: var(--sans);
+  font-size: 12px;
+  padding: 0 26px 0 8px;
+  outline: none;
+  transition: border-color var(--quick) var(--ease), box-shadow var(--quick) var(--ease);
+}
+
+.findbox::placeholder { color: var(--fg-faint); }
+.findbox:hover { border-color: var(--line); }
+.findbox:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+
+.findclear {
+  position: absolute;
+  right: 13px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  background: transparent;
+  border: 0;
+  border-radius: 50%;
+  color: var(--fg-faint);
+  font-size: 10px;
+  line-height: 1;
+  cursor: pointer;
+  transition: background-color var(--quick) var(--ease), color var(--quick) var(--ease);
+}
+
+.findclear:hover { background: var(--bg-4); color: var(--fg); }
+
 /* Every row in here opens something, so the whole strip reads as clickable —
    including the indent to the left of a name and the gap below the last row.
    The gutter is held open whether or not there is anything to scroll, so
@@ -378,6 +504,15 @@ button { font-family: inherit; user-select: none; }
 
 .tree-empty { color: var(--fg-faint); padding: 14px; font-size: 12px; cursor: default; }
 
+/* What the filter is not showing. A list silently cut off at 400 reads as a
+   complete answer to the wrong question. */
+.tree-more {
+  color: var(--fg-faint);
+  padding: 10px 12px 4px;
+  font-size: 11px;
+  cursor: default;
+}
+
 .row {
   display: flex;
   align-items: center;
@@ -388,6 +523,15 @@ button { font-family: inherit; user-select: none; }
   white-space: nowrap;
   overflow: hidden;
   user-select: none;
+  /* One line down through each open folder's chevron, drawn as a background
+     rather than as a span per level: at four deep that would be four more
+     elements on every row of a list that is long by nature. `--lvl` is the
+     number of lines, set per row; the first is skipped, since a single rule
+     down the left-hand edge of the whole panel guides nothing. */
+  background-image: repeating-linear-gradient(to right, var(--guide) 0 1px, transparent 1px var(--step));
+  background-position: calc(2 * var(--step) + 1px) 0;
+  background-size: calc(var(--lvl, 0) * var(--step)) 100%;
+  background-repeat: no-repeat;
   /* The inset shadow is the active marker; declaring it here means it fades in
      rather than appearing whole. The background is deliberately not in that
      list: hover is the one thing here that has to keep up with the pointer, and
@@ -397,27 +541,93 @@ button { font-family: inherit; user-select: none; }
   transition: box-shadow 80ms var(--ease);
 }
 
-.row:hover { background: var(--bg-2); }
+/* `background-color`, not `background` — the shorthand would take the indent
+   guides down with it every time the pointer crossed a row. */
+.row:hover { background-color: var(--bg-2); }
 /* Which file is open is the most important thing the explorer says. A shade of
    background is a 3% difference to find at a glance, so it gets an accent edge
    as well — and the name takes the weight rather than a colour, which would
    argue with the status colours that are already there. */
-.row.active { background: var(--bg-3); box-shadow: inset 2px 0 0 var(--accent); }
+.row.active { background-color: var(--bg-3); box-shadow: inset 2px 0 0 var(--accent); }
 .row.active .fname, .row.active .dirname { font-weight: 600; }
 
+/* A fixed column that a file leaves empty and a folder fills, so names line up
+   whether or not there is a chevron in front of them. */
 .arrow {
   width: 14px;
+  height: 100%;
   flex: none;
-  color: var(--fg-faint);
-  font-size: 10px;
-  text-align: center;
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }
 
-.dirname { color: var(--fg-dim); font-size: 12.5px; }
+/* Drawn rather than typed. The glyphs for this vary enough between fonts that
+   one sits low and the next sits off-centre, and a triangle that is turning has
+   to be square in its box or it wobbles as it goes round. */
+.row.dir .arrow::before {
+  content: "";
+  width: 0;
+  height: 0;
+  border-left: 4px solid var(--fg-faint);
+  border-top: 3.5px solid transparent;
+  border-bottom: 3.5px solid transparent;
+  /* The triangle's centroid, which is what it appears to turn about. */
+  transform-origin: 33% 50%;
+  transition: transform 130ms var(--ease), border-left-color var(--quick) var(--ease);
+}
+
+/* The fold is the same triangle turned a quarter, not a second glyph — so
+   opening a folder is a movement to follow rather than a swap to notice. */
+.row.dir.open .arrow::before { transform: rotate(90deg); }
+.row.dir:hover .arrow::before { border-left-color: var(--fg); }
+
+.dirname { color: var(--fg-dim); font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; }
+
+/* The repository, the pull request, the pair of branches: the one row that says
+   what all of this is. */
+.row.dir.root .dirname { color: var(--fg); font-weight: 600; }
 
 .fname { color: var(--fg); font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; }
 
-.chdot { color: var(--modified); font-size: 7px; margin-left: 4px; }
+/* How many changed files are inside a folder that is shut. Open, the badges
+   down the side say the same thing in more detail, so it goes away. */
+.dcount {
+  margin-left: auto;
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 16px;
+  height: 15px;
+  padding: 0 4px;
+  border-radius: 8px;
+  font-family: var(--mono);
+  font-size: 9.5px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  color: var(--modified);
+  background: rgba(226, 179, 76, 0.14);
+}
+
+/* ---------- filtered explorer ---------- */
+
+/* Filtered, this is a list of answers rather than a tree: the folders on the
+   way to a match are not part of what was asked for, so each row carries the
+   directory it came from instead and the hierarchy goes away. */
+.tree.flat .fname { flex: none; }
+/* No chevrons to line up under, and the room is wanted by the paths. */
+.tree.flat .arrow { width: 2px; }
+
+.fpath {
+  flex: 0 1 auto;
+  min-width: 0;
+  margin-left: 6px;
+  color: var(--fg-faint);
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 
 /* A single letter carrying the whole status. It had padding and a radius but
    nothing to put them around — a tinted chip is what those were reaching for,
@@ -447,6 +657,14 @@ button { font-family: inherit; user-select: none; }
 .badge.st-deleted { background: rgba(224, 108, 117, 0.15); text-decoration: none; }
 .badge.st-conflict { background: rgba(216, 88, 200, 0.15); }
 
+/* Which side of `git add` the file is on, in the chip that is already there
+   rather than in a second mark beside it. Staged is boxed — it is settled, one
+   commit from being history. Unstaged is the loose tinted chip it always was.
+   Partly staged gets the left edge of the box only, because that is what it
+   is: half in. */
+.badge.stg { box-shadow: inset 0 0 0 1px currentColor; }
+.badge.half { box-shadow: inset 2px 0 0 0 currentColor; }
+
 /* ---------- viewer ---------- */
 
 .viewer { display: flex; flex-direction: column; flex: 1; min-height: 0; }
@@ -472,6 +690,26 @@ button { font-family: inherit; user-select: none; }
 }
 
 .delnote { color: var(--deleted); font-size: 11px; flex: none; }
+
+/* Where this file stands with `git add`, next to the counts of what changed in
+   it. The buttons on the right say which diff is being shown; this says which
+   ones there are to show. */
+.stgnote {
+  font-family: var(--mono);
+  font-size: 10px;
+  border-radius: 3px;
+  padding: 1px 5px;
+  flex: none;
+  white-space: nowrap;
+}
+
+.stgnote.stg { color: var(--added); background: rgba(79, 191, 122, 0.14); }
+.stgnote.unstg { color: var(--modified); background: rgba(226, 179, 76, 0.14); }
+.stgnote.half {
+  color: var(--modified);
+  background: rgba(226, 179, 76, 0.14);
+  box-shadow: inset 2px 0 0 0 var(--added);
+}
 
 .dstat { font-family: var(--mono); font-size: 11px; font-weight: 700; flex: none; }
 .dstat.add { color: var(--added); }
@@ -570,6 +808,16 @@ button { font-family: inherit; user-select: none; }
 }
 
 .welcome-sub { color: var(--fg-dim); margin-bottom: 16px; }
+
+/* The same pane, when something *is* open and no file in it has been picked —
+   so it says what is on screen rather than what the app is called. */
+.welcome-title {
+  font-family: var(--mono);
+  font-size: 15px;
+  color: var(--fg);
+  margin-bottom: 8px;
+}
+
 .welcome-hint { color: var(--fg-faint); font-size: 12px; line-height: 1.7; }
 .welcome .primarybtn { margin-top: 22px; }
 
@@ -1402,6 +1650,212 @@ button { font-family: inherit; user-select: none; }
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
+/* ---------- branches ---------- */
+
+/* Which branch this is, in the top bar. A chip rather than more grey text
+   beside the path: it is the one piece of state up there you can act on. */
+.branchchip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: var(--ctl);
+  padding: 0 10px;
+  background: transparent;
+  border: 1px solid var(--line);
+  border-radius: var(--r);
+  color: var(--fg-dim);
+  cursor: pointer;
+  font-size: 11.5px;
+  flex: none;
+  max-width: 240px;
+  transition: background-color var(--quick) var(--ease), color var(--quick) var(--ease),
+    border-color var(--quick) var(--ease);
+}
+
+.branchchip:hover { color: var(--fg); border-color: var(--fg-faint); background: var(--bg-3); }
+
+/* Detached: not on a branch, which is worth noticing before you compare
+   something against it. */
+.branchchip.loose { color: var(--modified); border-color: rgba(226, 179, 76, 0.4); }
+
+.branchglyph { font-size: 12px; opacity: 0.8; flex: none; }
+
+.branchlabel {
+  font-family: var(--mono);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.branchnow { display: flex; align-items: center; gap: 8px; }
+
+.branchname {
+  font-family: var(--mono);
+  font-size: 12.5px;
+  color: var(--accent);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Two of these and a button share one row, so neither end is allowed to grow
+   past its half of it however long a branch name gets. */
+.branchrow { flex-wrap: wrap; }
+
+.branchsel {
+  flex: 1 1 160px;
+  min-width: 0;
+  height: 32px;
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  border-radius: var(--r);
+  color: var(--fg);
+  font-family: var(--mono);
+  font-size: 12px;
+  padding: 0 28px 0 10px;
+  cursor: pointer;
+  /* The platform's own arrow is a lozenge in the middle of a light grey box;
+     this is the same chevron the rest of the app draws. */
+  appearance: none;
+  background-image: linear-gradient(45deg, transparent 50%, var(--fg-faint) 50%),
+    linear-gradient(135deg, var(--fg-faint) 50%, transparent 50%);
+  background-position: calc(100% - 15px) 14px, calc(100% - 10px) 14px;
+  background-size: 5px 5px, 5px 5px;
+  background-repeat: no-repeat;
+  transition: border-color var(--quick) var(--ease), box-shadow var(--quick) var(--ease);
+}
+
+.branchsel:hover { border-color: var(--bg-4); }
+.branchsel:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+
+/* ---------- markdown ---------- */
+
+.mdwrap { display: flex; flex-direction: column; align-items: stretch; }
+
+.mdbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px 0;
+  flex: none;
+}
+
+/* Prose, at a width it can be read at. A README stretched across a 2000px
+   window is a README nobody finishes a line of. */
+.mddoc {
+  max-width: 760px;
+  padding: 20px 24px 60vh;
+  font-size: 13.5px;
+  line-height: 1.65;
+  color: var(--fg);
+  user-select: text;
+}
+
+.mdempty { color: var(--fg-faint); font-size: 12px; }
+
+.mdh { font-weight: 700; line-height: 1.3; margin: 26px 0 10px; color: #e8ecf4; }
+.mddoc > .mdh:first-child { margin-top: 0; }
+
+/* The two that open sections get the rule under them, as they do everywhere
+   else markdown is drawn. */
+.mdh1 { font-size: 24px; padding-bottom: 8px; border-bottom: 1px solid var(--border); }
+.mdh2 { font-size: 18.5px; padding-bottom: 6px; border-bottom: 1px solid var(--border-soft); }
+.mdh3 { font-size: 15.5px; }
+.mdh4 { font-size: 14px; }
+.mdh5 { font-size: 13px; }
+.mdh6 { font-size: 12.5px; color: var(--fg-dim); }
+
+/* Hard line breaks are kept, which is the whole reason the source's own
+   wrapping had to be normalised to spaces before it got here. */
+.mdp { margin: 10px 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+
+.mdb { font-weight: 700; color: #e8ecf4; }
+.mdi { font-style: italic; }
+.mds { text-decoration: line-through; color: var(--fg-faint); }
+
+.mdc {
+  font-family: var(--mono);
+  font-size: 12px;
+  background: var(--bg-2);
+  border: 1px solid var(--border-soft);
+  border-radius: 3px;
+  padding: 1px 5px;
+}
+
+.mda { color: var(--accent); cursor: pointer; }
+.mda:hover { text-decoration: underline; }
+
+/* Images are never fetched — see backend/markdown.rs. The alt text is what
+   there is, and this is what says it stood in for a picture. */
+.mdimg {
+  font-size: 11.5px;
+  color: var(--fg-faint);
+  border: 1px dashed var(--line);
+  border-radius: 3px;
+  padding: 0 5px;
+}
+
+.mdimg::before { content: "▣ "; opacity: 0.7; }
+.mdimg.mda { color: var(--accent); opacity: 0.85; }
+
+.mdcode {
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.55;
+  background: var(--bg-1);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--r);
+  padding: 10px 12px;
+  margin: 12px 0;
+  overflow-x: auto;
+}
+
+.mdcl { white-space: pre; min-height: 1.55em; }
+
+.mdquote {
+  border-left: 3px solid var(--line);
+  padding: 2px 0 2px 14px;
+  margin: 12px 0;
+  color: var(--fg-dim);
+}
+
+.mdlist { margin: 8px 0; }
+
+/* The marker sits in its own column so wrapped text lines up under the first
+   word rather than under the bullet. */
+.mditem { display: flex; gap: 10px; align-items: baseline; margin: 4px 0; }
+
+.mdmark {
+  flex: none;
+  min-width: 18px;
+  text-align: right;
+  color: var(--fg-faint);
+  font-variant-numeric: tabular-nums;
+  user-select: none;
+}
+
+.mdbody { min-width: 0; flex: 1; }
+.mdbody > .mdp:first-child { margin-top: 0; }
+.mdbody > .mdp:last-child { margin-bottom: 0; }
+
+.mdrule { border-top: 1px solid var(--border); margin: 22px 0; }
+
+/* A table wider than the pane scrolls inside itself; the prose around it does
+   not move. */
+.mdtablewrap { overflow-x: auto; margin: 14px 0; }
+
+.mdtable { border-collapse: collapse; font-size: 12.5px; }
+
+.mdtable th, .mdtable td {
+  border: 1px solid var(--border);
+  padding: 6px 10px;
+  text-align: left;
+  vertical-align: top;
+}
+
+.mdtable th { background: var(--bg-2); font-weight: 700; white-space: nowrap; }
+.mdtable tbody tr:nth-child(even) { background: rgba(255, 255, 255, 0.018); }
 
 /* ---------- scrollbars ---------- */
 

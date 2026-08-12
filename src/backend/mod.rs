@@ -1,10 +1,12 @@
 pub mod auth;
+pub mod branches;
 pub mod difftool;
 pub mod github;
 pub mod gitio;
 pub mod highlight;
 pub mod htmlview;
 pub mod layout;
+pub mod markdown;
 pub mod mirror;
 pub mod search;
 pub mod symbols;

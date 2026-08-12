@@ -3,13 +3,15 @@ use std::path::PathBuf;
 use dioxus::prelude::*;
 
 use crate::backend::difftool::{diff_hunks, stats, to_rows, Hunk, Line, LineKind};
-use crate::backend::gitio::{head_file, worktree_file};
+use crate::backend::gitio::{head_file, index_file, worktree_file};
 use crate::backend::highlight::{highlight, Span};
 use crate::backend::htmlview;
+use crate::backend::markdown;
+use crate::backend::mirror;
 use crate::backend::tree::ChangeKind;
 use crate::backend::FileContent;
 
-use super::app::{PrFileState, St, ViewMode};
+use super::app::{DiffSide, PrFileState, St, ViewMode, Workspace};
 use super::prcache::ensure_path;
 
 const BIG_FILE_BYTES: usize = 400_000;
@@ -40,10 +42,15 @@ enum Pane {
     Failed(String),
     Ready {
         rel: PathBuf,
-        /// Left-hand side: HEAD, or the PR's merge base.
+        /// Left-hand side: HEAD, the index, or the PR's merge base.
         old: FileContent,
-        /// Right-hand side: the working tree, or the PR's head commit.
+        /// Right-hand side: the working tree, the index, or the PR's head
+        /// commit.
         new: FileContent,
+        /// Which pair of sides these are, once the choice has been resolved
+        /// against what this file actually has staged. `Worktree` for anything
+        /// that is not the local working tree — there is only one diff there.
+        side: DiffSide,
     },
 }
 
@@ -86,7 +93,8 @@ pub fn Viewer() -> Element {
         let Some(rel) = st.open.read().clone() else {
             return Pane::Empty;
         };
-        if st.workspace.read().is_remote() {
+        let ws = st.workspace.read();
+        if ws.is_remote() {
             return match st.pr_files.read().get(&rel) {
                 None | Some(PrFileState::Loading) => Pane::Loading,
                 Some(PrFileState::Failed(e)) => Pane::Failed(e.clone()),
@@ -94,35 +102,69 @@ pub fn Viewer() -> Element {
                     rel,
                     old: base.clone(),
                     new: head.clone(),
+                    side: DiffSide::Worktree,
                 },
             };
         }
+        // Both sides of a comparison come out of the object database, which is
+        // fast enough to read here rather than through a cache: no request, no
+        // waiting, and nothing that has to be warmed up first.
+        if let Some(view) = ws.compare() {
+            let read = |sha: &str, path: &std::path::Path| {
+                mirror::blob_at(&view.git_dir, sha, path).unwrap_or(FileContent::Absent)
+            };
+            return Pane::Ready {
+                old: read(&view.base_sha, &view.base_path(&rel)),
+                new: read(&view.head_sha, &rel),
+                rel,
+                side: DiffSide::Worktree,
+            };
+        }
+        // Read below, so the working tree's two sides are not resolved with a
+        // guard on the workspace still open.
+        drop(ws);
         let root = st.root_path();
+        // Which pair of sides: everything since the last commit, or one half of
+        // it. A file with nothing on the half being asked for shows the other —
+        // see `DiffSide::resolve`.
+        let side = st
+            .diff_side
+            .read()
+            .resolve(st.stages.read().get(&rel).copied());
         Pane::Ready {
-            old: head_file(&root, &rel),
-            new: worktree_file(&root, &rel),
+            old: match side {
+                DiffSide::Unstaged => index_file(&root, &rel),
+                _ => head_file(&root, &rel),
+            },
+            new: match side {
+                DiffSide::Staged => index_file(&root, &rel),
+                _ => worktree_file(&root, &rel),
+            },
             rel,
+            side,
         }
     });
 
     let hunks = use_memo(move || {
         let guard = data.read();
-        let Pane::Ready { rel, old, new } = &*guard else {
+        let Pane::Ready { rel, old, new, side } = &*guard else {
             return None;
         };
         let status = st.statuses.read().get(rel).copied()?;
         // A file that is new on this side has nothing to compare against, even
-        // if a path of the same name exists in the base.
-        let old_text = match status {
-            ChangeKind::Untracked | ChangeKind::Added => "",
-            _ => old.text()?,
-        };
+        // if a path of the same name exists in the base. Except against the
+        // index: a file added and then edited again is new to the repository
+        // and not at all new to the index, and what was edited since `git add`
+        // is exactly the question that view is being asked.
+        let fresh = matches!(status, ChangeKind::Untracked | ChangeKind::Added)
+            && *side != DiffSide::Unstaged;
+        let old_text = if fresh { "" } else { old.text()? };
         Some(diff_hunks(old_text, new.text()?))
     });
 
     let source_lines = use_memo(move || {
         let guard = data.read();
-        let Pane::Ready { rel, old, new } = &*guard else {
+        let Pane::Ready { rel, old, new, .. } = &*guard else {
             return None;
         };
         let text = match new {
@@ -142,13 +184,35 @@ pub fn Viewer() -> Element {
         }
     });
 
+    // Markdown, parsed only while it is what the preview mode is being asked
+    // for. Cheap enough to do here — a README parses in well under the
+    // millisecond a `spawn_blocking` round trip would cost.
+    let doc = use_memo(move || {
+        let wanted = *st.view_mode.read() == ViewMode::Preview;
+        let guard = data.read();
+        let Pane::Ready { rel, old, new, .. } = &*guard else {
+            return None;
+        };
+        if !wanted || !markdown::is_markdown(rel) {
+            return None;
+        }
+        let text = match (new, old) {
+            (FileContent::Text(t), _) => t,
+            // Deleted: render the version that is going away.
+            (FileContent::Absent, FileContent::Text(t)) => t,
+            _ => return None,
+        };
+        Some(markdown::parse(text))
+    });
+
     // Draw the page, off the UI thread and only while the preview is the mode
     // being asked for. Keyed on the file's own text, so a reload that changes
     // it redraws and one that does not costs nothing.
     let preview = use_resource(move || {
         let wanted = *st.view_mode.read() == ViewMode::Preview;
         let source = match &*data.read() {
-            Pane::Ready { rel, old, new } if wanted && htmlview::is_html(rel) => match (new, old) {
+            Pane::Ready { rel, old, new, .. } if wanted && htmlview::is_html(rel) => match (new, old)
+            {
                 (FileContent::Text(t), _) => Some(t.clone()),
                 // Deleted by the PR: draw the version that is going away.
                 (FileContent::Absent, FileContent::Text(t)) => Some(t.clone()),
@@ -192,19 +256,21 @@ pub fn Viewer() -> Element {
     // Loading and failure replace the file, not the window around it: a header
     // that blinks out and back every time an uncached file is clicked is worse
     // jank than the wait it is reporting.
-    let (rel, new_side, pending) = match &*guard {
+    let (rel, new_side, side, pending) = match &*guard {
         Pane::Empty => return rsx! { Welcome {} },
         Pane::Loading => (
             st.open.read().clone().unwrap_or_default(),
             FileContent::Absent,
+            DiffSide::Worktree,
             Some(rsx! { div { class: "notice", "Loading from GitHub…" } }),
         ),
         Pane::Failed(e) => (
             st.open.read().clone().unwrap_or_default(),
             FileContent::Absent,
+            DiffSide::Worktree,
             Some(rsx! { div { class: "notice error", "{e}" } }),
         ),
-        Pane::Ready { rel, new, .. } => (rel.clone(), new.clone(), None),
+        Pane::Ready { rel, new, side, .. } => (rel.clone(), new.clone(), *side, None),
     };
     let settled = pending.is_none();
 
@@ -215,7 +281,8 @@ pub fn Viewer() -> Element {
     // the local repository, or this pull request's own checkout.
     let symbols_enabled = st.scan_root.read().dir().is_some();
 
-    let previewable = htmlview::is_html(&rel);
+    let prose = markdown::is_markdown(&rel);
+    let previewable = htmlview::is_html(&rel) || prose;
     // Only changed files have a diff to show, and only HTML has a page to draw.
     let mode = match *st.view_mode.read() {
         ViewMode::Preview if !previewable => ViewMode::Source,
@@ -244,6 +311,10 @@ pub fn Viewer() -> Element {
             Some(h) if h.is_empty() => rsx! { div { class: "notice", "No differences." } },
             Some(h) => render_split(h),
             None => rsx! { div { class: "notice", "Binary file — cannot diff." } },
+        },
+        ViewMode::Preview if prose => match doc.read().as_ref() {
+            Some(parsed) => super::markdown::render(st, &rel, parsed),
+            None => rsx! { div { class: "notice", "Nothing to render — this file has no text." } },
         },
         ViewMode::Preview => match &*preview.read() {
             None => rsx! { div { class: "notice", "Drawing the page…" } },
@@ -286,6 +357,36 @@ pub fn Viewer() -> Element {
         "Waiting for the file"
     };
 
+    // The staged/unstaged choice, which only the working tree has. Its buttons
+    // are the same control as the mode group beside them, so they are built the
+    // same way — and a half this file does not have is disabled rather than
+    // left to answer "no differences".
+    let mut diff_side = st.diff_side;
+    let stage = st.stages.read().get(&rel).copied();
+    let sided = diffable && !st.workspace.read().is_remote() && stage.is_some();
+    let side_btn = |s: DiffSide| {
+        let has = stage.is_some_and(|stage| s.exists_for(stage));
+        let cls = if s == side && has {
+            "modebtn on"
+        } else {
+            "modebtn"
+        };
+        let why = match (has, s) {
+            (true, _) => s.why(),
+            (false, DiffSide::Staged) => "Nothing about this file is staged yet",
+            (false, _) => "This file is staged exactly as it is on disk",
+        };
+        rsx! {
+            button {
+                class: cls,
+                title: "{why}",
+                disabled: !has,
+                onclick: move |_| diff_side.set(s),
+                "{s.label()}"
+            }
+        }
+    };
+
     rsx! {
         div { class: "viewer",
             div { class: "viewhdr",
@@ -302,7 +403,22 @@ pub fn Viewer() -> Element {
                         span { class: "dstat del", "−{ds.removed}" }
                     }
                 }
+                if let Some(stage) = stage {
+                    if sided {
+                        span { class: "stgnote {stage.css()}", title: "{stage.note()}", "{stage.label()}" }
+                    }
+                }
                 span { class: "spacer" }
+                // Which two sides the diff is between. Only where there is a
+                // choice: a pull request's diff is fixed by the two commits it
+                // names, and an unchanged file has no diff at all.
+                if sided {
+                    div { class: "modegroup",
+                        {side_btn(DiffSide::Worktree)}
+                        {side_btn(DiffSide::Staged)}
+                        {side_btn(DiffSide::Unstaged)}
+                    }
+                }
                 // One control, not four loose buttons: these are alternatives,
                 // and a segmented group is what says so.
                 div { class: "modegroup",
@@ -310,7 +426,13 @@ pub fn Viewer() -> Element {
                     {mode_btn("Inline", ViewMode::Inline, mode, diffable, diff_why)}
                     {mode_btn("Split", ViewMode::Split, mode, diffable, diff_why)}
                     if previewable {
-                        {mode_btn("Preview", ViewMode::Preview, mode, settled, "Draw this page as it would look")}
+                        {mode_btn(
+                            "Preview",
+                            ViewMode::Preview,
+                            mode,
+                            settled,
+                            if prose { "Show this file as the prose it is" } else { "Draw this page as it would look" },
+                        )}
                     }
                 }
             }
@@ -324,10 +446,47 @@ pub fn Viewer() -> Element {
     }
 }
 
+/// Nothing open. Which means one of two quite different things: the app has
+/// just started, or something is on screen and no file in it has been picked
+/// yet — a repository whose README could not be found, or a comparison.
+/// Offering to go and find a pull request is only an answer to the first.
 #[component]
 fn Welcome() -> Element {
     let st = use_context::<St>();
     let mut gh_open = st.gh_open;
+    let showing = match &*st.workspace.read() {
+        Workspace::Pr(pr) => Some((
+            format!("{} #{}", pr.repo, pr.number),
+            format!(
+                "{} file{} changed — pick one on the left.",
+                pr.files.len(),
+                if pr.files.len() == 1 { "" } else { "s" },
+            ),
+        )),
+        Workspace::Repo(view) => Some((
+            format!("{} @ {}", view.repo, view.branch),
+            "No README here — pick a file on the left.".to_string(),
+        )),
+        Workspace::Compare(view) => Some((
+            view.label(),
+            format!(
+                "{} file{} changed — pick one on the left.",
+                view.files.len(),
+                if view.files.len() == 1 { "" } else { "s" },
+            ),
+        )),
+        _ => None,
+    };
+    if let Some((title, hint)) = showing {
+        return rsx! {
+            div { class: "viewer",
+                div { class: "welcome",
+                    div { class: "welcome-title", "{title}" }
+                    div { class: "welcome-hint", "{hint}" }
+                }
+            }
+        };
+    }
     rsx! {
         div { class: "viewer",
             div { class: "welcome",

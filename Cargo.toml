@@ -17,6 +17,7 @@ git2 = "0.21.0"
 ignore = "0.4.33"
 open = "5.4.1"
 png = "0.17"
+pulldown-cmark = { version = "0.13.4", default-features = false }
 regex = "1.13.1"
 rfd = "0.17.2"
 serde = { version = "1.0.229", features = ["derive"] }

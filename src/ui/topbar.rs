@@ -3,10 +3,27 @@ use std::time::Duration;
 use dioxus::prelude::*;
 
 use crate::backend::auth::open_browser;
+use crate::backend::branches::head_of;
 
 use super::app::{Account, PrList, PrSource, St, Workspace};
+use super::branches::BranchChip;
 use super::github::{browse_repo, open_pr};
 use super::prcache::warmed;
+
+/// How far apart two branches are, in words rather than in a count with an
+/// `(s)` stuck on the end of it.
+fn commits(n: usize) -> String {
+    format!("{n} commit{}", if n == 1 { "" } else { "s" })
+}
+
+fn plural(n: usize) -> &'static str {
+    if n == 1 { "" } else { "s" }
+}
+
+/// "it" or "them", for a count that reads as one thing or several.
+fn these(n: usize) -> &'static str {
+    if n == 1 { "it" } else { "them" }
+}
 
 #[component]
 pub fn TopBar() -> Element {
@@ -23,8 +40,62 @@ pub fn TopBar() -> Element {
     };
 
     let workspace = st.workspace.read().clone();
+    let local = matches!(workspace, Workspace::Local);
+    // What is on screen, said in the same place whatever it is. Without it the
+    // working tree is only ever implied — by a path standing where a pull
+    // request's title would be, which is not something anybody reads as "these
+    // are your own uncommitted changes".
+    // pullspace opens plain directories too, and one that is not a repository
+    // has no HEAD to be clean against and nothing staged either.
+    let in_repo = use_memo(move || {
+        st.refresh_tick.read();
+        st.root.read();
+        head_of(&st.root_path()).is_some()
+    });
+    let (ws_label, ws_cls, ws_why) = match &workspace {
+        Workspace::Local if !in_repo() => (
+            "files",
+            "wschip local",
+            "A directory on disk that is not a git repository — so nothing here is marked as changed",
+        ),
+        Workspace::Local => (
+            "local",
+            "wschip local",
+            "Your own working tree — uncommitted changes on disk. Nothing here came from GitHub.",
+        ),
+        Workspace::Pr(_) => (
+            "pull request",
+            "wschip pr",
+            "A pull request fetched from GitHub — the files as it changes them, not your working tree",
+        ),
+        Workspace::Repo(_) => (
+            "browsing",
+            "wschip repo",
+            "A GitHub repository being read — no pull request, so nothing is marked as changed",
+        ),
+        Workspace::Compare(_) => (
+            "compare",
+            "wschip cmp",
+            "Two branches on disk held against each other — not your working tree, and not a pull request",
+        ),
+    };
+
+    // The working tree's two halves, counted where the question "am I looking
+    // at what I have added, or at everything?" is asked.
+    let (staged, unstaged) = if local {
+        let stages = st.stages.read();
+        (
+            stages.values().filter(|s| s.is_staged()).count(),
+            stages.values().filter(|s| s.is_unstaged()).count(),
+        )
+    } else {
+        (0, 0)
+    };
+    let clean = local && in_repo() && staged == 0 && unstaged == 0;
+
     let pr = workspace.pr().cloned();
     let browsing = workspace.repo().cloned();
+    let comparing = workspace.compare().cloned();
     let pr_target = workspace.pr().map(|p| (p.repo.clone(), p.number));
     let repo_target = workspace.repo().map(|v| v.repo.clone());
 
@@ -39,6 +110,7 @@ pub fn TopBar() -> Element {
     let refresh_title = match &workspace {
         Workspace::Pr(_) => "Reload this pull request from GitHub",
         Workspace::Repo(_) => "Reload this repository from GitHub",
+        Workspace::Compare(_) => "Compare these two branches again",
         Workspace::Local => "Reload git status & file tree",
     };
     // Reloading the local working tree is synchronous, so it is over before
@@ -116,6 +188,10 @@ pub fn TopBar() -> Element {
             }
         }
         Workspace::Repo(view) => view.tree_truncated.then_some(partial_tree),
+        Workspace::Compare(view) => view.unrelated.then_some((
+            "unrelated",
+            "These two branches share no history, so there is no merge base — this is a diff of their tips",
+        )),
         Workspace::Local => None,
     };
 
@@ -178,6 +254,7 @@ pub fn TopBar() -> Element {
                     }
                 }
             }
+            span { class: "{ws_cls}", title: "{ws_why}", "{ws_label}" }
             if let Some(pr) = pr {
                 span {
                     class: "prcrumb",
@@ -206,7 +283,7 @@ pub fn TopBar() -> Element {
                 button {
                     class: "closebtn",
                     title: "Back to the local working tree",
-                    onclick: move |_| st.leave_remote(),
+                    onclick: move |_| st.back_to_worktree(),
                     span { class: "closex", "✕" }
                     "close PR"
                 }
@@ -241,12 +318,55 @@ pub fn TopBar() -> Element {
                 button {
                     class: "closebtn",
                     title: "Back to the local working tree",
-                    onclick: move |_| st.leave_remote(),
+                    onclick: move |_| st.back_to_worktree(),
                     span { class: "closex", "✕" }
                     "close repo"
                 }
+            } else if let Some(view) = comparing {
+                span {
+                    class: "prcrumb",
+                    title: "{view.head} is {commits(view.ahead)} ahead of {view.base} and {commits(view.behind)} behind — diffed against the merge base of the two",
+                    span { class: "prnum", "{view.base} … {view.head}" }
+                    span { class: "prcrumbtitle", "{view.files.len()} changed" }
+                }
+                if let Some((label, why)) = warn {
+                    span { class: "prwarn", title: "{why}", "{label}" }
+                }
+                BranchChip {}
+                button {
+                    class: "closebtn",
+                    title: "Back to the local working tree",
+                    onclick: move |_| st.back_to_worktree(),
+                    span { class: "closex", "✕" }
+                    "close compare"
+                }
             } else {
                 span { class: "repopath", title: "{root_str}", "{root_str}" }
+                BranchChip {}
+                // Both halves of `git add`, so that which one the viewer is
+                // showing is a choice made in front of these numbers rather
+                // than behind them.
+                if staged > 0 {
+                    span {
+                        class: "stgcount stg",
+                        title: "{staged} file{plural(staged)} added — a commit now would record {these(staged)}",
+                        "{staged} staged"
+                    }
+                }
+                if unstaged > 0 {
+                    span {
+                        class: "stgcount unstg",
+                        title: "{unstaged} file{plural(unstaged)} changed on disk and not added — a commit now would leave {these(unstaged)} behind",
+                        "{unstaged} unstaged"
+                    }
+                }
+                if clean {
+                    span {
+                        class: "stgcount clean",
+                        title: "The working tree matches HEAD — nothing to commit",
+                        "clean"
+                    }
+                }
             }
             input {
                 class: "searchbox",

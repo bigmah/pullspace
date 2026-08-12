@@ -7,11 +7,20 @@ Two panes, like a traditional IDE but without the weight:
 
 - **Left** — file tree of the repository (respects `.gitignore`), with badges
   marking changed files: `M` modified, `A` added, `U` untracked, `D` deleted,
-  `R` renamed. Directories containing changes get a dot and auto-expand.
-  The `Δ` button filters the tree down to changed files only.
+  `R` renamed. A boxed badge is one that has been `git add`ed. Directories
+  containing changes get a dot and auto-expand. The `Δ` button filters the tree
+  down to changed files only.
 - **Right** — source viewer. Any file opens with full syntax highlighting;
   changed files open as diffs against `HEAD`, viewable **side-by-side (Split)**
-  or **unified (Inline)**, both with word-level change emphasis.
+  or **unified (Inline)**, both with word-level change emphasis. Markdown opens
+  as the prose it is, with **Source** one button away.
+
+The top bar always says what you are looking at — `local`, `pull request`,
+`browsing` or `compare` — because all four draw the same badges and the same
+diffs. See [Staged and unstaged](#staged-and-unstaged).
+
+It opens on the repository's README, drawn rather than listed — which is what a
+repository has a front page for. See [Markdown](#markdown).
 
 IDE-ish niceties:
 
@@ -24,6 +33,9 @@ IDE-ish niceties:
 - **Find References** — whole-word search for the clicked identifier across
   the repo.
 - Jumped-to lines scroll into view and flash.
+- **Branches** — the top bar says which one the working tree is on, and opens
+  the panel that compares any two of them. See
+  [Comparing branches](#comparing-branches).
 - **GitHub pull requests** — sign in once, search for a repository by name, and
   review any of its PRs in the same two panes. See
   [Reviewing GitHub pull requests](#reviewing-github-pull-requests).
@@ -39,12 +51,75 @@ Optional extras:
 
 ```sh
 pullspace /path/to/repo src/lib.rs              # open straight into a file
-pullspace /path/to/repo src/lib.rs --mode=inline  # source | inline | split
+pullspace /path/to/repo src/lib.rs --mode=inline  # source | inline | split | preview
 ```
 
 The `⟳` button re-reads git status and the file tree after you make changes
-outside the app — and reloads the pull request from GitHub when you are
-reviewing one.
+outside the app — it reloads the pull request from GitHub when you are
+reviewing one, and makes the comparison again when you are comparing two
+branches.
+
+## Markdown
+
+Markdown files open **drawn**: headings, lists, tables, block quotes and task
+boxes, with fenced code run through the same syntax highlighter as the source
+view. `Source` shows the file exactly as written, and the two swap without
+reloading anything.
+
+Links work. An outside one opens in your browser; one pointing at a file in the
+repository opens it in this viewer, resolved relative to the document it is
+written in — so a README that links to `docs/design.md` is a way around the
+repository rather than a dead end.
+
+What is *not* drawn is anything the file smuggles in as HTML. Markdown may
+contain it, and rendering it would mean handing markup out of a repository to
+the webview this app draws its own UI in — which would be a real hole, for the
+sake of a centred banner. The bar says `raw HTML not drawn` when a file
+contained some. Images are not fetched either, for the same reason a pull
+request preview fetches nothing: their alt text is shown in their place.
+
+## Staged and unstaged
+
+The `local` chip in the top bar is followed by the two halves of `git add`:
+`4 staged`, `3 unstaged`, or `clean` when the working tree matches `HEAD`. In
+the explorer, a **boxed** badge is staged, a plain one is not, and a badge with
+a boxed left edge is both — added once and changed again since.
+
+A changed file opens with a second control beside the view modes:
+
+| | what it diffs | the command it is |
+|---|---|---|
+| **All** | `HEAD` against the files on disk | `git diff HEAD` |
+| **Staged** | `HEAD` against the index | `git diff --staged` |
+| **Unstaged** | the index against the files on disk | `git diff` |
+
+**All** is the default and the one most files only have. A half a file does not
+have is disabled rather than left to answer "no differences" — and if the
+choice does not apply to the file you open, the view falls back to the half
+that does, so clicking through a review never lands on an empty pane.
+
+This exists only for the working tree. A pull request's diff is fixed by the
+two commits it names, and so is a comparison's; neither has an index anywhere
+in it, so neither shows the control.
+
+## Comparing branches
+
+The top bar shows the branch the working tree is on — or `detached @ 1a2b3c4`
+when it is not on one. Clicking it opens the branch panel: pick a **base** and
+a **head**, press **Compare**, and the two panes fill with the difference the
+same way a pull request does. Changed files carry the usual badges, `Δ` narrows
+the tree to them, and each one opens in Split or Inline against the base.
+
+Comparisons are made against the **merge base** of the two branches, so what
+you see is what the head branch adds — not everything that has landed on the
+base since it forked. That is `git diff base...head`, and it is the same
+comparison GitHub shows. Two branches with no shared history have no merge base;
+the top bar says `unrelated` and diffs their tips instead.
+
+Both sides are read straight out of the object database, so there is no
+network, no cache and no waiting. Nothing is checked out and no ref is moved:
+comparing branches leaves the repository exactly as it was found, and `✕ close
+compare` returns to the working tree.
 
 ## Reviewing GitHub pull requests
 
@@ -171,19 +246,23 @@ src/
     auth.rs         GitHub device flow, token storage & discovery
     github.rs       GitHub REST: repo search, PR lists, PR files, blob content
     mirror.rs       local clones, bare mirrors, checkouts; git2 object reads
-    gitio.rs        git2: repo discovery, statuses, HEAD blob content
+    gitio.rs        git2: repo discovery, statuses & staging, HEAD/index blobs
+    branches.rs     git2: HEAD, branch list, merge-base comparison of two refs
     tree.rs         file-tree model built from the worktree + git status
     difftool.rs     hunk/line/segment diff model (similar), split-row pairing
     highlight.rs    syntect syntax highlighting (pure-Rust fancy-regex build)
+    markdown.rs     markdown parsed to blocks and styled runs (no HTML)
     symbols.rs      regex-based symbol index (definitions)
     search.rs       repo-wide text/word search (ignore walker)
   ui/               Dioxus components
     app.rs          state (signals + context), root layout
     github.rs       sign-in, repository search, pull request picker overlay
+    branches.rs     branch chip, compare panel
     prcache.rs      PR file cache: prefetch, hover warming, source choice
-    topbar.rs       brand, search, index status, account chip, refresh
-    filetree.rs     recursive tree with status badges
+    topbar.rs       what is on screen, search, index status, account, refresh
+    filetree.rs     recursive tree with status & staging badges
     viewer.rs       source view, inline & split diff views, symbol actions
+    markdown.rs     markdown drawn as elements; link targets
     bottom.rs       search / references / definitions results panel
 ```
 
@@ -194,8 +273,17 @@ data source.
 
 ## Notes & limits
 
-- Local diffs are worktree vs `HEAD` (staged + unstaged combined); pull request
-  diffs are merge-base vs PR head.
+- Local diffs are worktree vs `HEAD` (staged + unstaged combined) unless you
+  ask for one half — see [Staged and unstaged](#staged-and-unstaged); pull
+  request and branch-comparison diffs are merge-base vs head.
+- The staged view reads the index as it is now. `⟳` picks up an `add` or a
+  `reset` made in another terminal, the same as any other change.
+- Nothing in pullspace writes to the index: the staged/unstaged views read it,
+  and staging a change is still something you do in git.
+- A comparison shows commits, so uncommitted work in the working tree is not
+  part of it — `✕ close compare` is where that lives.
+- Search and Go to Definition keep walking the working tree while a comparison
+  is open: it is the copy on disk, and it is the one you can edit.
 - Search / Go to Definition / Find References need files on disk, so in PR mode
   they work on the `local` and `mirrored` sources but not on `api`.
 - On a pull request, `⟳` re-polls GitHub: new commits move the head, so the

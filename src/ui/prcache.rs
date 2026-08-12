@@ -139,6 +139,13 @@ pub fn ensure_file(st: St, job: FetchJob) {
 /// [`ensure_file`] for callers that only have a path. A no-op on the local
 /// working tree, whose files are read straight off disk.
 pub fn ensure_path(st: St, rel: &Path) {
+    // Before building a job, not after: the job below clones the pull request's
+    // identifiers and scans its file list to find this path, and the common case
+    // — a file already cached or on its way — needs none of that. `ensure_file`
+    // makes the same check for callers who arrive holding a job already.
+    if claimed(&st, rel) {
+        return;
+    }
     let job = {
         let ws = st.workspace.peek();
         match (ws.pr(), ws.repo()) {

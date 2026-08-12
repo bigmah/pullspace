@@ -30,13 +30,27 @@ pub fn GhPanel() -> Element {
             class: "ghoverlay",
             // Click-away closes, but only on the backdrop itself.
             onclick: move |_| gh_open.set(false),
+            // Escape closes it too, which is the other half of what anyone
+            // expects from something that covers the app. Keydowns reach here
+            // by bubbling out of whichever field has focus.
+            tabindex: "-1",
+            onkeydown: move |e| {
+                if e.key() == Key::Escape {
+                    gh_open.set(false);
+                }
+            },
             div {
                 class: "ghpanel",
                 onclick: move |e| e.stop_propagation(),
                 div { class: "ghhdr",
                     span { class: "ghtitle", "GitHub" }
                     span { class: "spacer" }
-                    button { class: "iconbtn", onclick: move |_| gh_open.set(false), "✕" }
+                    button {
+                        class: "iconbtn",
+                        title: "Close",
+                        onclick: move |_| gh_open.set(false),
+                        "✕"
+                    }
                 }
                 div { class: "ghbody",
                     match account {
@@ -94,7 +108,8 @@ fn CacheFooter() -> Element {
             span { class: "ghnote", "{label}" }
             span { class: "spacer" }
             button {
-                class: "linkbtn",
+                class: "dangerbtn",
+                title: "Delete every mirrored repository and checkout pullspace has on disk. They are rebuilt on demand.",
                 onclick: move |_| {
                     let _ = mirror::clear_cache();
                     let v = *cleared.peek();
@@ -547,6 +562,11 @@ fn RepoPicker() -> Element {
                     spellcheck: "false",
                     autocomplete: "off",
                     value: "{typed}",
+                    // The panel is opened to look something up, so it opens
+                    // ready to be typed into.
+                    onmounted: move |e| async move {
+                        let _ = e.set_focus(true).await;
+                    },
                     onfocus: move |_| open.set(true),
                     oninput: move |e| {
                         repo_input.set(e.value());
@@ -567,7 +587,15 @@ fn RepoPicker() -> Element {
                                 e.prevent_default();
                                 highlight.set(at.saturating_sub(1));
                             }
-                            Key::Escape => open.set(false),
+                            // The list first, the panel second — and only one
+                            // of them per press, so Escape out of the
+                            // suggestions does not take the panel with it.
+                            Key::Escape => {
+                                if *open.peek() {
+                                    e.stop_propagation();
+                                    open.set(false);
+                                }
+                            }
                             Key::Enter => match items.get(at) {
                                 // What is highlighted in the list wins…
                                 Some(hit) => choose(st, open, hit.repo.clone()),
@@ -599,7 +627,14 @@ fn RepoPicker() -> Element {
                 } else if !items.is_empty() {
                     div { class: "repolist",
                         for (i , hit) in items.iter().enumerate() {
-                            RepoRow { key: "{hit.repo}", hit: hit.clone(), active: i == hi, open }
+                            RepoRow {
+                                key: "{hit.repo}",
+                                hit: hit.clone(),
+                                active: i == hi,
+                                open,
+                                index: i,
+                                highlight,
+                            }
                         }
                     }
                 } else if !settled {
@@ -617,15 +652,26 @@ fn RepoPicker() -> Element {
 }
 
 #[component]
-fn RepoRow(hit: RepoHit, active: bool, open: Signal<bool>) -> Element {
+fn RepoRow(
+    hit: RepoHit,
+    active: bool,
+    open: Signal<bool>,
+    index: usize,
+    highlight: Signal<usize>,
+) -> Element {
     let st = use_context::<St>();
     let repo = hit.repo.clone();
     let class = if active { "repoitem on" } else { "repoitem" };
     let stars = stars_label(hit.stars);
+    let mut highlight = highlight;
     rsx! {
         div {
             class: "{class}",
             onclick: move |_| choose(st, open, repo.clone()),
+            // Move the selection to whatever the pointer is on, so the row
+            // under the cursor and the row Enter will open are always the same
+            // one.
+            onmouseenter: move |_| highlight.set(index),
             div { class: "repotop",
                 span { class: "reponame", "{hit.repo}" }
                 if hit.private {

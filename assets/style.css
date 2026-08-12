@@ -5,11 +5,21 @@
   --bg-1: #1e2026;
   --bg-2: #24262e;
   --bg-3: #2c2f38;
+  --bg-4: #363a45;
+  /* Two weights of edge. The seam between two panels wants to be barely there;
+     the outline that is a control's only definition wants to be seen. One
+     colour cannot be both, and it was doing the quieter job for both. */
   --border: #33363f;
+  --border-soft: #2a2d35;
+  --line: #424755;
   --fg: #d4d8e0;
-  --fg-dim: #8b90a0;
-  --fg-faint: #5c6070;
+  --fg-dim: #9aa0b0;
+  /* Carries the line numbers, every pill and every meta line, so it has to
+     clear legibility rather than merely suggest text. */
+  --fg-faint: #848a9c;
   --accent: #5c9cf5;
+  --accent-soft: rgba(92, 156, 245, 0.16);
+  --accent-line: rgba(92, 156, 245, 0.45);
   --added: #4fbf7a;
   --modified: #e2b34c;
   --deleted: #e06c75;
@@ -20,7 +30,22 @@
   --del-emph: rgba(224, 108, 117, 0.36);
   --mono: "SF Mono", "Menlo", "Cascadia Code", "JetBrains Mono", monospace;
   --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "Inter", sans-serif;
+
+  /* One height, one radius and one curve for every control in the app. The
+     alternative is what happens by accident: nine buttons, nine sizes. */
+  --ctl: 28px;
+  --r-sm: 5px;
+  --r: 7px;
+  --r-lg: 10px;
+  --hdr: 34px;
+  /* Fast enough to feel like the click did it, slow enough to be seen. */
+  --quick: 110ms;
+  --ease: cubic-bezier(0.2, 0, 0, 1);
 }
+
+/* Tells WebKit the page is dark, which is what turns the text caret, the
+   native focus rings and the form controls' own internals dark with it. */
+:root { color-scheme: dark; }
 
 html, body { height: 100%; overflow: hidden; }
 
@@ -29,6 +54,33 @@ body {
   color: var(--fg);
   font-family: var(--sans);
   font-size: 13px;
+  /* Retina text in a webview is rendered heavy by default; this is what the
+     rest of macOS looks like. */
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Nothing in this app is a form to tab through, but everything in it is
+   clickable — so a keyboard ring shows up when it is asked for, and stays out
+   of the way of the mouse. */
+:focus { outline: none; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+button { font-family: inherit; user-select: none; }
+
+/* Reaching the end of the file tree should stop at the end of the file tree.
+   Left to chain, the leftover momentum bounces the whole window, which is the
+   single most "this is a web page" thing a webview does. */
+.tree, .codewrap, .panel-body, .conv-body, .ghbody { overscroll-behavior: contain; }
+
+/* Waiting is worth saying only once it is a wait. Most files here resolve off
+   a local clone in single-digit milliseconds, and a notice that appears and
+   disappears inside one frame reads as a flicker, not as progress — so every
+   one of them is held back until the delay is real. */
+.notice, .panel-empty { animation: appear 160ms var(--ease) 160ms both; }
+
+@keyframes appear {
+  from { opacity: 0; }
+  to { opacity: 1; }
 }
 
 .app { display: flex; flex-direction: column; height: 100vh; }
@@ -36,14 +88,43 @@ body {
 /* ---------- top bar ---------- */
 
 .topbar {
+  position: relative;
   display: flex;
   align-items: center;
-  gap: 10px;
-  height: 42px;
-  padding: 0 12px;
+  gap: 8px;
+  height: 46px;
+  padding: 0 10px 0 14px;
   background: var(--bg-1);
   border-bottom: 1px solid var(--border);
   flex: none;
+}
+
+/* Opening a pull request can mean a clone, and the note that says so lives in
+   a panel the user has usually just closed. This runs along the bottom edge of
+   the top bar instead, where it is visible from anywhere in the app for
+   exactly as long as the work lasts. */
+.topbar.busy::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: -1px;
+  height: 2px;
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    var(--accent) 40%,
+    var(--accent) 60%,
+    transparent 100%
+  );
+  background-size: 40% 100%;
+  background-repeat: no-repeat;
+  animation: sweep 1.4s var(--ease) infinite;
+}
+
+@keyframes sweep {
+  from { background-position: -40% 0; }
+  to { background-position: 140% 0; }
 }
 
 .brand {
@@ -51,69 +132,212 @@ body {
   font-weight: 700;
   font-size: 14px;
   color: var(--accent);
-  letter-spacing: 0.5px;
+  letter-spacing: 0.4px;
+  flex: none;
+  user-select: none;
 }
 
 .repopath {
   color: var(--fg-faint);
   font-family: var(--mono);
   font-size: 11px;
-  max-width: 320px;
+  max-width: 380px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .searchbox {
-  flex: 1;
-  max-width: 480px;
+  flex: 1 1 260px;
+  max-width: 460px;
+  min-width: 120px;
   margin-left: auto;
+  height: var(--ctl);
   background: var(--bg-2);
-  border: 1px solid var(--border);
-  border-radius: 6px;
+  border: 1px solid var(--line);
+  border-radius: var(--r);
   color: var(--fg);
   font-family: var(--mono);
   font-size: 12px;
-  padding: 5px 10px;
+  padding: 0 10px;
   outline: none;
+  transition: border-color var(--quick) var(--ease), box-shadow var(--quick) var(--ease),
+    background-color var(--quick) var(--ease);
 }
 
-.searchbox:focus { border-color: var(--accent); }
+.searchbox::placeholder { color: var(--fg-faint); }
+.searchbox:hover:enabled { border-color: var(--bg-4); }
+.searchbox:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+.searchbox:disabled { opacity: 0.5; cursor: not-allowed; }
 
+/* A readout that changes while you are reading past it. Fixed width and
+   fixed-advance digits, so counting up moves the number and not the four
+   controls to its right. */
 .idxstate {
   color: var(--fg-faint);
-  font-size: 11px;
+  font-family: var(--mono);
+  font-size: 10.5px;
   white-space: nowrap;
+  flex: none;
+  min-width: 88px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
 }
 
+/* ---------- icon buttons ---------- */
+
+/* A square you can hit without aiming, at three sizes: in a header row, in the
+   top bar, and — for the one that reloads everything — a size up from that. */
 .iconbtn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: var(--ctl);
+  height: var(--ctl);
+  padding: 0;
   background: transparent;
   border: 1px solid transparent;
-  border-radius: 5px;
+  border-radius: var(--r);
   color: var(--fg-dim);
   cursor: pointer;
-  font-size: 13px;
-  padding: 3px 8px;
+  font-size: 15px;
+  line-height: 1;
+  transition: background-color var(--quick) var(--ease), color var(--quick) var(--ease),
+    border-color var(--quick) var(--ease);
 }
 
-.iconbtn:hover { background: var(--bg-3); color: var(--fg); }
-.iconbtn.filter.on { color: var(--modified); border-color: var(--border); background: var(--bg-3); }
+.iconbtn:hover:enabled { background: var(--bg-3); color: var(--fg); }
+.iconbtn:active:enabled { background: var(--bg-4); }
+.iconbtn:disabled { opacity: 0.4; cursor: default; }
+
+.iconbtn.lg { width: 32px; height: 32px; font-size: 18px; }
+.iconbtn.sm { width: 24px; height: 24px; font-size: 13px; border-radius: var(--r-sm); }
+
+/* A toggle that is on, not a warning. */
+.iconbtn.filter.on { color: var(--accent); border-color: var(--accent-line); background: var(--bg-3); }
+
+.iconbtn .glyph { display: block; line-height: 1; }
+
+/* Turning, while the thing it reloads is being reloaded. The glyph turns and
+   not the button, so the hover square stays where it was put. */
+.iconbtn.spin { color: var(--accent); opacity: 1; }
+.iconbtn.spin .glyph { animation: spin 900ms linear infinite; }
+
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+/* ---------- chips ---------- */
+
+/* Leaving a pull request is a real action and the button for it should look
+   like one — a chip the same height as everything beside it, rather than a
+   link floating above the line they all sit on. */
+.closebtn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+  height: var(--ctl);
+  padding: 0 11px;
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  border-radius: var(--r);
+  color: var(--fg-dim);
+  cursor: pointer;
+  font-size: 11.5px;
+  white-space: nowrap;
+  transition: background-color var(--quick) var(--ease), color var(--quick) var(--ease),
+    border-color var(--quick) var(--ease);
+}
+
+.closebtn:hover {
+  background: var(--bg-3);
+  color: var(--deleted);
+  border-color: rgba(224, 108, 117, 0.45);
+}
+
+.closebtn:active { background: var(--bg-2); }
+.closebtn .closex { font-size: 12px; line-height: 1; opacity: 0.85; }
 
 /* ---------- layout ---------- */
 
 .main { display: flex; flex: 1; min-height: 0; }
 
-.rightcol { display: flex; flex-direction: column; flex: 1; min-width: 0; }
+/* Whatever the two panes leave. What they leave is settled in `panes.rs`,
+   which keeps them off `MIN_CENTER` of the middle — so this is free to shrink
+   to nothing rather than fight it, which is what a window too narrow for even
+   the minimums needs it to do. */
+.rightcol {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+}
+
+/* ---------- pane dividers ---------- */
+
+/* The seam between two panes is one pixel wide, because that is what a seam
+   should look like — but a one-pixel target is not one anybody can hit. So the
+   line takes up a pixel of layout and reaches three either side of it for the
+   pointer, which is enough to grab without aiming and narrow enough to clear
+   the scrollbars it passes over: those are drawn inset by three.
+   The line is the divider's own, so the panes it sits between carry no border
+   of their own to double it up. */
+.splitter {
+  position: relative;
+  flex: none;
+  align-self: stretch;
+  z-index: 4;
+  background: var(--border);
+  transition: background-color var(--quick) var(--ease), box-shadow var(--quick) var(--ease);
+}
+
+.splitter.vert { width: 1px; cursor: col-resize; }
+.splitter.horiz { height: 1px; cursor: row-resize; }
+
+/* Hit area only — it has no paint of its own, and it hangs outside the line so
+   the layout never moves when the pointer arrives. */
+.splitter::after { content: ""; position: absolute; }
+.splitter.vert::after { top: 0; bottom: 0; left: -3px; right: -3px; }
+.splitter.horiz::after { left: 0; right: 0; top: -3px; bottom: -3px; }
+
+.splitter:hover,
+.splitter.on {
+  background: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent-soft);
+}
+
+/* Over everything, for as long as a drag lasts: it carries the resize cursor
+   across the whole window, keeps the panes underneath from lighting up as the
+   pointer sweeps over them, and catches the moves a one-pixel line never
+   would. Above the GitHub overlay, which is the highest thing otherwise. */
+.dragmask { position: fixed; inset: 0; z-index: 100; }
+.dragmask.cols { cursor: col-resize; }
+.dragmask.rows { cursor: row-resize; }
 
 /* ---------- sidebar / file tree ---------- */
 
 .sidebar {
-  width: 280px;
+  width: var(--side-w, 280px);
+  /* The same limits `panes.rs` drags between, stated identically. They should
+     never bite — the width arriving from Rust is already inside them — and
+     they are here for the frame before the first resize is reported. A
+     stylesheet that clamped to anything else would put the pane somewhere the
+     app does not know about, and a divider cannot follow the pointer from a
+     number that is wrong. */
+  min-width: 170px;
+  max-width: 720px;
+  /* Never shrunk by the layout. A pane that flexbox has quietly squeezed is a
+     pane whose width nobody in Rust knows, and a divider cannot follow the
+     pointer from a number that is wrong — so a window made narrower is handled
+     by `panes::refit`, which moves the width itself. */
   flex: none;
   display: flex;
   flex-direction: column;
   background: var(--bg-1);
-  border-right: 1px solid var(--border);
   min-height: 0;
   /* The explorer is a list of things to click, not prose. Left on `auto` the
      webview hands back an I-beam over every label in it. */
@@ -121,11 +345,15 @@ body {
   user-select: none;
 }
 
+/* The same height and the same rule as the viewer's header and the
+   conversation's, so the seam runs unbroken across all three columns. */
 .side-hdr {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 8px 10px 6px 12px;
+  height: var(--hdr);
+  padding: 0 6px 0 12px;
+  border-bottom: 1px solid var(--border);
   flex: none;
 }
 
@@ -134,11 +362,19 @@ body {
   font-weight: 700;
   letter-spacing: 1.2px;
   color: var(--fg-faint);
+  user-select: none;
 }
 
 /* Every row in here opens something, so the whole strip reads as clickable —
-   including the indent to the left of a name and the gap below the last row. */
-.tree { overflow-y: auto; flex: 1; padding-bottom: 20px; cursor: pointer; }
+   including the indent to the left of a name and the gap below the last row.
+   The gutter is held open whether or not there is anything to scroll, so
+   opening a folder does not shift every row's right-hand edge. */
+.tree {
+  overflow-y: auto;
+  scrollbar-gutter: stable;
+  flex: 1;
+  padding: 4px 0 20px;
+}
 
 .tree-empty { color: var(--fg-faint); padding: 14px; font-size: 12px; cursor: default; }
 
@@ -152,10 +388,22 @@ body {
   white-space: nowrap;
   overflow: hidden;
   user-select: none;
+  /* The inset shadow is the active marker; declaring it here means it fades in
+     rather than appearing whole. The background is deliberately not in that
+     list: hover is the one thing here that has to keep up with the pointer, and
+     a highlight ramping in over even a tenth of a second is a highlight being
+     dragged along behind it. */
+  box-shadow: inset 2px 0 0 transparent;
+  transition: box-shadow 80ms var(--ease);
 }
 
 .row:hover { background: var(--bg-2); }
-.row.active { background: var(--bg-3); }
+/* Which file is open is the most important thing the explorer says. A shade of
+   background is a 3% difference to find at a glance, so it gets an accent edge
+   as well — and the name takes the weight rather than a colour, which would
+   argue with the status colours that are already there. */
+.row.active { background: var(--bg-3); box-shadow: inset 2px 0 0 var(--accent); }
+.row.active .fname, .row.active .dirname { font-weight: 600; }
 
 .arrow {
   width: 14px;
@@ -171,12 +419,20 @@ body {
 
 .chdot { color: var(--modified); font-size: 7px; margin-left: 4px; }
 
+/* A single letter carrying the whole status. It had padding and a radius but
+   nothing to put them around — a tinted chip is what those were reaching for,
+   and it is what makes A / M / D readable at 10px. */
 .badge {
   margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 17px;
+  height: 16px;
+  padding: 0 4px;
   font-family: var(--mono);
   font-size: 10px;
   font-weight: 700;
-  padding: 0 5px;
   border-radius: 3px;
   flex: none;
 }
@@ -186,7 +442,10 @@ body {
 .st-deleted { color: var(--deleted); text-decoration: line-through; }
 .st-conflict { color: var(--conflict); }
 
-.badge.st-deleted { text-decoration: none; }
+.badge.st-added { background: rgba(79, 191, 122, 0.15); }
+.badge.st-modified { background: rgba(226, 179, 76, 0.15); }
+.badge.st-deleted { background: rgba(224, 108, 117, 0.15); text-decoration: none; }
+.badge.st-conflict { background: rgba(216, 88, 200, 0.15); }
 
 /* ---------- viewer ---------- */
 
@@ -196,8 +455,8 @@ body {
   display: flex;
   align-items: center;
   gap: 8px;
-  height: 34px;
-  padding: 0 12px;
+  height: var(--hdr);
+  padding: 0 10px 0 12px;
   background: var(--bg-1);
   border-bottom: 1px solid var(--border);
   flex: none;
@@ -212,27 +471,44 @@ body {
   white-space: nowrap;
 }
 
-.delnote { color: var(--deleted); font-size: 11px; }
+.delnote { color: var(--deleted); font-size: 11px; flex: none; }
 
-.dstat { font-family: var(--mono); font-size: 11px; font-weight: 700; }
+.dstat { font-family: var(--mono); font-size: 11px; font-weight: 700; flex: none; }
 .dstat.add { color: var(--added); }
 .dstat.del { color: var(--deleted); }
 
 .spacer { flex: 1; }
 
+/* The four views are alternatives, so they are drawn as one control with four
+   positions rather than four buttons that happen to be adjacent. */
+.modegroup {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  flex: none;
+  padding: 2px;
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  border-radius: var(--r);
+  user-select: none;
+}
+
 .modebtn {
   background: transparent;
-  border: 1px solid var(--border);
-  border-radius: 5px;
+  border: none;
+  border-radius: var(--r-sm);
   color: var(--fg-dim);
   cursor: pointer;
   font-size: 11px;
-  padding: 3px 10px;
+  height: 20px;
+  padding: 0 9px;
+  transition: background-color var(--quick) var(--ease), color var(--quick) var(--ease);
 }
 
 .modebtn:hover:enabled { color: var(--fg); background: var(--bg-3); }
-.modebtn.on { color: var(--accent); border-color: var(--accent); background: var(--bg-2); }
-.modebtn:disabled { opacity: 0.35; cursor: default; }
+.modebtn.on { color: var(--accent); background: var(--bg-4); }
+.modebtn.on:hover:enabled { color: var(--accent); background: var(--bg-4); }
+.modebtn:disabled { opacity: 0.3; cursor: default; }
 
 /* ---------- symbol action bar ---------- */
 
@@ -240,7 +516,8 @@ body {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 5px 12px;
+  height: 32px;
+  padding: 0 8px 0 12px;
   background: var(--bg-2);
   border-bottom: 1px solid var(--border);
   flex: none;
@@ -255,16 +532,19 @@ body {
 
 .symbtn {
   background: var(--bg-3);
-  border: 1px solid var(--border);
-  border-radius: 5px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
   color: var(--fg-dim);
   cursor: pointer;
   font-size: 11px;
-  padding: 3px 10px;
+  height: 22px;
+  padding: 0 10px;
+  flex: none;
+  transition: background-color var(--quick) var(--ease), color var(--quick) var(--ease),
+    border-color var(--quick) var(--ease);
 }
 
-.symbtn:hover { color: var(--fg); border-color: var(--fg-faint); }
-.symbtn.close { background: transparent; border-color: transparent; }
+.symbtn:hover { color: var(--fg); border-color: var(--fg-faint); background: var(--bg-4); }
 
 /* ---------- code ---------- */
 
@@ -276,7 +556,9 @@ body {
   align-items: center;
   justify-content: center;
   height: 100%;
-  gap: 8px;
+  gap: 6px;
+  padding: 24px;
+  text-align: center;
 }
 
 .welcome-logo {
@@ -284,11 +566,12 @@ body {
   font-size: 34px;
   font-weight: 700;
   color: var(--accent);
+  letter-spacing: -0.5px;
 }
 
-.welcome-sub { color: var(--fg-dim); margin-bottom: 14px; }
-.welcome-hint { color: var(--fg-faint); font-size: 12px; }
-.welcome .primarybtn { align-self: center; margin-top: 20px; }
+.welcome-sub { color: var(--fg-dim); margin-bottom: 16px; }
+.welcome-hint { color: var(--fg-faint); font-size: 12px; line-height: 1.7; }
+.welcome .primarybtn { margin-top: 22px; }
 
 .notice { color: var(--fg-dim); padding: 24px; font-family: var(--mono); font-size: 12px; }
 
@@ -301,7 +584,7 @@ body {
 }
 
 .cl { display: flex; align-items: flex-start; white-space: pre; }
-.cl:hover { background: rgba(255, 255, 255, 0.025); }
+.cl:hover { background: rgba(255, 255, 255, 0.028); }
 
 .ln {
   width: 46px;
@@ -310,12 +593,19 @@ body {
   padding-right: 12px;
   color: var(--fg-faint);
   user-select: none;
+  font-variant-numeric: tabular-nums;
 }
+
+/* Two of them side by side on an inline diff, and one per column on a split
+   one — either way 46px each is a gutter sized for a millionth line. Narrower,
+   so the code gets the width instead. */
+.code.inline .ln { width: 40px; padding-right: 8px; }
+.code.split .ln { width: 40px; padding-right: 8px; }
 
 .lc { white-space: pre; }
 
 .id { cursor: pointer; border-radius: 2px; }
-.id:hover { background: rgba(92, 156, 245, 0.22); outline: 1px solid rgba(92, 156, 245, 0.4); }
+.id:hover { background: var(--accent-soft); outline: 1px solid var(--accent-line); }
 
 .flash { animation: flashline 1.4s ease-out; }
 
@@ -326,16 +616,26 @@ body {
 
 /* ---------- diff ---------- */
 
+.hunk + .hunk { margin-top: 14px; }
+
+/* Pinned to the top of the pane for as long as its own hunk is on screen:
+   halfway down a long one, which hunk this is is the whole question. */
 .hunkhdr {
+  position: sticky;
+  top: 0;
+  z-index: 2;
   color: var(--accent);
-  background: var(--bg-1);
+  background: var(--bg-2);
   border-top: 1px solid var(--border);
   border-bottom: 1px solid var(--border);
-  padding: 3px 12px;
-  margin: 8px 0;
+  padding: 3px 0;
   font-size: 11px;
   user-select: none;
 }
+
+/* Pinned sideways as well, so scrolling across wide code does not carry the
+   answer off the left edge. */
+.hunkhdrtext { position: sticky; left: 0; display: inline-block; padding: 0 12px; }
 
 .dl-add { background: var(--add-bg); }
 .dl-del { background: var(--del-bg); }
@@ -366,6 +666,10 @@ body {
   border-right: 1px solid var(--border);
 }
 
+/* The seam between the two sides is worth a line; the outer edge of the pane
+   is not. */
+.scell:last-child { border-right: none; }
+
 .scell .lc { overflow: hidden; text-overflow: ellipsis; }
 
 .s-empty {
@@ -382,17 +686,23 @@ body {
 
 .bottom {
   flex: none;
-  max-height: 38%;
+  height: var(--bottom-h, 240px);
+  /* Whatever it was dragged to, the file above it stays readable. The window
+     less the top bar is what the panes divide up, and 160px of that is the
+     least the code is left with — the same figure `panes.rs` drags to. */
+  min-height: 92px;
+  max-height: calc(100vh - 206px);
   display: flex;
   flex-direction: column;
-  border-top: 1px solid var(--border);
   background: var(--bg-1);
 }
 
 .panel-hdr {
   display: flex;
   align-items: center;
-  padding: 5px 12px;
+  gap: 8px;
+  height: 32px;
+  padding: 0 6px 0 12px;
   border-bottom: 1px solid var(--border);
   flex: none;
 }
@@ -406,25 +716,27 @@ body {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  user-select: none;
 }
 
-.panel-body { overflow-y: auto; flex: 1; }
+.panel-body { overflow-y: auto; flex: 1; padding: 2px 0 8px; }
 
 .panel-empty { color: var(--fg-faint); padding: 12px; font-size: 12px; }
 
 .hitrow {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   gap: 10px;
-  padding: 3px 12px;
+  padding: 4px 12px;
   cursor: pointer;
   font-family: var(--mono);
   font-size: 11.5px;
   white-space: nowrap;
   overflow: hidden;
+  transition: background-color 80ms var(--ease);
 }
 
-.hitrow:hover { background: var(--bg-2); }
+.hitrow:hover { background: var(--bg-3); }
 
 .hitloc { color: var(--accent); flex: none; }
 
@@ -445,7 +757,7 @@ body {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 6px 12px;
+  padding: 8px 12px;
   position: sticky;
   left: 0;
   flex: none;
@@ -457,16 +769,16 @@ body {
   color: var(--added);
   border: 1px solid rgba(79, 191, 122, 0.45);
   border-radius: 3px;
-  padding: 0 5px;
+  padding: 1px 5px;
 }
 
 .previewnote {
   font-family: var(--mono);
   font-size: 10px;
   color: var(--modified);
-  border: 1px solid var(--border);
+  border: 1px solid var(--line);
   border-radius: 3px;
-  padding: 0 5px;
+  padding: 1px 5px;
 }
 
 /* The page is drawn at twice its CSS size for sharpness; the width it is shown
@@ -483,12 +795,13 @@ body {
 /* ---------- conversation pane ---------- */
 
 .convpane {
-  width: 360px;
+  width: var(--conv-w, 380px);
+  min-width: 250px;
+  max-width: 780px;
   flex: none;
   display: flex;
   flex-direction: column;
   background: var(--bg-1);
-  border-left: 1px solid var(--border);
   min-height: 0;
 }
 
@@ -496,7 +809,7 @@ body {
   display: flex;
   align-items: center;
   gap: 8px;
-  height: 34px;
+  height: var(--hdr);
   padding: 0 6px 0 12px;
   border-bottom: 1px solid var(--border);
   flex: none;
@@ -506,30 +819,41 @@ body {
   font-family: var(--mono);
   font-size: 10px;
   color: var(--fg-faint);
-  border: 1px solid var(--border);
+  border: 1px solid var(--line);
   border-radius: 3px;
   padding: 0 5px;
+  flex: none;
 }
 
 .conv-body { overflow-y: auto; flex: 1; padding-bottom: 24px; }
 
-/* Folded away: a strip wide enough to click, and the label turned on its side
-   so it is still readable rather than an unexplained arrow. */
+/* Folded away: a strip wide enough to click anywhere on, with the label turned
+   on its side so it is still readable rather than an unexplained arrow. */
 .convrail {
-  width: 30px;
+  width: 34px;
   flex: none;
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 8px;
-  padding-top: 6px;
+  gap: 10px;
+  padding-top: 7px;
   background: var(--bg-1);
   border-left: 1px solid var(--border);
   cursor: pointer;
   user-select: none;
+  transition: background-color var(--quick) var(--ease);
 }
 
 .convrail:hover { background: var(--bg-2); }
+.convrail:hover .convrail-chev,
+.convrail:hover .convrail-label { color: var(--fg); }
+
+.convrail-chev {
+  font-size: 15px;
+  line-height: 20px;
+  color: var(--fg-dim);
+  transition: color var(--quick) var(--ease);
+}
 
 .convrail-label {
   writing-mode: vertical-rl;
@@ -540,22 +864,24 @@ body {
   font-weight: 700;
   letter-spacing: 1.2px;
   color: var(--fg-faint);
+  transition: color var(--quick) var(--ease);
 }
 
 .convrail-count { font-family: var(--mono); color: var(--accent); letter-spacing: 0; }
 
 .convitem {
   padding: 10px 12px;
-  border-bottom: 1px solid var(--border);
+  border-bottom: 1px solid var(--border-soft);
 }
 
-.convdesc { background: var(--bg-2); }
+.convdesc { background: var(--bg-2); border-bottom-color: var(--border); }
 
 .convmeta {
   display: flex;
   align-items: center;
   gap: 8px;
   min-width: 0;
+  min-height: 22px;
 }
 
 .convwho {
@@ -570,7 +896,7 @@ body {
 .convkind {
   font-size: 10px;
   color: var(--fg-faint);
-  border: 1px solid var(--border);
+  border: 1px solid var(--line);
   border-radius: 3px;
   padding: 0 5px;
   flex: none;
@@ -626,26 +952,34 @@ body {
 /* ---------- github: top bar chips ---------- */
 
 .ghchip {
+  display: inline-flex;
+  align-items: center;
+  height: var(--ctl);
+  padding: 0 11px;
   background: var(--bg-2);
-  border: 1px solid var(--border);
-  border-radius: 5px;
+  border: 1px solid var(--line);
+  border-radius: var(--r);
   color: var(--fg-dim);
   cursor: pointer;
-  font-size: 11px;
-  padding: 3px 10px;
+  font-size: 11.5px;
   white-space: nowrap;
   flex: none;
+  transition: background-color var(--quick) var(--ease), color var(--quick) var(--ease),
+    border-color var(--quick) var(--ease);
 }
 
-.ghchip:hover { color: var(--fg); border-color: var(--fg-faint); }
+.ghchip:hover { color: var(--fg); border-color: var(--fg-faint); background: var(--bg-3); }
 .ghchip.on { color: var(--added); border-color: rgba(79, 191, 122, 0.45); }
 .ghchip.bad { color: var(--deleted); border-color: rgba(224, 108, 117, 0.45); }
 
+/* Centred, not baseline-aligned: the number is monospaced and the title is
+   not, and two families do not share a baseline. */
 .prcrumb {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   gap: 8px;
   min-width: 0;
+  flex: 0 1 auto;
   overflow: hidden;
 }
 
@@ -656,21 +990,23 @@ body {
   flex: none;
 }
 
+/* What you are actually here to read, so it takes the foreground colour and
+   whatever width is going, rather than being the dimmer half of the pair. */
 .prcrumbtitle {
   font-size: 12px;
-  color: var(--fg-dim);
+  color: var(--fg);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  max-width: 340px;
+  min-width: 0;
 }
 
 .prwarn {
   color: var(--modified);
   font-size: 10px;
-  border: 1px solid var(--border);
+  border: 1px solid var(--line);
   border-radius: 3px;
-  padding: 0 5px;
+  padding: 1px 5px;
   flex: none;
 }
 
@@ -680,21 +1016,29 @@ body {
   font-size: 10px;
   border: 1px solid rgba(79, 191, 122, 0.35);
   border-radius: 3px;
-  padding: 0 5px;
+  padding: 1px 5px;
   flex: none;
 }
 
+/* Same again: `warming 8/48` and `warming 12/48` are different widths, and the
+   search box to their right is elastic, so without this the whole right-hand
+   half of the top bar slides about while a pull request warms up. */
 .prwarm {
   color: var(--fg-faint);
   font-family: var(--mono);
   font-size: 10px;
   white-space: nowrap;
   flex: none;
-  animation: warmpulse 1.6s ease-in-out infinite;
+  min-width: 11ch;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  /* Gentle. It sits in the corner of the eye for as long as a clone takes, and
+     the counter beside it is already visibly moving. */
+  animation: warmpulse 2.4s ease-in-out infinite;
 }
 
 @keyframes warmpulse {
-  0%, 100% { opacity: 0.45; }
+  0%, 100% { opacity: 0.68; }
   50% { opacity: 1; }
 }
 
@@ -709,6 +1053,12 @@ body {
   justify-content: center;
   padding-top: 8vh;
   z-index: 50;
+  animation: fadein 120ms var(--ease);
+}
+
+@keyframes fadein {
+  from { opacity: 0; }
+  to { opacity: 1; }
 }
 
 .ghpanel {
@@ -719,15 +1069,21 @@ body {
   flex-direction: column;
   background: var(--bg-1);
   border: 1px solid var(--border);
-  border-radius: 10px;
+  border-radius: var(--r-lg);
   box-shadow: 0 18px 50px rgba(0, 0, 0, 0.5);
   overflow: hidden;
+  animation: risein 140ms var(--ease);
+}
+
+@keyframes risein {
+  from { transform: translateY(-6px); }
+  to { transform: translateY(0); }
 }
 
 .ghhdr {
   display: flex;
   align-items: center;
-  padding: 10px 12px;
+  padding: 10px 10px 10px 14px;
   border-bottom: 1px solid var(--border);
   flex: none;
 }
@@ -750,7 +1106,7 @@ body {
   flex-direction: column;
   gap: 8px;
   padding: 14px 0;
-  border-bottom: 1px solid var(--border);
+  border-bottom: 1px solid var(--border-soft);
 }
 
 .ghsection:last-child { border-bottom: none; }
@@ -763,7 +1119,7 @@ body {
   font-family: var(--mono);
   font-size: 10px;
   color: var(--fg-faint);
-  border: 1px solid var(--border);
+  border: 1px solid var(--line);
   border-radius: 3px;
   padding: 1px 6px;
 }
@@ -792,7 +1148,7 @@ body {
   color: var(--deleted);
   background: var(--del-bg);
   border: 1px solid rgba(224, 108, 117, 0.3);
-  border-radius: 6px;
+  border-radius: var(--r);
   padding: 8px 10px;
   line-height: 1.5;
 }
@@ -804,36 +1160,43 @@ body {
 .ghinput {
   flex: 1;
   min-width: 0;
+  height: 32px;
   background: var(--bg-2);
-  border: 1px solid var(--border);
-  border-radius: 6px;
+  border: 1px solid var(--line);
+  border-radius: var(--r);
   color: var(--fg);
   font-family: var(--mono);
   font-size: 12px;
-  padding: 7px 10px;
+  padding: 0 10px;
   outline: none;
+  transition: border-color var(--quick) var(--ease), box-shadow var(--quick) var(--ease);
 }
 
-.ghinput:focus { border-color: var(--accent); }
+.ghinput::placeholder { color: var(--fg-faint); }
+.ghinput:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
 
 .primarybtn {
-  align-self: flex-start;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 32px;
   background: var(--accent);
   border: 1px solid var(--accent);
-  border-radius: 6px;
+  border-radius: var(--r);
   color: #0f1116;
   cursor: pointer;
   font-size: 12px;
   font-weight: 600;
-  padding: 7px 14px;
+  padding: 0 15px;
   flex: none;
+  transition: filter var(--quick) var(--ease), opacity var(--quick) var(--ease);
 }
 
 .primarybtn:hover:enabled { filter: brightness(1.12); }
+.primarybtn:active:enabled { filter: brightness(0.94); }
 .primarybtn:disabled { opacity: 0.4; cursor: default; }
 
 .linkbtn {
-  align-self: flex-start;
   background: transparent;
   border: none;
   color: var(--accent);
@@ -844,6 +1207,36 @@ body {
 }
 
 .linkbtn:hover { text-decoration: underline; }
+
+/* Deleting every mirror and checkout on disk is not a link. It reads as a
+   quiet button until the pointer is on it, at which point it says what it is. */
+.dangerbtn {
+  display: inline-flex;
+  align-items: center;
+  height: 26px;
+  padding: 0 11px;
+  background: transparent;
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  color: var(--fg-dim);
+  cursor: pointer;
+  font-size: 11.5px;
+  flex: none;
+  transition: background-color var(--quick) var(--ease), color var(--quick) var(--ease),
+    border-color var(--quick) var(--ease);
+}
+
+.dangerbtn:hover {
+  color: var(--deleted);
+  border-color: rgba(224, 108, 117, 0.5);
+  background: var(--del-bg);
+}
+
+/* `flex-start` here means "do not stretch across the column", which is only
+   ever true inside a `.ghsection`. Left on the base rule it also meant "sit
+   above the centre line" in every row these are used in. */
+.ghsection > .linkbtn,
+.ghsection > .primarybtn { align-self: flex-start; }
 
 /* The device-flow code the user types into github.com. */
 .ghcoderow {
@@ -857,12 +1250,14 @@ body {
 
 .copybtn {
   background: transparent;
-  border: 1px solid var(--border);
-  border-radius: 6px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
   color: var(--fg-dim);
   cursor: pointer;
   font-size: 11.5px;
-  padding: 3px 10px;
+  height: 24px;
+  padding: 0 10px;
+  transition: background-color var(--quick) var(--ease), color var(--quick) var(--ease);
 }
 
 .copybtn:hover { background: var(--bg-2); color: var(--fg); }
@@ -874,7 +1269,7 @@ body {
   letter-spacing: 5px;
   color: var(--fg);
   background: var(--bg-3);
-  border: 1px solid var(--border);
+  border: 1px solid var(--line);
   border-radius: 8px;
   padding: 12px;
   text-align: center;
@@ -886,7 +1281,7 @@ body {
 .repolist {
   display: flex;
   flex-direction: column;
-  border: 1px solid var(--border);
+  border: 1px solid var(--line);
   border-radius: 8px;
   overflow: hidden;
 }
@@ -894,11 +1289,15 @@ body {
 .repoitem {
   padding: 7px 12px;
   cursor: pointer;
-  border-bottom: 1px solid var(--border);
+  border-bottom: 1px solid var(--border-soft);
+  box-shadow: inset 2px 0 0 transparent;
+  transition: background-color 80ms var(--ease), box-shadow 80ms var(--ease);
 }
 
 .repoitem:last-child { border-bottom: none; }
-.repoitem:hover { background: var(--bg-2); }
+/* Hover must not overpaint what the arrow keys have selected: pointing at one
+   row while another is chosen would otherwise light both. */
+.repoitem:hover:not(.on) { background: var(--bg-2); }
 
 /* Where the arrow keys are. A shade darker than hover is not enough to find at
    a glance, so it gets the accent edge as well. */
@@ -921,7 +1320,7 @@ body {
 .repotag {
   font-size: 10px;
   color: var(--fg-faint);
-  border: 1px solid var(--border);
+  border: 1px solid var(--line);
   border-radius: 3px;
   padding: 0 5px;
   flex: none;
@@ -952,7 +1351,7 @@ body {
 .prlist {
   display: flex;
   flex-direction: column;
-  border: 1px solid var(--border);
+  border: 1px solid var(--line);
   border-radius: 8px;
   overflow: hidden;
 }
@@ -960,7 +1359,9 @@ body {
 .pritem {
   padding: 8px 12px;
   cursor: pointer;
-  border-bottom: 1px solid var(--border);
+  border-bottom: 1px solid var(--border-soft);
+  box-shadow: inset 2px 0 0 transparent;
+  transition: background-color 80ms var(--ease), box-shadow 80ms var(--ease);
 }
 
 .pritem:last-child { border-bottom: none; }
@@ -986,7 +1387,7 @@ body {
 .prdraft {
   font-size: 10px;
   color: var(--fg-faint);
-  border: 1px solid var(--border);
+  border: 1px solid var(--line);
   border-radius: 3px;
   padding: 0 5px;
   flex: none;
@@ -1004,7 +1405,34 @@ body {
 
 /* ---------- scrollbars ---------- */
 
-::-webkit-scrollbar { width: 10px; height: 10px; }
-::-webkit-scrollbar-thumb { background: var(--bg-3); border-radius: 5px; }
-::-webkit-scrollbar-thumb:hover { background: var(--border); }
+/* Drawn inside its own track so the bar floats clear of the content, and dark
+   enough to stay out of the way until it is being used. */
+::-webkit-scrollbar { width: 12px; height: 12px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background: var(--bg-3);
+  background-clip: content-box;
+  border: 3px solid transparent;
+  border-radius: 6px;
+}
+::-webkit-scrollbar-thumb:hover { background: var(--bg-4); background-clip: content-box; }
 ::-webkit-scrollbar-corner { background: transparent; }
+
+/* ---------- reduced motion ---------- */
+
+/* Everything that moves in here is feedback, not decoration, so none of it is
+   removed — it is made instant. The jump-to-line flash is the exception: with
+   no animation it would never appear at all, so it becomes a plain highlight
+   that `scroll_js` still clears after 1.4s. */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+
+  .flash {
+    animation: none !important;
+    background: var(--accent-soft) !important;
+  }
+}

@@ -4,6 +4,7 @@ pub mod github;
 pub mod gitio;
 pub mod highlight;
 pub mod htmlview;
+pub mod layout;
 pub mod mirror;
 pub mod search;
 pub mod symbols;

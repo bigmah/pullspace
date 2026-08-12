@@ -1,11 +1,13 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::time::Instant;
 
 use dioxus::prelude::*;
 
 use crate::backend::auth::{Token, TokenSource};
 use crate::backend::github::{statuses_of, PrDetail, PrSummary, RepoRef, RepoView, Thread};
 use crate::backend::gitio::{discover_root, load_statuses};
+use crate::backend::layout;
 use crate::backend::search::{search_repo, text_query, word_query, Hit};
 use crate::backend::symbols::{build_index, find_definitions, Symbol};
 use crate::backend::tree::{build_tree, build_tree_from_paths, filter_changed, ChangeKind, FileNode};
@@ -15,6 +17,7 @@ use super::bottom::Bottom;
 use super::conversation::ConvPane;
 use super::filetree::FileTreePane;
 use super::github::GhPanel;
+use super::panes::{self, Drag, DragMask, Edge};
 use super::topbar::TopBar;
 use super::viewer::Viewer;
 
@@ -216,6 +219,21 @@ pub struct St {
     /// comes back instantly and without a second trip to GitHub.
     pub conv: Signal<Conversation>,
     pub conv_open: Signal<bool>,
+
+    // --- layout ---
+    /// Pane sizes in CSS pixels, published to the stylesheet as custom
+    /// properties. Read here at the very top of the tree and nowhere else, so
+    /// dragging a divider re-renders one small template.
+    pub side_w: Signal<f64>,
+    pub conv_w: Signal<f64>,
+    pub bottom_h: Signal<f64>,
+    /// The area the three panes share, as last measured. `(0, 0)` until the
+    /// first report from the resize observer.
+    pub main_size: Signal<(f64, f64)>,
+    /// The divider in hand, while one is.
+    pub drag: Signal<Option<Drag>>,
+    /// The last divider pressed and when — how a double-click is spotted.
+    pub last_grab: Signal<Option<(Edge, Instant)>>,
 }
 
 impl St {
@@ -519,6 +537,10 @@ pub fn App() -> Element {
             .map(|r| r.to_string())
             .unwrap_or_default();
 
+        // The panes come back the width they were left, which is the whole
+        // point of being able to drag them.
+        let saved = layout::load();
+
         St {
             root: Signal::new(root.clone()),
             scan_root: Signal::new(ScanRoot::Dir(root)),
@@ -547,6 +569,13 @@ pub fn App() -> Element {
             pr_source: Signal::new(PrSource::Api),
             conv: Signal::new(Conversation::Loading),
             conv_open: Signal::new(true),
+
+            side_w: Signal::new(saved.side_w),
+            conv_w: Signal::new(saved.conv_w),
+            bottom_h: Signal::new(saved.bottom_h),
+            main_size: Signal::new((0.0, 0.0)),
+            drag: Signal::new(None),
+            last_grab: Signal::new(None),
         }
     });
 
@@ -655,11 +684,45 @@ pub fn App() -> Element {
         }
     });
 
+    // Unfolding the conversation claims 380px the explorer may currently be
+    // standing on, and opening a pull request is what puts it there at all.
+    // Either way the dividers' limits have moved, so the panes are brought
+    // back inside them. Everything `refit` touches it peeks, so this watches
+    // the two signals named here and nothing else.
+    use_effect(move || {
+        let _ = st.conv_open.read();
+        let _ = st.workspace.read();
+        panes::refit(&st);
+    });
+
+    // The one place the pane sizes are read. Whole pixels: a divider parked on
+    // a half pixel blurs the hairline it draws, and the extra precision is not
+    // something anyone is dragging for.
+    let panes = format!(
+        "--side-w:{:.0}px;--conv-w:{:.0}px;--bottom-h:{:.0}px",
+        *st.side_w.read(),
+        *st.conv_w.read(),
+        *st.bottom_h.read(),
+    );
+
     rsx! {
         style { dangerous_inner_html: CSS }
-        div { class: "app",
+        div { class: "app", style: "{panes}",
             TopBar {}
-            div { class: "main",
+            div {
+                class: "main",
+                // What the dividers are allowed to give away — and, when the
+                // window has just given away some of it, the moment the panes
+                // are moved back inside what is left. The panes are `flex:
+                // none`, so this is the only thing that resizes them, which is
+                // what makes the sizes here the sizes on screen.
+                onresize: move |e| {
+                    if let Ok(size) = e.get_content_box_size() {
+                        let mut area = st.main_size;
+                        area.set((size.width, size.height));
+                        panes::refit(&st);
+                    }
+                },
                 FileTreePane {}
                 div { class: "rightcol",
                     Viewer {}
@@ -670,6 +733,7 @@ pub fn App() -> Element {
             if *st.gh_open.read() {
                 GhPanel {}
             }
+            DragMask {}
         }
     }
 }

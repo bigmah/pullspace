@@ -177,29 +177,40 @@ pub fn Viewer() -> Element {
         }
     });
 
+    // A new file starts at the top. The scroll container outlives the file in
+    // it, so without this, opening something short after reading deep into
+    // something long lands you at the bottom of it.
+    use_effect(move || {
+        let _ = st.open.read();
+        if st.pending_scroll.peek().is_some() {
+            return;
+        }
+        document::eval("var e=document.querySelector('.codewrap'); if(e) e.scrollTop=0;");
+    });
+
     let guard = data.read();
-    let (rel, new_side) = match &*guard {
+    // Loading and failure replace the file, not the window around it: a header
+    // that blinks out and back every time an uncached file is clicked is worse
+    // jank than the wait it is reporting.
+    let (rel, new_side, pending) = match &*guard {
         Pane::Empty => return rsx! { Welcome {} },
-        Pane::Loading => {
-            return rsx! {
-                div { class: "viewer",
-                    div { class: "notice", "Loading from GitHub…" }
-                }
-            }
-        }
-        Pane::Failed(e) => {
-            let msg = e.clone();
-            return rsx! {
-                div { class: "viewer",
-                    div { class: "notice error", "{msg}" }
-                }
-            };
-        }
-        Pane::Ready { rel, new, .. } => (rel.clone(), new.clone()),
+        Pane::Loading => (
+            st.open.read().clone().unwrap_or_default(),
+            FileContent::Absent,
+            Some(rsx! { div { class: "notice", "Loading from GitHub…" } }),
+        ),
+        Pane::Failed(e) => (
+            st.open.read().clone().unwrap_or_default(),
+            FileContent::Absent,
+            Some(rsx! { div { class: "notice error", "{e}" } }),
+        ),
+        Pane::Ready { rel, new, .. } => (rel.clone(), new.clone(), None),
     };
+    let settled = pending.is_none();
 
     let status = st.statuses.read().get(&rel).copied();
-    let deleted_note = new_side == FileContent::Absent && status == Some(ChangeKind::Deleted);
+    let deleted_note =
+        settled && new_side == FileContent::Absent && status == Some(ChangeKind::Deleted);
     // Go to Definition / Find References run against whatever was indexed —
     // the local repository, or this pull request's own checkout.
     let symbols_enabled = st.scan_root.read().dir().is_some();
@@ -243,7 +254,13 @@ pub fn Viewer() -> Element {
     };
 
     let mut vm = st.view_mode;
-    let mode_btn = |label: &'static str, m: ViewMode, cur: ViewMode, enabled: bool| {
+    // A disabled button at 30% opacity with no explanation is a puzzle; the
+    // tooltip is where the reason goes.
+    let mode_btn = |label: &'static str,
+                    m: ViewMode,
+                    cur: ViewMode,
+                    enabled: bool,
+                    why: &'static str| {
         let cls = if m == cur && enabled {
             "modebtn on"
         } else {
@@ -252,13 +269,22 @@ pub fn Viewer() -> Element {
         rsx! {
             button {
                 class: cls,
+                title: "{why}",
                 disabled: !enabled,
                 onclick: move |_| vm.set(m),
                 "{label}"
             }
         }
     };
-    let diffable = status.is_some();
+    // Nothing to diff or draw until the file itself has arrived.
+    let diffable = settled && status.is_some();
+    let diff_why = if diffable {
+        "Show this file's changes"
+    } else if settled {
+        "This file has no changes to diff"
+    } else {
+        "Waiting for the file"
+    };
 
     rsx! {
         div { class: "viewer",
@@ -277,11 +303,15 @@ pub fn Viewer() -> Element {
                     }
                 }
                 span { class: "spacer" }
-                {mode_btn("Source", ViewMode::Source, mode, true)}
-                {mode_btn("Inline", ViewMode::Inline, mode, diffable)}
-                {mode_btn("Split", ViewMode::Split, mode, diffable)}
-                if previewable {
-                    {mode_btn("Preview", ViewMode::Preview, mode, true)}
+                // One control, not four loose buttons: these are alternatives,
+                // and a segmented group is what says so.
+                div { class: "modegroup",
+                    {mode_btn("Source", ViewMode::Source, mode, settled, "Show the file as it stands")}
+                    {mode_btn("Inline", ViewMode::Inline, mode, diffable, diff_why)}
+                    {mode_btn("Split", ViewMode::Split, mode, diffable, diff_why)}
+                    if previewable {
+                        {mode_btn("Preview", ViewMode::Preview, mode, settled, "Draw this page as it would look")}
+                    }
                 }
             }
             if let Some(name) = selected {
@@ -289,7 +319,7 @@ pub fn Viewer() -> Element {
                     SymBar { name }
                 }
             }
-            div { class: "codewrap", {body} }
+            div { class: "codewrap", {pending.unwrap_or(body)} }
         }
     }
 }
@@ -327,7 +357,12 @@ fn SymBar(name: String) -> Element {
             button { class: "symbtn", onclick: move |_| st.goto_def(&n1), "Go to Definition" }
             button { class: "symbtn", onclick: move |_| st.find_refs(&n2), "Find References" }
             span { class: "spacer" }
-            button { class: "symbtn close", onclick: move |_| sel.set(None), "✕" }
+            button {
+                class: "iconbtn",
+                title: "Clear the selection",
+                onclick: move |_| sel.set(None),
+                "✕"
+            }
         }
     }
 }
@@ -492,14 +527,29 @@ fn inline_line(l: &Line) -> Element {
     }
 }
 
+/// The `@@ … @@` line, pinned to the top of the pane for as long as its own
+/// hunk is on screen — halfway down a long one, knowing which it is is the
+/// whole question. Its text is pinned to the left edge too, so scrolling
+/// sideways through wide code does not take the answer with it.
+fn hunk_header(header: &str) -> Element {
+    let header = header.to_string();
+    rsx! {
+        div { class: "hunkhdr",
+            span { class: "hunkhdrtext", "{header}" }
+        }
+    }
+}
+
 fn render_inline(hunks: &[Hunk]) -> Element {
     let hunks = hunks.to_vec();
     rsx! {
-        div { class: "code",
+        div { class: "code inline",
             for h in hunks {
-                div { class: "hunkhdr", "{h.header}" }
-                for l in h.lines.iter() {
-                    {inline_line(l)}
+                div { class: "hunk",
+                    {hunk_header(&h.header)}
+                    for l in h.lines.iter() {
+                        {inline_line(l)}
+                    }
                 }
             }
         }
@@ -533,11 +583,13 @@ fn render_split(hunks: &[Hunk]) -> Element {
     rsx! {
         div { class: "code split",
             for h in hunks {
-                div { class: "hunkhdr", "{h.header}" }
-                for row in to_rows(&h) {
-                    div { class: "srow",
-                        {split_cell(row.left.as_ref(), false)}
-                        {split_cell(row.right.as_ref(), true)}
+                div { class: "hunk",
+                    {hunk_header(&h.header)}
+                    for row in to_rows(&h) {
+                        div { class: "srow",
+                            {split_cell(row.left.as_ref(), false)}
+                            {split_cell(row.right.as_ref(), true)}
+                        }
                     }
                 }
             }

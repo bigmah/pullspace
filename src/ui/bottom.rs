@@ -4,6 +4,7 @@ use crate::backend::search::{Hit, MAX_HITS};
 use crate::backend::symbols::Symbol;
 
 use super::app::{BottomPanel, St};
+use super::panes::{Edge, Splitter};
 
 #[component]
 pub fn Bottom() -> Element {
@@ -53,12 +54,14 @@ pub fn Bottom() -> Element {
     };
 
     rsx! {
+        Splitter { edge: Edge::Bottom }
         div { class: "bottom",
             div { class: "panel-hdr",
                 span { class: "panel-title", "{title}" }
                 span { class: "spacer" }
                 button {
                     class: "iconbtn",
+                    title: "Close this panel",
                     onclick: move |_| bottom.set(BottomPanel::Hidden),
                     "✕"
                 }

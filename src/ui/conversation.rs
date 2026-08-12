@@ -11,6 +11,7 @@ use crate::backend::auth::open_browser;
 use crate::backend::github::{pr_comments, Comment, CommentKind, PrDetail, RepoRef};
 
 use super::app::{Conversation, St};
+use super::panes::{Edge, Splitter};
 
 /// Fetch the conversation for a pull request, unless it has been closed or
 /// swapped out from under us in the meantime.
@@ -79,15 +80,12 @@ pub fn ConvPane() -> Element {
 
     if !*open.read() {
         return rsx! {
-            div { class: "convrail",
-                button {
-                    class: "iconbtn",
-                    title: "Show the pull request conversation",
-                    onclick: move |_| open.set(true),
-                    "‹"
-                }
+            div {
+                class: "convrail",
+                title: "Show the pull request conversation",
+                onclick: move |_| open.set(true),
+                span { class: "convrail-chev", "‹" }
                 div { class: "convrail-label",
-                    onclick: move |_| open.set(true),
                     "CONVERSATION"
                     if count > 0 {
                         span { class: "convrail-count", "{count}" }
@@ -123,7 +121,10 @@ pub fn ConvPane() -> Element {
         },
     };
 
+    let reload_cls = if reloading { "iconbtn spin" } else { "iconbtn" };
+
     rsx! {
+        Splitter { edge: Edge::Conv }
         div { class: "convpane",
             div { class: "conv-hdr",
                 span { class: "side-title", "CONVERSATION" }
@@ -132,14 +133,14 @@ pub fn ConvPane() -> Element {
                 }
                 span { class: "spacer" }
                 button {
-                    class: "iconbtn",
+                    class: reload_cls,
                     title: "Reload the conversation from GitHub",
                     disabled: reloading,
                     // Root scope: this button is re-rendered by the load it starts.
                     onclick: move |_| {
                         spawn_forever(load(st, repo.clone(), number));
                     },
-                    "⟳"
+                    span { class: "glyph", "⟳" }
                 }
                 button {
                     class: "iconbtn",
@@ -215,7 +216,7 @@ fn CommentRow(c: Comment) -> Element {
                 span { class: "spacer" }
                 if has_link {
                     button {
-                        class: "iconbtn",
+                        class: "iconbtn sm",
                         title: "Open on github.com",
                         onclick: move |_| open_browser(&url),
                         "↗"

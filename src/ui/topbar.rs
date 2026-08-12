@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use dioxus::prelude::*;
 
 use crate::backend::auth::open_browser;
@@ -13,8 +15,10 @@ pub fn TopBar() -> Element {
     let mut gh_open = st.gh_open;
     // Read (not peek) so the path re-renders after opening another repo.
     let root_str = st.root.read().to_string_lossy().into_owned();
+    // Short, because it shares a fixed width with the count that replaces it —
+    // a readout that resizes shoves the four controls to its right.
     let index_label = match st.index.read().as_ref() {
-        None => "indexing symbols…".to_string(),
+        None => "indexing…".to_string(),
         Some(idx) => format!("{} symbols", idx.len()),
     };
 
@@ -37,6 +41,20 @@ pub fn TopBar() -> Element {
         Workspace::Repo(_) => "Reload this repository from GitHub",
         Workspace::Local => "Reload git status & file tree",
     };
+    // Reloading the local working tree is synchronous, so it is over before
+    // the button could report that it had started. This holds the spin open
+    // for long enough to be read as "it did something" rather than as a blink.
+    let mut nudged = use_signal(|| false);
+    let spinning = reloading || *nudged.read();
+    let refresh_cls = if spinning {
+        "iconbtn lg spin"
+    } else {
+        "iconbtn lg"
+    };
+    // Opening a pull request can mean a clone. The progress line along the
+    // bottom of the bar is the one piece of that visible with the GitHub panel
+    // closed — which is where `⟳` reloads from.
+    let bar_cls = if reloading { "topbar busy" } else { "topbar" };
 
     // Where file contents come from — worth showing, since it is the
     // difference between instant and a round trip per file.
@@ -60,6 +78,18 @@ pub fn TopBar() -> Element {
         let done = warmed(&st, pr);
         (done < pr.files.len()).then_some((done, pr.files.len()))
     });
+
+    // One note at a time. A reload in flight is the more urgent of the two,
+    // and two of these pulsing out of phase in the corner of the eye is one
+    // more than anybody needs.
+    let status = match (reload_note, warming) {
+        (Some(note), _) => Some((note, String::new())),
+        (None, Some((done, total))) => Some((
+            format!("warming {done}/{total}"),
+            "Caching the PR's changed files in the background".to_string(),
+        )),
+        _ => None,
+    };
 
     // Say so when the explorer is showing less than the whole repository,
     // rather than letting a missing file look like it does not exist.
@@ -115,7 +145,7 @@ pub fn TopBar() -> Element {
     };
 
     rsx! {
-        div { class: "topbar",
+        div { class: "{bar_cls}",
             span { class: "brand", "pullspace" }
             button {
                 class: "iconbtn",
@@ -131,7 +161,22 @@ pub fn TopBar() -> Element {
                         st.open_repo(dir.path().to_path_buf());
                     }
                 },
-                "📂"
+                // Drawn rather than typed. Every other icon in the chrome is a
+                // one-weight outline glyph; 📂 is full colour and fills its
+                // whole em box, which is what made the ones beside it look
+                // like specks.
+                svg {
+                    width: "16",
+                    height: "16",
+                    view_box: "0 0 16 16",
+                    fill: "none",
+                    stroke: "currentColor",
+                    stroke_width: "1.3",
+                    stroke_linejoin: "round",
+                    path {
+                        d: "M2 4.5A1.5 1.5 0 0 1 3.5 3h2.4a1 1 0 0 1 .8.4L7.8 5h4.7A1.5 1.5 0 0 1 14 6.5v5A1.5 1.5 0 0 1 12.5 13h-9A1.5 1.5 0 0 1 2 11.5v-7Z",
+                    }
+                }
             }
             if let Some(pr) = pr {
                 span {
@@ -146,15 +191,8 @@ pub fn TopBar() -> Element {
                 if let Some((label, why)) = warn {
                     span { class: "prwarn", title: "{why}", "{label}" }
                 }
-                if let Some((done, total)) = warming {
-                    span {
-                        class: "prwarm",
-                        title: "Caching the PR's changed files in the background",
-                        "warming {done}/{total}"
-                    }
-                }
-                if let Some(note) = reload_note.clone() {
-                    span { class: "prwarm", "{note}" }
+                if let Some((note, why)) = status.clone() {
+                    span { class: "prwarm", title: "{why}", "{note}" }
                 }
                 if let Some(e) = reload_error.clone() {
                     span { class: "prwarn", title: "{e}", "reload failed" }
@@ -166,10 +204,11 @@ pub fn TopBar() -> Element {
                     "↗"
                 }
                 button {
-                    class: "linkbtn",
+                    class: "closebtn",
                     title: "Back to the local working tree",
                     onclick: move |_| st.leave_remote(),
-                    "✕ close PR"
+                    span { class: "closex", "✕" }
+                    "close PR"
                 }
             } else if let Some(view) = browsing {
                 span {
@@ -184,8 +223,8 @@ pub fn TopBar() -> Element {
                 if let Some((label, why)) = warn {
                     span { class: "prwarn", title: "{why}", "{label}" }
                 }
-                if let Some(note) = reload_note.clone() {
-                    span { class: "prwarm", "{note}" }
+                if let Some((note, why)) = status.clone() {
+                    span { class: "prwarm", title: "{why}", "{note}" }
                 }
                 if let Some(e) = reload_error.clone() {
                     span { class: "prwarn", title: "{e}", "reload failed" }
@@ -200,10 +239,11 @@ pub fn TopBar() -> Element {
                     "↗"
                 }
                 button {
-                    class: "linkbtn",
+                    class: "closebtn",
                     title: "Back to the local working tree",
                     onclick: move |_| st.leave_remote(),
-                    "✕ close repo"
+                    span { class: "closex", "✕" }
+                    "close repo"
                 }
             } else {
                 span { class: "repopath", title: "{root_str}", "{root_str}" }
@@ -233,7 +273,7 @@ pub fn TopBar() -> Element {
                 "{account_label}"
             }
             button {
-                class: "iconbtn",
+                class: refresh_cls,
                 title: "{refresh_title}",
                 disabled: reloading,
                 onclick: move |_| match (pr_target.clone(), repo_target.clone()) {
@@ -245,9 +285,18 @@ pub fn TopBar() -> Element {
                     (_, Some(repo)) => {
                         spawn_forever(browse_repo(st, repo));
                     }
-                    _ => st.refresh(),
+                    _ => {
+                        st.refresh();
+                        nudged.set(true);
+                        spawn(async move {
+                            tokio::time::sleep(Duration::from_millis(550)).await;
+                            nudged.set(false);
+                        });
+                    }
                 },
-                "⟳"
+                // The glyph turns, not the button: a spinning hover square is
+                // not what anyone means by "it is working".
+                span { class: "glyph", "⟳" }
             }
         }
     }

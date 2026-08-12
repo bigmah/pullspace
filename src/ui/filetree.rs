@@ -1,19 +1,66 @@
+use std::path::PathBuf;
+
 use dioxus::prelude::*;
 
 use crate::backend::tree::FileNode;
 
 use super::app::St;
+use super::panes::{Edge, Splitter};
 use super::prcache::ensure_path;
+
+/// One listener for the whole tree, living in the webview, reporting the row the
+/// pointer has settled on.
+///
+/// A Dioxus handler cannot do this job. Every event one receives is delivered
+/// over a *synchronous* request that stops the webview — and painting with it —
+/// until Rust has answered. Hung off every row, that is a stall per row crossed,
+/// which is the one thing a hover highlight cannot afford. This costs nothing to
+/// cross, says nothing until the pointer stops, and what it does say goes back
+/// asynchronously.
+const HOVER_JS: &str = r#"
+    let timer = null;
+    let last = null;
+    document.addEventListener('mouseover', function (e) {
+        const row = e.target.closest('.row.file[data-path]');
+        const path = row ? row.getAttribute('data-path') : null;
+        if (path === last) return;
+        last = path;
+        clearTimeout(timer);
+        if (path === null) return;
+        // Long enough that sweeping past a row on the way somewhere else is
+        // free, short enough to still be ahead of the click it precedes.
+        timer = setTimeout(function () { dioxus.send(path); }, 80);
+    });
+"#;
 
 #[component]
 pub fn FileTreePane() -> Element {
     let st = use_context::<St>();
+
+    // Fetch whatever the pointer comes to rest on, so opening it is instant.
+    // Mounted once, and the listener is on the document, so it goes on working
+    // across every rebuild of the tree under it.
+    use_future(move || async move {
+        let mut hover = document::eval(HOVER_JS);
+        while let Ok(path) = hover.recv::<String>().await {
+            ensure_path(st, &PathBuf::from(path));
+        }
+    });
+
     let tree = use_context::<Memo<Option<FileNode>>>();
     let mut changes_only = st.changes_only;
-    let filter_cls = if changes_only() {
-        "iconbtn filter on"
-    } else {
+    let showing_all = !changes_only();
+    let filter_cls = if showing_all {
         "iconbtn filter"
+    } else {
+        "iconbtn filter on"
+    };
+    // A toggle that describes the same thing in both states says nothing about
+    // which one it is in.
+    let filter_title = if showing_all {
+        "Show changed files only"
+    } else {
+        "Showing changed files only — click to show every file"
     };
 
     let body = match tree.read().as_ref() {
@@ -31,7 +78,7 @@ pub fn FileTreePane() -> Element {
                 span { class: "side-title", "EXPLORER" }
                 button {
                     class: filter_cls,
-                    title: "Show changed files only",
+                    title: filter_title,
                     onclick: move |_| {
                         let v = *changes_only.peek();
                         changes_only.set(!v);
@@ -41,6 +88,9 @@ pub fn FileTreePane() -> Element {
             }
             div { class: "tree", {body} }
         }
+        // The divider belongs to the pane it moves, so nothing above has to
+        // know which panes happen to be on screen.
+        Splitter { edge: Edge::Sidebar }
     }
 }
 
@@ -97,16 +147,17 @@ fn TreeNode(node: FileNode, depth: usize) -> Element {
             Some(s) => format!("fname {}", s.css()),
             None => "fname".to_string(),
         };
-        let hover_key = node.path.clone();
+        let path_attr = node.path.display().to_string();
         rsx! {
             div {
                 class: cls,
                 style: "{indent}",
+                // What the hover listener reads to start the fetch on the way to
+                // the click. An attribute rather than an `onmouseenter`, because
+                // a handler here would put a blocking round trip to Rust in the
+                // way of the highlight — see `HOVER_JS`.
+                "data-path": "{path_attr}",
                 onclick: move |_| st.open_file(path_key.clone()),
-                // Start the fetch on the way to the click. In PR mode this is
-                // usually what makes opening a file feel instant; outside it,
-                // and for anything already cached, it does nothing.
-                onmouseenter: move |_| ensure_path(st, &hover_key),
                 span { class: "arrow", "" }
                 span { class: "{name_cls}", "{node.name}" }
                 if let Some((b, c)) = badge {

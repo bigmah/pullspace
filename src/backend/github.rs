@@ -845,6 +845,27 @@ pub struct PrDetail {
     pub base_tree: Snapshot,
 }
 
+impl PrDetail {
+    /// What one changed file is remembered as, once somebody has marked it
+    /// read: the git blob it is made of.
+    ///
+    /// The blob rather than the path, because a mark is a statement about
+    /// contents — see [`viewed`](crate::backend::viewed). Nearly always the
+    /// head side; the base side for a file this pull request deletes, which has
+    /// no head side to hash. Falling back to the path covers the one case with
+    /// no blob at all: a pull request whose tree GitHub would not serve, where
+    /// a mark keyed by name is still better than no marks.
+    pub fn blob_key(&self, path: &std::path::Path) -> String {
+        if let Some(entry) = self.tree.entry(path) {
+            return entry.sha.clone();
+        }
+        find_file(&self.files, path)
+            .and_then(|f| self.base_tree.entry(f.base_path()))
+            .map(|entry| entry.sha.clone())
+            .unwrap_or_else(|| format!("path:{}", path.display()))
+    }
+}
+
 /// Load a PR: metadata, the merge base, the changed-file list, and the full
 /// repository tree at the PR's head.
 ///
@@ -1189,6 +1210,8 @@ pub fn find_file<'a>(files: &'a [PrFile], path: &std::path::Path) -> Option<&'a 
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use super::*;
 
     /// A moment `secs` from now, as `x-ratelimit-reset` writes it.
@@ -1247,6 +1270,120 @@ mod tests {
         // early, and early is another spent request.
         assert_eq!(wait_phrase(91), "Try again in 2 minutes.");
         assert_eq!(wait_phrase(3600), "Try again in 60 minutes.");
+    }
+
+    /// A snapshot of `(path, blob)` pairs, sorted the way a real one is.
+    fn snapshot(files: &[(&str, &str)]) -> Snapshot {
+        let mut files: Vec<TreeEntry> = files
+            .iter()
+            .map(|(path, sha)| TreeEntry {
+                path: PathBuf::from(path),
+                sha: sha.to_string(),
+                size: 0,
+            })
+            .collect();
+        files.sort_by(|a, b| a.path.cmp(&b.path));
+        Snapshot {
+            files,
+            ..Snapshot::default()
+        }
+    }
+
+    fn changed(path: &str, status: ChangeKind) -> PrFile {
+        PrFile {
+            path: PathBuf::from(path),
+            previous_path: None,
+            status,
+            additions: 0,
+            deletions: 0,
+        }
+    }
+
+    /// A pull request with only the three fields `blob_key` reads filled in.
+    fn pr_with(head: Snapshot, base: Snapshot, files: Vec<PrFile>) -> PrDetail {
+        PrDetail {
+            repo: RepoRef::default(),
+            number: 1,
+            title: String::new(),
+            body: String::new(),
+            author: String::new(),
+            state: String::new(),
+            draft: false,
+            html_url: String::new(),
+            head_ref: String::new(),
+            base_ref: String::new(),
+            base_sha: String::new(),
+            head_sha: String::new(),
+            files,
+            truncated: false,
+            tree: head,
+            base_tree: base,
+        }
+    }
+
+    #[test]
+    fn a_file_is_remembered_as_the_blob_it_is_made_of() {
+        let pr = pr_with(
+            snapshot(&[("src/a.rs", "aaa"), ("src/b.rs", "bbb")]),
+            snapshot(&[("src/a.rs", "old")]),
+            vec![changed("src/a.rs", ChangeKind::Modified)],
+        );
+        // The head side: what the file is now, not what it was called.
+        assert_eq!(pr.blob_key(Path::new("src/a.rs")), "aaa");
+    }
+
+    #[test]
+    fn a_deleted_file_is_remembered_as_the_side_it_still_has() {
+        let mut renamed = changed("new/name.rs", ChangeKind::Renamed);
+        renamed.previous_path = Some(PathBuf::from("old/name.rs"));
+        let pr = pr_with(
+            snapshot(&[("new/name.rs", "moved")]),
+            snapshot(&[("gone.rs", "was-here"), ("old/name.rs", "before")]),
+            vec![changed("gone.rs", ChangeKind::Deleted), renamed],
+        );
+        // Deleted: no head side at all, so the base blob is its identity.
+        assert_eq!(pr.blob_key(Path::new("gone.rs")), "was-here");
+        // Renamed: it does have a head side, which is the one that counts —
+        // moving a file without touching it must not untick it.
+        assert_eq!(pr.blob_key(Path::new("new/name.rs")), "moved");
+    }
+
+    #[test]
+    fn a_pull_request_with_no_tree_falls_back_to_the_path() {
+        let pr = pr_with(
+            Snapshot::default(),
+            Snapshot::default(),
+            vec![changed("src/a.rs", ChangeKind::Modified)],
+        );
+        assert_eq!(pr.blob_key(Path::new("src/a.rs")), "path:src/a.rs");
+    }
+
+    #[test]
+    fn rewriting_a_file_changes_what_it_is_remembered_as() {
+        let before = pr_with(
+            snapshot(&[("src/a.rs", "aaa"), ("src/b.rs", "bbb")]),
+            Snapshot::default(),
+            vec![
+                changed("src/a.rs", ChangeKind::Modified),
+                changed("src/b.rs", ChangeKind::Modified),
+            ],
+        );
+        // A force-push: `a.rs` was rewritten, `b.rs` was carried over untouched.
+        let after = pr_with(
+            snapshot(&[("src/a.rs", "zzz"), ("src/b.rs", "bbb")]),
+            Snapshot::default(),
+            before.files.clone(),
+        );
+        assert_ne!(
+            before.blob_key(Path::new("src/a.rs")),
+            after.blob_key(Path::new("src/a.rs")),
+            "rewritten, so a tick against it must not carry over"
+        );
+        assert_eq!(
+            before.blob_key(Path::new("src/b.rs")),
+            after.blob_key(Path::new("src/b.rs")),
+            "byte-identical, so it stays read"
+        );
     }
 
     #[test]

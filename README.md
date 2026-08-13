@@ -111,6 +111,30 @@ what changed. Unchanged files open as plain highlighted source; changed ones
 open as diffs against the **merge base** — so you see the PR's own changes, not
 everything that landed on the base branch since it was opened.
 
+Every changed file has a **Viewed** box above it, and the arrows beside it —
+`⌥↑` and `⌥↓` — step to the previous and next changed file in the order the
+explorer lists them, folded directories included. The number between them says
+where you are: `4/17`. A file you have ticked dims in the explorer and takes a
+tick of its own, and the count beside EXPLORER becomes `4/17`, so what is left
+to read is a glance rather than a scroll.
+
+What a tick remembers is the **git blob hash** of that file — the same hash the
+local copy files its contents under, not the file's name. So a force-push
+behaves the way a reviewer would want it to: a rebase that leaves a file
+byte-identical leaves it ticked, and anything genuinely rewritten comes back
+unticked, for another look. The marks are kept in `localStorage`, per pull
+request, for the last two dozen you have opened.
+
+The address bar follows what is open — `#/owner/repo/pull/123` for a pull
+request, `#/owner/repo` for a repository being read on its own. A review is
+therefore a link: one to send to somebody, one to bookmark, and one this tab
+comes back to on reload. The browser's own Back and Forward walk the pull
+requests you have opened, and a link pasted into a tab that is already open
+loads it. It routes after the `#` because there is no server here to teach
+about routes — the fragment is the one part of a URL no host ever sees, so a
+deep link works on GitHub Pages, under a `base_path`, and out of a bare
+directory, with nothing to configure anywhere.
+
 Opening a PR **downloads the whole repository** into the browser's filesystem,
 twelve files at a time, starting with the ones the PR changes. The top bar
 shows `cloning n/total` while it runs. It costs a few seconds on the way in and
@@ -185,8 +209,9 @@ than picking one, nearest to the file you are reading first.
 Following a definition three files away is only worth doing if getting back is
 one key. `⌘[` and `⌘]` — or `Alt`+`←`/`→` — walk back and forward through where
 you have been, and a diff you were reading comes back as the diff rather than as
-source. `⌘P` puts the cursor in the explorer's filter box. `Esc` closes the
-panel, and then clears the selection.
+source. `Alt`+`↑`/`↓` walk the other axis: the changed files, in review order.
+`⌘P` puts the cursor in the explorer's filter box. `Esc` closes the panel, and
+then clears the selection.
 
 What is *not* read is what was never downloaded: files over 2 MB, the ones the
 clone leaves behind, and anything a clone that was interrupted never reached.
@@ -224,6 +249,8 @@ src/
     github.rs       GitHub REST: repo search, PR lists, PR files, trees, blobs
     auth.rs         the token, and localStorage
     store.rs        localStorage: what a desktop app would put in ~/.config
+    route.rs        what is open, as `#/owner/repo/pull/123`, and back again
+    viewed.rs       which files have been ticked off, by blob hash
     opfs.rs         the browser's filesystem, as bytes in and bytes out
     blobs.rs        the local copy: blobs by content hash, manifests, sweeping
     clone.rs        pulling a whole commit down, and reading files back out
@@ -244,6 +271,7 @@ src/
     filetree.rs     recursive tree with status badges
     viewer.rs       source view, inline & split diff views
     ide.rs          search, definitions, references, and the keyboard
+    nav.rs          the address bar read back: links, Back and Forward
     bottom.rs       the panel under the code: hits, definitions, a peek at one
     markdown.rs     markdown drawn as elements; link targets
     conversation.rs the pull request's description and comments
@@ -251,10 +279,10 @@ src/
 ```
 
 One crate, one target, and no `#[cfg(target_arch)]` anywhere in it. Everything
-is pure except `http.rs`, `store.rs`, `opfs.rs` and the `open_browser` in
-`auth.rs`, which are the only four places that touch the browser at all — and
-each of them answers "there is no browser here" without complaining, which is
-what keeps `cargo test` running on the host.
+is pure except `http.rs`, `store.rs`, `opfs.rs`, `route.rs` and the
+`open_browser` in `auth.rs` — the five places that touch the browser at all.
+Nothing in the test suite reaches any of them, which is what keeps `cargo test`
+running on the host.
 
 `cargo test` still runs natively: the gloo/web-sys crates compile for the host
 even though their calls only work in a page, and everything with tests — the
@@ -289,6 +317,12 @@ patterns, URL parsing — is pure.
 - The index waits for the download to finish before it starts, since both go
   through the same filesystem. On a large repository the first Go to Definition
   of a session may arrive a moment after the code does.
+- A link opens the pull request, not the file: `#/owner/repo/pull/123` and no
+  deeper. Which file you had open, and how, is where the tab left off rather
+  than something to send to anyone.
+- Viewed marks are per browser, like everything else here. They are yours, not
+  the pull request's — nothing is written back to GitHub, so the boxes you tick
+  are invisible to it and to everybody else on the review.
 - There is no local mode: pullspace reviews GitHub, it does not diff your
   working tree.
 

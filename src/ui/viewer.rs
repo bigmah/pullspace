@@ -293,6 +293,13 @@ pub fn Viewer() -> Element {
     };
 
     let (can_back, can_fwd) = (st.can_go_back(), st.can_go_forward());
+    // Where this file stands among the ones the pull request changes, and
+    // whether it is one of them at all — an unchanged file opened to read
+    // around the change is not something to tick off a review.
+    let step_at = st.file_at();
+    let step_total = st.changed_files.read().len();
+    let markable = st.viewed_key(&rel).is_some();
+    let viewed = markable && st.is_viewed(&rel);
     let selected = st.selected.read().clone();
     // Only worth offering while there is something to undo, and only where the
     // thing it undoes can be seen.
@@ -331,6 +338,12 @@ pub fn Viewer() -> Element {
                     }
                 }
                 span { class: "spacer" }
+                if markable {
+                    ViewedBox { rel: rel.clone(), viewed }
+                }
+                if step_total > 0 {
+                    FileStep { at: step_at, total: step_total }
+                }
                 if can_reset {
                     button {
                         class: "resetbtn",
@@ -367,6 +380,82 @@ pub fn Viewer() -> Element {
                 // thing costs more than everything else the viewer does.
                 ondoubleclick: move |_| ide::select_word(st),
                 {pending.unwrap_or(body)}
+            }
+        }
+    }
+}
+
+/// "I have read this one" — the box a review is actually kept in.
+///
+/// What it remembers is the file's *contents*, not its name: the mark is the
+/// git blob hash, so a force-push that rebases the branch without touching this
+/// file leaves it ticked, and one that rewrites it brings it back for another
+/// look. That is the behaviour the content-addressed store on disk was already
+/// giving the files themselves, applied to the reader's own place in the review.
+#[component]
+fn ViewedBox(rel: PathBuf, viewed: bool) -> Element {
+    let st = use_context::<St>();
+    let cls = if viewed { "viewedbox on" } else { "viewedbox" };
+    let why = if viewed {
+        "Read. Kept by content, so a push that rewrites this file unticks it"
+    } else {
+        "Mark this file as read — kept between visits, per pull request"
+    };
+    rsx! {
+        label { class: "{cls}", title: "{why}",
+            input {
+                r#type: "checkbox",
+                checked: viewed,
+                onchange: move |_| st.toggle_viewed(&rel),
+            }
+            "Viewed"
+        }
+    }
+}
+
+/// Where you are in the changed files, and the two buttons that move.
+///
+/// A review is a list of files worked through in order, and the pair of these
+/// is how it gets worked through: tick the box, press the arrow. They step in
+/// the order the explorer lists them, folded directories included — a file is
+/// no less changed for being out of sight.
+#[component]
+fn FileStep(at: Option<usize>, total: usize) -> Element {
+    let st = use_context::<St>();
+    let (can_prev, can_next) = match at {
+        Some(i) => (i > 0, i + 1 < total),
+        // Somewhere that is not one of them: both arrows enter the list, at the
+        // end each is heading for.
+        None => (true, true),
+    };
+    let label = match at {
+        Some(i) => format!("{}/{}", i + 1, total),
+        None => format!("–/{total}"),
+    };
+    let why = match at {
+        Some(i) => format!("Changed file {} of {}", i + 1, total),
+        None => format!(
+            "{} changed file{} — this is not one of them",
+            total,
+            if total == 1 { "" } else { "s" }
+        ),
+    };
+    rsx! {
+        div { class: "stepgrp", title: "{why}",
+            button {
+                class: "stepbtn",
+                title: "Previous changed file  (⌥↑)",
+                disabled: !can_prev,
+                onclick: move |_| st.step_file(false),
+                "⌃"
+            }
+            span { class: "stepnum", "{label}" }
+            button {
+                class: "stepbtn",
+                title: "Next changed file  (⌥↓)",
+                disabled: !can_next,
+                onclick: move |_| st.step_file(true),
+                "⌄"
             }
         }
     }

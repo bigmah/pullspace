@@ -1,4 +1,4 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 
 // std's Instant panics on wasm32-unknown-unknown.
@@ -13,9 +13,12 @@ use crate::backend::github::{
     PrDetail, PrSummary, RepoRef, RepoView, Snapshot, Thread, statuses_of,
 };
 use crate::backend::markdown;
+use crate::backend::route::{self, Route};
 use crate::backend::search::Options;
-use crate::backend::tree::{ChangeKind, FileNode, build_tree_from_paths, filter_changed};
-use crate::backend::{FileContent, blobs, layout};
+use crate::backend::tree::{
+    ChangeKind, FileNode, build_tree_from_paths, changed_paths, filter_changed,
+};
+use crate::backend::{FileContent, blobs, layout, viewed};
 
 use super::bottom::Bottom;
 use super::conversation::ConvPane;
@@ -84,6 +87,16 @@ impl Workspace {
             Workspace::Empty => false,
             Workspace::Pr(pr) => !pr.tree.is_empty(),
             Workspace::Repo(view) => !view.tree.is_empty(),
+        }
+    }
+
+    /// This, as a link — what the address bar is made to say, and what a link
+    /// pasted into it opens.
+    pub fn route(&self) -> Route {
+        match self {
+            Workspace::Empty => Route::Home,
+            Workspace::Pr(pr) => Route::Pr(pr.repo.clone(), pr.number),
+            Workspace::Repo(view) => Route::Repo(view.repo.clone()),
         }
     }
 
@@ -211,6 +224,16 @@ pub struct St {
     /// to a flat list of matches.
     pub tree_filter: Signal<String>,
     pub changes_only: Signal<bool>,
+    /// Which of the open pull request's files have been marked read, by blob
+    /// hash — see [`viewed`](crate::backend::viewed). Read back off storage
+    /// when a pull request opens, and written whenever a box is ticked.
+    pub viewed: Signal<HashSet<String>>,
+    /// The changed files, in the order the explorer draws them: what next and
+    /// previous changed file step through.
+    ///
+    /// Derived from the tree rather than held as truth — it is here, and not a
+    /// memo beside it, because the keyboard reaches state and not context.
+    pub changed_files: Signal<Vec<PathBuf>>,
     pub refresh_tick: Signal<u32>,
     /// Where the reader has been, and — after a Back — where they were before
     /// they went back. Emptied whenever somewhere new is opened, which is what
@@ -438,8 +461,25 @@ impl St {
         let mut statuses = self.statuses;
         // A repository browsed on its own has nothing changed in it.
         statuses.set(ws.pr().map(|pr| statuses_of(&pr.files)).unwrap_or_default());
+        // What was ticked here last time. On a reload as well: a mark is about
+        // a blob, so the ones that survived the push are still the answer, and
+        // the ones that did not have quietly stopped matching anything.
+        let mut marks = self.viewed;
+        marks.set(
+            ws.pr()
+                .map(|pr| viewed::load(&viewed::pr_key(&pr.repo, pr.number)))
+                .unwrap_or_default(),
+        );
+        let link = ws.route();
         let mut w = self.workspace;
         w.set(ws);
+        // The address bar follows whatever is open, so every review has a link:
+        // one to send to somebody, and one this tab comes back to on reload.
+        //
+        // After the workspace and not before it. Writing the bar raises a
+        // `hashchange`, which is how Back reaches us — and the listener tells
+        // one of those from the other by asking what is already open.
+        route::show(&link);
         let mut gh = self.gh_open;
         gh.set(false);
         self.bump_tick();
@@ -455,7 +495,13 @@ impl St {
         cloning.set(None);
         let mut statuses = self.statuses;
         statuses.set(HashMap::new());
+        let mut marks = self.viewed;
+        marks.set(HashSet::new());
         self.clear_view();
+        // Closing is a place to come back to as much as opening is: without
+        // this the address bar would go on naming a pull request that is no
+        // longer on screen, and reloading would open it again.
+        route::show(&Route::Home);
         let mut gh = self.gh_open;
         gh.set(true);
         self.bump_tick();
@@ -477,6 +523,97 @@ impl St {
         open.set(Some(rel));
         let mut at = self.at_line;
         at.set(None);
+    }
+
+    // ----------------------------------------------------- marking files read
+
+    /// What a file of the open pull request is remembered as, or `None` when it
+    /// is not one — an unchanged file, or no pull request at all. Ticking a box
+    /// against those would be a note about nothing: a review is over the files
+    /// that changed.
+    pub fn viewed_key(&self, rel: &Path) -> Option<String> {
+        // The status map first, because this is asked once per row of the
+        // explorer and answering it is a hash lookup where the workspace would
+        // be a scan of every changed file.
+        if !self.statuses.peek().contains_key(rel) {
+            return None;
+        }
+        Some(self.workspace.peek().pr()?.blob_key(rel))
+    }
+
+    /// Whether this file has been marked read. A reactive read: ticking one box
+    /// redraws its row in the explorer and the header above the code.
+    pub fn is_viewed(&self, rel: &Path) -> bool {
+        // Nothing ticked is the common case and it costs nothing to answer, but
+        // subscribe first — a component that skipped the read would not redraw
+        // when the first box was ticked.
+        let marks = self.viewed.read();
+        !marks.is_empty() && self.viewed_key(rel).is_some_and(|key| marks.contains(&key))
+    }
+
+    /// Tick or untick one file, and keep it.
+    pub fn toggle_viewed(&self, rel: &Path) {
+        let Some(key) = self.viewed_key(rel) else {
+            return;
+        };
+        let mut marks = self.viewed;
+        {
+            let mut held = marks.write();
+            // Removing tells us whether it was there, so this is one lookup
+            // rather than a `contains` and then a branch.
+            if !held.remove(&key) {
+                held.insert(key);
+            }
+        }
+        let held = self.workspace.peek();
+        if let Some(pr) = held.pr() {
+            viewed::save(&viewed::pr_key(&pr.repo, pr.number), &marks.peek());
+        }
+    }
+
+    /// How many of the changed files have been marked read — the explorer's
+    /// progress readout.
+    pub fn viewed_count(&self) -> usize {
+        let marks = self.viewed.read();
+        if marks.is_empty() {
+            return 0;
+        }
+        let held = self.workspace.read();
+        let Some(pr) = held.pr() else { return 0 };
+        pr.files
+            .iter()
+            .filter(|f| marks.contains(&pr.blob_key(&f.path)))
+            .count()
+    }
+
+    // --------------------------------------------- stepping through the diff
+
+    /// Where the open file stands among the changed ones, when it is one of
+    /// them. `None` while reading something the pull request does not touch —
+    /// which is where a definition three files away lands you.
+    pub fn file_at(&self) -> Option<usize> {
+        let open = self.open.read();
+        let here = open.as_deref()?;
+        self.changed_files.read().iter().position(|p| p == here)
+    }
+
+    /// The next or previous changed file, in the order the explorer draws them.
+    ///
+    /// From somewhere that is not one of them — an unchanged file opened to
+    /// read around the change — it enters the list at the end you are heading
+    /// for rather than doing nothing.
+    pub fn step_file(&self, forward: bool) {
+        let files = self.changed_files.peek();
+        let target = match (self.file_at(), forward) {
+            (Some(at), true) => files.get(at + 1),
+            (Some(0), false) => None,
+            (Some(at), false) => files.get(at - 1),
+            (None, true) => files.first(),
+            (None, false) => files.last(),
+        };
+        let Some(next) = target.cloned() else { return };
+        drop(files);
+        self.open_file(next);
     }
 
     // -------------------------------------------- opening a diff back up
@@ -716,6 +853,8 @@ pub fn App() -> Element {
             tree_seeded: root(false),
             tree_filter: root(String::new()),
             changes_only: root(false),
+            viewed: root(HashSet::new()),
+            changed_files: root(Vec::new()),
             refresh_tick: root(0),
             trail: root(Vec::new()),
             ahead: root(Vec::new()),
@@ -774,6 +913,26 @@ pub fn App() -> Element {
         }
     });
     use_context_provider(|| tree);
+
+    // The changed files in the order they are drawn, for next/previous file to
+    // walk. Derived here rather than where it is used because both users are a
+    // long way from this memo: the viewer's stepper is three components down,
+    // and the keyboard has state and no context at all.
+    use_effect(move || {
+        let order = tree.read().as_ref().map(changed_paths).unwrap_or_default();
+        let mut changed_files = st.changed_files;
+        // The Δ filter rebuilds the tree without changing which files are
+        // changed or what order they come in; an unconditional write would
+        // redraw the viewer's header for nothing.
+        if *changed_files.peek() != order {
+            changed_files.set(order);
+        }
+    });
+
+    // The address bar, both ways: what a link opens, and — from `St::enter` —
+    // what is written back into it once something is open.
+    use_future(move || super::nav::watch(st));
+    use_future(move || super::nav::landing(st));
 
     // Pick up a saved token once at startup. Verifying it costs one API call
     // and tells us the login.

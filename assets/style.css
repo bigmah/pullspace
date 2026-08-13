@@ -657,6 +657,23 @@ button { font-family: inherit; user-select: none; }
 .badge.st-deleted { background: rgba(224, 108, 117, 0.15); text-decoration: none; }
 .badge.st-conflict { background: rgba(216, 88, 200, 0.15); }
 
+/* A file that has been read steps back: what is left to review is what the eye
+   should land on going down the list. It is the name and the badge that fade,
+   not the row — a row at half opacity would take its hover and its selection
+   edge down with it. */
+.row.file.viewed .fname { color: var(--fg-dim); opacity: 0.6; }
+.row.file.viewed .badge { opacity: 0.5; }
+.row.file.viewed:hover .fname, .row.file.viewed:hover .badge { opacity: 1; }
+
+/* And the tick itself, after the badge, so the status column stays a column. */
+.vtick {
+  flex: none;
+  margin-left: 4px;
+  color: var(--added);
+  font-size: 10px;
+  line-height: 1;
+}
+
 /* Which side of `git add` the file is on, in the chip that is already there
    rather than in a second mark beside it. Staged is boxed — it is settled, one
    commit from being history. Unstaged is the loose tinted chip it always was.
@@ -747,6 +764,89 @@ button { font-family: inherit; user-select: none; }
 .modebtn.on { color: var(--accent); background: var(--bg-4); }
 .modebtn.on:hover:enabled { color: var(--accent); background: var(--bg-4); }
 .modebtn:disabled { opacity: 0.3; cursor: default; }
+
+/* ---------- viewed, and stepping through what changed ---------- */
+
+/* The one control here that records something rather than showing something,
+   so it is a real checkbox in a real label: the whole chip is the hit area,
+   and the browser's own box says on or off without a glyph having to. */
+.viewedbox {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+  height: 26px;
+  padding: 0 10px 0 8px;
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  border-radius: var(--r);
+  color: var(--fg-dim);
+  cursor: pointer;
+  font-size: 11px;
+  user-select: none;
+  white-space: nowrap;
+  transition: background-color var(--quick) var(--ease), color var(--quick) var(--ease),
+    border-color var(--quick) var(--ease);
+}
+
+.viewedbox:hover { color: var(--fg); background: var(--bg-3); }
+
+/* Ticked is a state to be able to see from across the room — it is the record
+   of what has been done, and the reason to trust the tree's dimmed rows. */
+.viewedbox.on {
+  color: var(--added);
+  border-color: rgba(79, 191, 122, 0.45);
+  background: rgba(79, 191, 122, 0.12);
+}
+
+.viewedbox input {
+  width: 13px;
+  height: 13px;
+  margin: 0;
+  accent-color: var(--added);
+  cursor: pointer;
+}
+
+/* Where you are in the changed files, between the two arrows that move. One
+   control rather than three things in a row, like the view modes beside it. */
+.stepgrp {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  flex: none;
+  padding: 2px;
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  border-radius: var(--r);
+  user-select: none;
+}
+
+.stepbtn {
+  background: transparent;
+  border: none;
+  border-radius: var(--r-sm);
+  color: var(--fg-dim);
+  cursor: pointer;
+  font-size: 12px;
+  line-height: 1;
+  height: 20px;
+  padding: 0 7px;
+  transition: background-color var(--quick) var(--ease), color var(--quick) var(--ease);
+}
+
+.stepbtn:hover:enabled { color: var(--fg); background: var(--bg-3); }
+.stepbtn:disabled { opacity: 0.3; cursor: default; }
+
+/* Tabular figures: `9/12` becoming `10/12` must not move the arrows. */
+.stepnum {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--fg-faint);
+  font-variant-numeric: tabular-nums;
+  padding: 0 2px;
+  min-width: 34px;
+  text-align: center;
+}
 
 /* Not one of the alternatives, so not in the group with them: it undoes
    something, and appears only while there is something to undo. */

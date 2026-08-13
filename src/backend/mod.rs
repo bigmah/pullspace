@@ -8,11 +8,13 @@ pub mod http;
 pub mod layout;
 pub mod markdown;
 pub mod opfs;
+pub mod route;
 pub mod scan;
 pub mod search;
 pub mod store;
 pub mod symbols;
 pub mod tree;
+pub mod viewed;
 
 /// One side of a diff. `Absent` covers "not in this commit" — the base side of
 /// an added file, the head side of a deleted one — which the viewer treats as

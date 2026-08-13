@@ -35,12 +35,15 @@ gloo-timers = { version = "0.3", features = ["futures"] }
 js-sys = "0.3"
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
-# Window/Storage is localStorage — the token and the pane sizes. Everything
+# Window/Storage is localStorage — the token, the pane sizes and what has been
+# marked read. Location is the address bar, which is where the pull request on
+# screen is written so it can be linked to: see `backend::route`. Everything
 # from Navigator down is the Origin Private File System, which is where the
 # repository itself is kept: see `backend::opfs`.
 web-sys = { version = "0.3", features = [
     "Window",
     "Storage",
+    "Location",
     "Navigator",
     "StorageManager",
     "Blob",

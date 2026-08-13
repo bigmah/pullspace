@@ -165,9 +165,24 @@ pub fn FileTreePane() -> Element {
         "Showing changed files only — click to show every file"
     };
     let changed = st.statuses.read().len();
-    let changed_title = match changed {
-        1 => "1 changed file".to_string(),
-        n => format!("{n} changed files"),
+    // How far through them the review is, once any of it has been ticked off.
+    // Before that the count is what it always was — a bare `0/12` on arrival
+    // would be a progress bar nobody asked to start.
+    //
+    // Memoised because counting means hashing every changed file's blob out of
+    // the tree, and the explorer re-renders on every click in it. This way it
+    // is counted when a box is ticked and not otherwise.
+    let read = use_memo(move || st.viewed_count());
+    let read = read();
+    let changed_label = if read > 0 {
+        format!("{read}/{changed}")
+    } else {
+        changed.to_string()
+    };
+    let changed_title = match (read, changed) {
+        (0, 1) => "1 changed file".to_string(),
+        (0, n) => format!("{n} changed files"),
+        (r, n) => format!("{r} of {n} changed files marked read"),
     };
     // Why the list is empty is not the same question every time, and "no
     // changed files" under a filter that matched nothing is an answer to a
@@ -190,7 +205,7 @@ pub fn FileTreePane() -> Element {
                     span {
                         class: "side-count",
                         title: "{changed_title}",
-                        "{changed}"
+                        "{changed_label}"
                     }
                 }
                 button {
@@ -295,10 +310,14 @@ fn TreeRow(row: Row) -> Element {
         }
         RowKind::File { status, hint } => {
             let active = st.open.read().as_deref() == Some(row.path.as_path());
-            let cls = if active {
-                "row file active"
-            } else {
-                "row file"
+            // Read already: the row steps back out of the way, so what is left
+            // to do is what stands out. Never the file being read, which is the
+            // one row that has to stay legible.
+            let viewed = st.is_viewed(&row.path);
+            let cls = match (active, viewed) {
+                (true, _) => "row file active",
+                (false, true) => "row file viewed",
+                (false, false) => "row file",
             };
             let path = row.path.clone();
             let badge = status.map(|s| (s.badge(), s.css()));
@@ -324,6 +343,11 @@ fn TreeRow(row: Row) -> Element {
                     }
                     if let Some((b, c)) = badge {
                         span { class: "badge {c}", "{b}" }
+                    }
+                    // After the badge, not instead of it: what the file is
+                    // still says M or A, and this says you have read it.
+                    if viewed {
+                        span { class: "vtick", title: "Marked read", "✓" }
                     }
                 }
             }

@@ -14,6 +14,8 @@ const PREFIX: &str = "pullspace.";
 pub const TOKEN: &str = "token";
 /// Pane sizes, as JSON.
 pub const LAYOUT: &str = "layout";
+/// Which files of which pull requests have been marked read, as JSON.
+pub const VIEWED: &str = "viewed";
 
 fn storage() -> Option<web_sys::Storage> {
     web_sys::window()?.local_storage().ok().flatten()

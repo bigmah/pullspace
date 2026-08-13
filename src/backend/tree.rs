@@ -257,6 +257,40 @@ fn push_rows(node: &FileNode, depth: usize, expanded: &HashMap<PathBuf, bool>, o
     }
 }
 
+/// Every changed file, in the order the explorer draws them.
+///
+/// What "next changed file" steps through. Taken off the tree rather than off
+/// the pull request's own list of changed files, so that stepping and the
+/// explorer agree about what comes next: GitHub returns changed files in an
+/// order of its own, and following it would send the highlight jumping about a
+/// tree that is grouped by directory.
+///
+/// Whether a directory happens to be folded up makes no difference — a file is
+/// no less changed for being out of sight, and a step that skipped it would be
+/// a step that quietly left files out of the review.
+pub fn changed_paths(root: &FileNode) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    push_changed(root, &mut out);
+    out
+}
+
+fn push_changed(node: &FileNode, out: &mut Vec<PathBuf>) {
+    if !node.is_dir {
+        if node.status.is_some() {
+            out.push(node.path.clone());
+        }
+        return;
+    }
+    // Nothing changed anywhere below: the count is there to be able to say so
+    // without walking it.
+    if !node.has_changes() {
+        return;
+    }
+    for child in &node.children {
+        push_changed(child, out);
+    }
+}
+
 /// Files whose path contains `needle`, as a flat list.
 ///
 /// Filtering answers "where is that file", and the folders on the way to it are
@@ -506,6 +540,49 @@ mod tests {
         let st = statuses(&[("only.rs", ChangeKind::Added)]);
         let tree = build_tree_from_paths("pr", std::iter::empty(), &st);
         assert_eq!(names(&tree), vec!["only.rs".to_string()]);
+    }
+
+    #[test]
+    fn changed_files_come_back_in_the_order_they_are_drawn() {
+        let paths = [
+            Path::new("README.md"),
+            Path::new("src/a.rs"),
+            Path::new("src/deep/b.rs"),
+            Path::new("src/z.rs"),
+        ];
+        let st = statuses(&[
+            ("README.md", ChangeKind::Modified),
+            ("src/deep/b.rs", ChangeKind::Added),
+            ("src/z.rs", ChangeKind::Modified),
+        ]);
+        let tree = build_tree_from_paths("pr", paths, &st);
+        let stepped: Vec<String> = changed_paths(&tree)
+            .iter()
+            .map(|p| p.display().to_string())
+            .collect();
+        // Directories before files at each level, which is how the rows are
+        // laid out — and unchanged `src/a.rs` is not among them.
+        assert_eq!(stepped, vec!["src/deep/b.rs", "src/z.rs", "README.md"]);
+    }
+
+    #[test]
+    fn a_folded_directory_still_offers_its_changed_files() {
+        let tree = build_tree_from_paths(
+            "pr",
+            [Path::new("deep/inside/x.rs")],
+            &statuses(&[("deep/inside/x.rs", ChangeKind::Modified)]),
+        );
+        // Nothing is expanded here at all, and the file is still steppable.
+        assert_eq!(
+            changed_paths(&tree),
+            vec![PathBuf::from("deep/inside/x.rs")]
+        );
+    }
+
+    #[test]
+    fn nothing_changed_is_nothing_to_step_through() {
+        let tree = build_tree_from_paths("repo", [Path::new("a.rs")], &statuses(&[]));
+        assert!(changed_paths(&tree).is_empty());
     }
 
     #[test]

@@ -6,6 +6,7 @@ mod filetree;
 mod github;
 mod ide;
 mod markdown;
+mod nav;
 mod panes;
 mod prcache;
 mod topbar;

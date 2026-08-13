@@ -539,10 +539,14 @@ const KEYS: &str = r#"
     else if (key === 'escape') what = 'escape';
     else if ((e.altKey && key === 'arrowleft') || (mod && key === '[')) what = 'back';
     else if ((e.altKey && key === 'arrowright') || (mod && key === ']')) what = 'forward';
+    else if (e.altKey && key === 'arrowdown') what = 'nextfile';
+    else if (e.altKey && key === 'arrowup') what = 'prevfile';
     if (!what) return;
     // Escape out of a text box is about the text box. Everything else it
     // could mean is one more press away.
     if (what === 'escape' && typing) { el.blur(); e.preventDefault(); return; }
+    // And an arrow in one is about the caret, not about the review.
+    if (typing && (what === 'nextfile' || what === 'prevfile')) return;
     e.preventDefault();
     dioxus.send(what);
   };
@@ -569,6 +573,10 @@ pub async fn keys(st: St) {
             ("escape", _) => escape(st),
             ("back", _) => st.go_back(),
             ("forward", _) => st.go_forward(),
+            // Along the review rather than back through it: the changed files,
+            // in the order the explorer lists them.
+            ("nextfile", _) => st.step_file(true),
+            ("prevfile", _) => st.step_file(false),
             _ => {}
         }
     }

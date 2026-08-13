@@ -15,12 +15,18 @@ Two panes, like a traditional IDE but without the weight:
   button filters the tree down to changed files only.
 - **Right** — source viewer. Any file opens with full syntax highlighting;
   changed files open as diffs against the merge base, viewable **side-by-side
-  (Split)** or **unified (Inline)**, both with word-level change emphasis.
-  Markdown opens as the prose it is, with **Source** one button away.
+  (Split)** or **unified (Inline)**, both with word-level change emphasis. The
+  unchanged stretches between changes arrive folded: the bar standing in for one
+  opens it twenty lines at a time from either end, or all at once, and folds it
+  back up again — `Reset` puts the whole file back the way it arrived. Markdown
+  opens as the prose it is, with **Source** one button away.
 
 A third pane holds the **conversation**: the description, the discussion, the
 review summaries and the comments left on lines of the diff, merged into one
 list in the order they were written.
+
+A panel across the bottom of the code holds the answer to "where else is this?"
+— search hits, references, definitions — and closes again once it has been read.
 
 ## Running it
 
@@ -84,6 +90,14 @@ repositories, most recently pushed first.
 Nothing has to be typed in full: `owner/repo` works, an exact name is pinned to
 the top of the results, and pasting a pull request URL jumps straight to it.
 
+An account is found the same way. A name that could be a login is looked up
+alongside the search, and the account it belongs to is offered above the
+repositories — which is what makes typing an organisation's name work rather
+than nearly work, since GitHub's index ranks repositories by *their* names, and
+an organisation whose repositories are not called after it cannot be found by
+searching for it. Picking that row scopes the box to `owner/`, listing
+everything the account owns and narrowing it as you carry on typing.
+
 The explorer shows the **whole repository** at the PR's head commit, not just
 what changed. Unchanged files open as plain highlighted source; changed ones
 open as diffs against the **merge base** — so you see the PR's own changes, not
@@ -133,6 +147,44 @@ to goes with them. Files over 1 MB and the ones the viewer would only call
 binary — images, archives, fonts, compiled objects — are not downloaded up
 front; opening one fetches it then.
 
+## Reading the code
+
+The local copy is what makes the rest of this possible. Search, Go to Definition
+and Find References all walked a directory on a machine that had one; here they
+walk the commit's file list and read the bytes off the browser's filesystem, and
+none of the three touches the network.
+
+**Search** is the box in the top bar — `⌘F` puts the cursor in it, `Enter` runs
+it, and the three buttons beside it are match case, whole word and regular
+expression. Hits land in the panel across the bottom, a row to a line, with the
+parts that matched picked out; clicking one opens the file there. It stops at
+500 lines, because nobody reads the six hundredth.
+
+**Double-clicking an identifier** in the code selects it, and every other
+occurrence of it in the file lights up. Buttons appear on the bar above: go to
+where it is defined (`F12`), show that definition below without leaving the
+file, find every use of it in the repository (`⇧F12`), and put it down again.
+
+Definitions come out of an index built in the background once the download has
+finished — the top bar counts it up, then says how many it found. It is read
+rather than compiled: a regular expression per language, of the sort `ctags` has
+used for thirty years, covering Rust, JavaScript/TypeScript, Python, Go, Ruby,
+Java/Kotlin/Swift/C#/Scala, C/C++, PHP, shell and SQL. It knows that
+`pub async fn foo(` defines `foo`, and nothing whatever about what `foo` means —
+so where a repository has eleven things called `new` it offers the list rather
+than picking one, nearest to the file you are reading first.
+
+Following a definition three files away is only worth doing if getting back is
+one key. `⌘[` and `⌘]` — or `Alt`+`←`/`→` — walk back and forward through where
+you have been, and a diff you were reading comes back as the diff rather than as
+source. `⌘P` puts the cursor in the explorer's filter box. `Esc` closes the
+panel, and then clears the selection.
+
+What is *not* read is what was never downloaded: files over 2 MB, the ones the
+clone leaves behind, and anything a clone that was interrupted never reached.
+The panel says how many, every time — a search that quietly misses a file is
+worse than one that admits to it.
+
 ## Markdown
 
 Markdown files open **drawn**: headings, lists, tables, block quotes and task
@@ -167,6 +219,9 @@ src/
     opfs.rs         the browser's filesystem, as bytes in and bytes out
     blobs.rs        the local copy: blobs by content hash, manifests, sweeping
     clone.rs        pulling a whole commit down, and reading files back out
+    scan.rs         reading a commit back out of the store, and the text cache
+    search.rs       patterns, and the lines that match them
+    symbols.rs      where things are defined, by regex per language
     layout.rs       pane sizes, kept between visits
     tree.rs         file-tree model built from a path list + change statuses
     difftool.rs     hunk/line/segment diff model (similar), split-row pairing
@@ -180,6 +235,8 @@ src/
     topbar.rs       what is on screen, warm-up progress, account, refresh
     filetree.rs     recursive tree with status badges
     viewer.rs       source view, inline & split diff views
+    ide.rs          search, definitions, references, and the keyboard
+    bottom.rs       the panel under the code: hits, definitions, a peek at one
     markdown.rs     markdown drawn as elements; link targets
     conversation.rs the pull request's description and comments
     panes.rs        draggable dividers
@@ -193,7 +250,8 @@ what keeps `cargo test` running on the host.
 
 `cargo test` still runs natively: the gloo/web-sys crates compile for the host
 even though their calls only work in a page, and everything with tests — the
-diff model, highlighting, markdown, the tree, URL parsing — is pure.
+diff model, highlighting, markdown, the tree, search patterns, the symbol
+patterns, URL parsing — is pure.
 
 ## Notes & limits
 
@@ -210,19 +268,26 @@ diff model, highlighting, markdown, the tree, URL parsing — is pure.
   changed" tab shows.
 - The top bar flags a partial explorer: `truncated` (over GitHub's 3000-file
   cap per PR), `partial tree` (repo past GitHub's recursive-tree limit, about
-  60k files), or `changed files only` (the tree could not be read at all).
+  100k entries or 7 MB), or `changed files only` (the tree could not be read at
+  all).
 - Highlighting and diffing run on the browser's single thread. Files over
   ~400 KB / 6k lines render without highlighting for speed; binary files are
   detected and not rendered.
-- There is no search, no Go to Definition and no Find References. All three
-  walked a directory, and a page has none.
+- Search, Go to Definition and Find References read the local copy rather than
+  GitHub, so they cover what was downloaded and say what they missed. The index
+  behind the last two is regular expressions per language and not a compiler:
+  right nearly always within one file, a very good guess across a repository,
+  and it offers the list when a name is defined more than once.
+- The index waits for the download to finish before it starts, since both go
+  through the same filesystem. On a large repository the first Go to Definition
+  of a session may arrive a moment after the code does.
 - There is no local mode: pullspace reviews GitHub, it does not diff your
   working tree.
 
 ## Development
 
 ```sh
-cargo test      # the pure logic — diff model, markdown, tree, parsing
+cargo test      # the pure logic — diff model, markdown, tree, search, parsing
 cargo check     # host target, which is what `cargo test` builds
 cargo check --target wasm32-unknown-unknown   # what actually ships
 dx build --platform web --release

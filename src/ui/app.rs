@@ -8,6 +8,7 @@ use dioxus::prelude::*;
 
 use crate::backend::auth::Token;
 use crate::backend::clone::Progress;
+use crate::backend::difftool::Expansion;
 use crate::backend::github::{statuses_of, PrDetail, PrSummary, RepoRef, RepoView, Snapshot, Thread};
 use crate::backend::markdown;
 use crate::backend::search::Options;
@@ -189,6 +190,15 @@ pub struct St {
     /// means the next tree drawn is a new one, and gets the arrival view: the
     /// root open, and the way down to every change open with it.
     pub tree_seeded: Signal<bool>,
+    /// Which contracted stretches of a diff have been opened up, and by how
+    /// much — per file, and keyed within a file by the gap's position in
+    /// `FileDiff::gaps`.
+    ///
+    /// Absent means contracted, which is how every file starts and what Reset
+    /// puts it back to. Kept per file rather than for whichever one is open,
+    /// so reading a second file and coming back does not undo the reading of
+    /// the first.
+    pub expansions: Signal<HashMap<PathBuf, HashMap<usize, Expansion>>>,
     /// The explorer's filter box: a substring of the path, narrowing the tree
     /// to a flat list of matches.
     pub tree_filter: Signal<String>,
@@ -451,6 +461,76 @@ impl St {
         at.set(None);
     }
 
+    // -------------------------------------------- opening a diff back up
+
+    /// Show more of one contracted stretch of the open file's diff.
+    ///
+    /// `from_top` takes the lines nearest the code above the gap, so the
+    /// stretch grows downwards out of it; otherwise they come off the bottom
+    /// and it grows up towards the change below. Overshooting the end of the
+    /// gap is harmless — `difftool::blocks` will not show more than is there.
+    pub fn expand_gap(&self, gap: usize, by: usize, from_top: bool) {
+        let Some(rel) = self.open.peek().clone() else {
+            return;
+        };
+        let mut expansions = self.expansions;
+        let mut w = expansions.write();
+        let e = w.entry(rel).or_default().entry(gap).or_default();
+        if from_top {
+            e.top += by;
+        } else {
+            e.bottom += by;
+        }
+    }
+
+    /// Show all of one contracted stretch. Taken off the bottom, which is what
+    /// puts the bar that folds it away again at the head of what it opened.
+    pub fn expand_gap_fully(&self, gap: usize, len: usize) {
+        let Some(rel) = self.open.peek().clone() else {
+            return;
+        };
+        let mut expansions = self.expansions;
+        expansions
+            .write()
+            .entry(rel)
+            .or_default()
+            .insert(gap, Expansion { top: 0, bottom: len });
+    }
+
+    /// Fold one stretch back up.
+    pub fn contract_gap(&self, gap: usize) {
+        let Some(rel) = self.open.peek().clone() else {
+            return;
+        };
+        let mut expansions = self.expansions;
+        let mut w = expansions.write();
+        let Some(file) = w.get_mut(&rel) else { return };
+        file.remove(&gap);
+        // Nothing open in it is the same as never having been touched, and is
+        // what `has_expansions` — and so the Reset button — is asking.
+        if file.is_empty() {
+            w.remove(&rel);
+        }
+    }
+
+    /// Put the open file's diff back the way it arrived: every stretch of it
+    /// contracted again, in one click.
+    pub fn contract_all_gaps(&self) {
+        let Some(rel) = self.open.peek().clone() else {
+            return;
+        };
+        let mut expansions = self.expansions;
+        expansions.write().remove(&rel);
+    }
+
+    /// Which stretches of the open file are open, if any.
+    pub fn open_gaps(&self) -> HashMap<usize, Expansion> {
+        let Some(rel) = self.open.read().clone() else {
+            return HashMap::new();
+        };
+        self.expansions.read().get(&rel).cloned().unwrap_or_default()
+    }
+
     /// Whether a repo-relative path is one of the files on show. What a link in
     /// a README is checked against before it is followed, so a stale one is
     /// left alone rather than opening an error where the document was.
@@ -475,6 +555,12 @@ impl St {
         cache.set(HashMap::new());
         let mut order = self.warm_order;
         order.set(VecDeque::new());
+        // Which stretches of a diff were opened up is a fact about that diff,
+        // and every diff here is about to be built again out of whatever
+        // arrives. Held on to, the positions would refer to gaps in a
+        // comparison that no longer exists.
+        let mut expansions = self.expansions;
+        expansions.set(HashMap::new());
     }
 
     /// Jump to a specific line — what a comment on the diff, a search hit and a
@@ -598,6 +684,7 @@ pub fn App() -> Element {
             scroll_to: root(None),
             at_line: root(None),
             expanded: root(HashMap::new()),
+            expansions: root(HashMap::new()),
             tree_seeded: root(false),
             tree_filter: root(String::new()),
             changes_only: root(false),
@@ -797,4 +884,3 @@ pub fn App() -> Element {
         }
     }
 }
-

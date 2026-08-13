@@ -2,7 +2,11 @@ use std::path::PathBuf;
 
 use dioxus::prelude::*;
 
-use crate::backend::difftool::{diff_hunks, stats, to_rows, Hunk, Line, LineKind};
+use std::collections::HashMap;
+
+use crate::backend::difftool::{
+    blocks, diff_file, stats, to_rows, Block, Expansion, FileDiff, Line, LineKind, STEP,
+};
 use crate::backend::highlight::{highlight, Span};
 use crate::backend::markdown;
 use crate::backend::search::split_word;
@@ -93,7 +97,7 @@ pub fn Viewer() -> Element {
         }
     });
 
-    let hunks = use_memo(move || {
+    let diff = use_memo(move || {
         let guard = data.read();
         let Pane::Ready { rel, old, new } = &*guard else {
             return None;
@@ -103,7 +107,7 @@ pub fn Viewer() -> Element {
         // same name exists in the base.
         let fresh = matches!(status, ChangeKind::Added);
         let old_text = if fresh { "" } else { old.text()? };
-        Some(diff_hunks(old_text, new.text()?))
+        Some(diff_file(old_text, new.text()?))
     });
 
     let source_lines = use_memo(move || {
@@ -218,7 +222,11 @@ pub fn Viewer() -> Element {
 
     let rel_str = rel.display().to_string();
     let badge = status.map(|s| (s.badge(), s.css()));
-    let diff_stats = hunks.read().as_ref().map(|h| stats(h));
+    let diff_stats = diff.read().as_ref().map(stats);
+    // Which contracted stretches of this file have been opened up. Read here,
+    // so that opening one redraws the diff — and only the diff: the comparison
+    // itself is memoised on the file's contents and does not run again.
+    let open_gaps = st.open_gaps();
 
     // The identifier picked out of the code, if one has been. Every line that
     // holds it gets it marked — which is why this is threaded all the way down
@@ -232,14 +240,14 @@ pub fn Viewer() -> Element {
             Some(SourceLines::Plain(lines)) => render_plain(lines, mark),
             None => rsx! { div { class: "notice", "Binary file — no preview." } },
         },
-        ViewMode::Inline => match hunks.read().as_ref() {
-            Some(h) if h.is_empty() => rsx! { div { class: "notice", "No differences." } },
-            Some(h) => render_inline(h, mark),
+        ViewMode::Inline => match diff.read().as_ref() {
+            Some(d) if d.is_empty() => rsx! { div { class: "notice", "No differences." } },
+            Some(d) => render_inline(d, &open_gaps, mark),
             None => rsx! { div { class: "notice", "Binary file — cannot diff." } },
         },
-        ViewMode::Split => match hunks.read().as_ref() {
-            Some(h) if h.is_empty() => rsx! { div { class: "notice", "No differences." } },
-            Some(h) => render_split(h, mark),
+        ViewMode::Split => match diff.read().as_ref() {
+            Some(d) if d.is_empty() => rsx! { div { class: "notice", "No differences." } },
+            Some(d) => render_split(d, &open_gaps, mark),
             None => rsx! { div { class: "notice", "Binary file — cannot diff." } },
         },
         ViewMode::Preview if prose => match doc.read().as_ref() {
@@ -288,6 +296,9 @@ pub fn Viewer() -> Element {
 
     let (can_back, can_fwd) = (st.can_go_back(), st.can_go_forward());
     let selected = st.selected.read().clone();
+    // Only worth offering while there is something to undo, and only where the
+    // thing it undoes can be seen.
+    let can_reset = matches!(mode, ViewMode::Inline | ViewMode::Split) && !open_gaps.is_empty();
 
     rsx! {
         div { class: "viewer",
@@ -322,6 +333,14 @@ pub fn Viewer() -> Element {
                     }
                 }
                 span { class: "spacer" }
+                if can_reset {
+                    button {
+                        class: "resetbtn",
+                        title: "Contract every stretch that has been opened up",
+                        onclick: move |_| st.contract_all_gaps(),
+                        "Reset"
+                    }
+                }
                 // One control, not four loose buttons: these are alternatives,
                 // and a segmented group is what says so.
                 div { class: "modegroup",
@@ -605,19 +624,110 @@ fn hunk_header(header: &str) -> Element {
     }
 }
 
-fn render_inline(hunks: &[Hunk], mark: Option<&str>) -> Element {
-    let hunks = hunks.to_vec();
+/// The bar standing in for the unchanged lines a diff leaves out — and, once
+/// they are showing, the handle that folds them away again.
+///
+/// Three ways to open one, because a gap can be four lines or four hundred:
+/// a step off either end for reading outwards from a change, and the whole
+/// thing for when the answer is somewhere else entirely. Every one of them is
+/// undone by the same control, which is why it stays on the bar afterwards
+/// rather than leaving the reader to find Reset.
+#[component]
+fn GapBar(index: usize, hidden: usize, shown: usize) -> Element {
+    let st = use_context::<St>();
+    let len = hidden + shown;
+    if hidden == 0 {
+        let lines = plural(shown);
+        return rsx! {
+            div { class: "gapbar open",
+                div { class: "gapbarinner",
+                    button {
+                        class: "gapbtn",
+                        title: "Contract these {shown} lines again",
+                        onclick: move |_| st.contract_gap(index),
+                        "⌃  hide {shown} unchanged {lines}"
+                    }
+                }
+            }
+        };
+    }
+    let lines = plural(hidden);
+    // Below a step there is nothing for the step buttons to do that the whole
+    // stretch does not already do in one click.
+    let stepped = hidden > STEP;
     rsx! {
-        div { class: "code inline",
-            for h in hunks {
-                div { class: "hunk",
-                    {hunk_header(&h.header)}
-                    for l in h.lines.iter() {
-                        {inline_line(l, mark)}
+        div { class: "gapbar",
+            div { class: "gapbarinner",
+                if stepped {
+                    button {
+                        class: "gapbtn",
+                        title: "Show {STEP} more lines, from the top of this stretch down",
+                        onclick: move |_| st.expand_gap(index, STEP, true),
+                        "⌄"
+                    }
+                    button {
+                        class: "gapbtn",
+                        title: "Show {STEP} more lines, from the bottom of this stretch up",
+                        onclick: move |_| st.expand_gap(index, STEP, false),
+                        "⌃"
+                    }
+                }
+                button {
+                    class: "gapbtn wide",
+                    title: "Show all {hidden} of them",
+                    onclick: move |_| st.expand_gap_fully(index, len),
+                    "⋯  {hidden} unchanged {lines}"
+                }
+                if shown > 0 {
+                    button {
+                        class: "gapbtn",
+                        title: "Contract this stretch again",
+                        onclick: move |_| st.contract_gap(index),
+                        "⤺"
                     }
                 }
             }
         }
+    }
+}
+
+fn plural(n: usize) -> &'static str {
+    if n == 1 { "line" } else { "lines" }
+}
+
+fn render_inline(
+    diff: &FileDiff,
+    open: &HashMap<usize, Expansion>,
+    mark: Option<&str>,
+) -> Element {
+    rsx! {
+        div { class: "code inline",
+            for block in blocks(diff, open) {
+                {inline_block(diff, block, mark)}
+            }
+        }
+    }
+}
+
+fn inline_block(diff: &FileDiff, block: Block, mark: Option<&str>) -> Element {
+    match block {
+        Block::Gap {
+            index,
+            hidden,
+            shown,
+        } => rsx! {
+            GapBar { key: "g{index}", index, hidden, shown }
+        },
+        Block::Lines { header, from, to } => rsx! {
+            div { key: "l{from}", class: "hunk",
+                if let Some(h) = header {
+                    {hunk_header(&h)}
+                }
+                for l in diff.lines[from..to].iter() {
+                    {inline_line(l, mark)}
+                }
+            }
+        },
     }
 }
 
@@ -643,21 +753,41 @@ fn split_cell(l: Option<&Line>, right: bool, mark: Option<&str>) -> Element {
     }
 }
 
-fn render_split(hunks: &[Hunk], mark: Option<&str>) -> Element {
-    let hunks = hunks.to_vec();
+fn render_split(
+    diff: &FileDiff,
+    open: &HashMap<usize, Expansion>,
+    mark: Option<&str>,
+) -> Element {
     rsx! {
         div { class: "code split",
-            for h in hunks {
-                div { class: "hunk",
-                    {hunk_header(&h.header)}
-                    for row in to_rows(&h) {
-                        div { class: "srow",
-                            {split_cell(row.left.as_ref(), false, mark)}
-                            {split_cell(row.right.as_ref(), true, mark)}
-                        }
+            for block in blocks(diff, open) {
+                {split_block(diff, block, mark)}
+            }
+        }
+    }
+}
+
+fn split_block(diff: &FileDiff, block: Block, mark: Option<&str>) -> Element {
+    match block {
+        Block::Gap {
+            index,
+            hidden,
+            shown,
+        } => rsx! {
+            GapBar { key: "g{index}", index, hidden, shown }
+        },
+        Block::Lines { header, from, to } => rsx! {
+            div { key: "l{from}", class: "hunk",
+                if let Some(h) = header {
+                    {hunk_header(&h)}
+                }
+                for row in to_rows(&diff.lines[from..to]) {
+                    div { class: "srow",
+                        {split_cell(row.left.as_ref(), false, mark)}
+                        {split_cell(row.right.as_ref(), true, mark)}
                     }
                 }
             }
-        }
+        },
     }
 }

@@ -748,6 +748,24 @@ button { font-family: inherit; user-select: none; }
 .modebtn.on:hover:enabled { color: var(--accent); background: var(--bg-4); }
 .modebtn:disabled { opacity: 0.3; cursor: default; }
 
+/* Not one of the alternatives, so not in the group with them: it undoes
+   something, and appears only while there is something to undo. */
+.resetbtn {
+  flex: none;
+  margin-right: 8px;
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  border-radius: var(--r);
+  color: var(--fg-dim);
+  cursor: pointer;
+  font-size: 11px;
+  height: 26px;
+  padding: 0 10px;
+  transition: background-color var(--quick) var(--ease), color var(--quick) var(--ease);
+}
+
+.resetbtn:hover { color: var(--fg); background: var(--bg-3); }
+
 /* ---------- symbol action bar ---------- */
 
 .symbar {
@@ -864,8 +882,6 @@ button { font-family: inherit; user-select: none; }
 
 /* ---------- diff ---------- */
 
-.hunk + .hunk { margin-top: 14px; }
-
 /* Pinned to the top of the pane for as long as its own hunk is on screen:
    halfway down a long one, which hunk this is is the whole question. */
 .hunkhdr {
@@ -884,6 +900,64 @@ button { font-family: inherit; user-select: none; }
 /* Pinned sideways as well, so scrolling across wide code does not carry the
    answer off the left edge. */
 .hunkhdrtext { position: sticky; left: 0; display: inline-block; padding: 0 12px; }
+
+/* The bar standing in for the lines a contracted diff leaves out. It is a
+   seam in the code rather than a control panel — the code either side of it is
+   what is being read, so it stays quiet until it is pointed at. */
+.gapbar {
+  margin: 10px 0;
+  padding: 2px 0;
+  background: var(--bg-1);
+  border-top: 1px solid var(--border-soft);
+  border-bottom: 1px solid var(--border-soft);
+  user-select: none;
+}
+
+/* Once the stretch is open the code runs straight through it, and a band
+   across the middle of continuous code would be inventing a break. What is
+   left is the handle that folds it back up. */
+.gapbar.open {
+  margin: 0;
+  background: transparent;
+  border-top: none;
+  border-bottom: none;
+}
+
+/* Pinned to the left edge, like the hunk header's text: scrolling across wide
+   code must not carry the control off the screen. */
+.gapbarinner {
+  position: sticky;
+  left: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 0 8px;
+}
+
+.gapbtn {
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--r-sm);
+  color: var(--fg-faint);
+  cursor: pointer;
+  font-family: var(--mono);
+  font-size: 11px;
+  height: 19px;
+  min-width: 22px;
+  padding: 0 6px;
+  white-space: nowrap;
+  transition: background-color var(--quick) var(--ease), color var(--quick) var(--ease),
+    border-color var(--quick) var(--ease);
+}
+
+/* The count is the sentence the bar is saying, and opening the whole stretch
+   is what most clicks on it want. The arrows either side are the refinement. */
+.gapbtn.wide { padding: 0 10px; color: var(--fg-dim); }
+
+.gapbtn:hover { color: var(--accent); background: var(--bg-3); border-color: var(--border); }
+.gapbtn:active { background: var(--bg-4); }
+.gapbar.open .gapbtn { opacity: 0.55; }
+.gapbar.open .gapbtn:hover { opacity: 1; }
 
 .dl-add { background: var(--add-bg); }
 .dl-del { background: var(--del-bg); }

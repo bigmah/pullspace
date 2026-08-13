@@ -1,5 +1,13 @@
-//! The GitHub overlay: sign in, pick a repository, pick a pull request.
+//! The GitHub overlay: pick a repository, pick a pull request, and — if a
+//! private repository is wanted — sign in.
+//!
+//! The picker is up in every state, signed in or not. GitHub serves public
+//! repositories to anyone, `api.github.com` answers cross-origin, and file
+//! bytes come off the CDN unmetered — so a token buys private repositories and
+//! a rate limit of 5000 an hour instead of 60, and nothing else. Asking for one
+//! before showing the box would be charging entry to a public building.
 
+use std::collections::HashMap;
 use std::time::Duration;
 
 use dioxus::prelude::*;
@@ -17,6 +25,11 @@ pub fn GhPanel() -> Element {
     let st = use_context::<St>();
     let mut gh_open = st.gh_open;
     let account = st.account.read().clone();
+    // Whether the reader has asked for the token form, or asked for it to go
+    // away. `None` until they say either, which is when [`form_open`] answers
+    // for them.
+    let token_form = use_signal(|| None::<bool>);
+    let showing = form_open(&token_form, &account);
 
     rsx! {
         div {
@@ -46,15 +59,29 @@ pub fn GhPanel() -> Element {
                     }
                 }
                 div { class: "ghbody",
-                    match account {
+                    match account.clone() {
                         Account::Checking => rsx! {
                             div { class: "ghnote", "Looking for a saved sign-in…" }
                         },
-                        Account::SignedOut => rsx! { SignIn { error: None } },
-                        Account::Failed(e) => rsx! { SignIn { error: Some(e) } },
-                        Account::SignedIn { login } => rsx! {
-                            SignedIn { login }
+                        Account::SignedOut => rsx! {
+                            Anonymous { form: token_form, showing, error: None }
                         },
+                        Account::Failed(e) => rsx! {
+                            Anonymous { form: token_form, showing, error: Some(e) }
+                        },
+                        Account::SignedIn { login } => rsx! { SignedIn { login } },
+                    }
+                    // Everything below is the same whether or not there is a
+                    // token — it is only *which* repositories answer that
+                    // changes. Held back while the saved token is being
+                    // checked, so a search started in that half-second does not
+                    // go out anonymously and come back rate-limited.
+                    if !matches!(account, Account::Checking) {
+                        // Whichever box the reader came to type in gets the
+                        // caret. The token form is only up because something
+                        // wants a token, so when it is up, it is that one.
+                        RepoPicker { autofocus: !showing }
+                        PrSection {}
                     }
                     LocalCopy {}
                 }
@@ -137,6 +164,54 @@ fn LocalCopy() -> Element {
 /// Where to make the token pullspace asks for.
 const NEW_TOKEN_URL: &str = "https://github.com/settings/personal-access-tokens/new";
 
+/// Whether the token form is up.
+///
+/// What the reader last asked for, and — until they ask for anything — whether
+/// there is a token that needs fixing. It cannot be settled at mount: the panel
+/// is up from the first frame, while the saved token is still being checked, so
+/// a rejection arrives after whatever was decided on the way in.
+fn form_open(form: &Signal<Option<bool>>, account: &Account) -> bool {
+    form.read()
+        .unwrap_or(matches!(account, Account::Failed(_)))
+}
+
+/// Signed out: say what that costs, and offer the token form to anyone it costs
+/// something.
+///
+/// It costs two things and no others — private repositories, and the difference
+/// between sixty requests an hour and five thousand — so both are named here,
+/// next to the button that fixes them. The picker below this is live either way.
+#[component]
+fn Anonymous(form: Signal<Option<bool>>, showing: bool, error: Option<String>) -> Element {
+    let mut form = form;
+
+    rsx! {
+        div { class: "ghsection ghaccount",
+            span { class: "ghwho", "Browsing " b { "anonymously" } }
+            span { class: "spacer" }
+            button {
+                class: "linkbtn",
+                onclick: move |_| form.set(Some(!showing)),
+                if showing { "Cancel" } else { "Add a token" }
+            }
+        }
+        if let Some(e) = error {
+            div { class: "gherror", "{e}" }
+        }
+        if showing {
+            SignIn {}
+        } else {
+            div { class: "ghsection",
+                div { class: "ghhelp",
+                    "Public repositories and their pull requests need no sign-in. A token adds "
+                    "private repositories, and raises GitHub's limit of 60 API requests an hour "
+                    "to 5000 — file contents come off the CDN and count against neither."
+                }
+            }
+        }
+    }
+}
+
 /// Sign-in for the static build: paste a token.
 ///
 /// The device flow is not an option here and no amount of work would make it
@@ -149,16 +224,13 @@ const NEW_TOKEN_URL: &str = "https://github.com/settings/personal-access-tokens/
 /// api.github.com — a shorter path than any OAuth flow would give it, and one
 /// you can check for yourself in the network tab.
 #[component]
-fn SignIn(error: Option<String>) -> Element {
+fn SignIn() -> Element {
     let st = use_context::<St>();
     let mut typed = use_signal(String::new);
     let value = typed.read().clone();
     let ready = !value.trim().is_empty();
 
     rsx! {
-        if let Some(e) = error {
-            div { class: "gherror", "{e}" }
-        }
         div { class: "ghsection",
             div { class: "ghlabel", "GitHub token" }
             input {
@@ -169,6 +241,11 @@ fn SignIn(error: Option<String>) -> Element {
                 spellcheck: "false",
                 autocomplete: "off",
                 value: "{value}",
+                // This form is only on screen because somebody asked for it,
+                // and what they asked for is somewhere to paste.
+                onmounted: move |e| async move {
+                    let _ = e.set_focus(true).await;
+                },
                 oninput: move |e| typed.set(e.value()),
                 // Pasting then hitting return is the whole interaction.
                 onkeydown: move |e| {
@@ -219,13 +296,6 @@ fn SignIn(error: Option<String>) -> Element {
                 " and nowhere else — there is no pullspace server to send it to."
             }
         }
-        div { class: "ghsection",
-            div { class: "ghhelp",
-                "Without a token you can still browse public repositories, at GitHub's "
-                "anonymous limit of 60 API requests an hour. File contents do not count "
-                "against it."
-            }
-        }
     }
 }
 
@@ -248,7 +318,6 @@ async fn use_pasted_token(st: St, token: String) {
 #[component]
 fn SignedIn(login: String) -> Element {
     let st = use_context::<St>();
-    let prs = st.prs.read().clone();
 
     rsx! {
         div { class: "ghsection ghaccount",
@@ -260,7 +329,19 @@ fn SignedIn(login: String) -> Element {
                 "Sign out"
             }
         }
-        RepoPicker {}
+    }
+}
+
+/// The open pull requests of whatever repository the picker last loaded.
+///
+/// Signed in or not: a public repository lists its pull requests to anyone, and
+/// this pane is the same one either way.
+#[component]
+fn PrSection() -> Element {
+    let st = use_context::<St>();
+    let prs = st.prs.read().clone();
+
+    rsx! {
         div { class: "ghsection prsection",
             match prs {
                 PrList::Idle => rsx! {
@@ -293,7 +374,15 @@ fn SignedIn(login: String) -> Element {
 const SUGGESTION_LIMIT: u32 = 8;
 
 /// Long enough that typing a repository name costs one request, not eight.
-const SEARCH_DEBOUNCE: Duration = Duration::from_millis(250);
+///
+/// Search is metered by the minute rather than by the hour — ten of them to an
+/// anonymous caller — so this is the difference between a name typed with a
+/// pause in it costing one request and costing four.
+const SEARCH_DEBOUNCE: Duration = Duration::from_millis(350);
+
+/// Below this, a query is not worth a request: one letter matches most of
+/// GitHub, and nobody reads what comes back.
+const MIN_QUERY: usize = 2;
 
 /// What the last lookup turned up, and what it was looking for.
 ///
@@ -340,9 +429,10 @@ fn stars_label(stars: u64) -> String {
 ///
 /// Searching is what the box is for — a link is the fallback, not the price of
 /// entry. With nothing typed it offers the account's own repositories, since
-/// the pull requests you are asked to review are nearly always on one.
+/// the pull requests you are asked to review are nearly always on one; signed
+/// out there is no such account, so it waits to be typed into instead.
 #[component]
-fn RepoPicker() -> Element {
+fn RepoPicker(autofocus: bool) -> Element {
     let st = use_context::<St>();
     let mut repo_input = st.repo_input;
     let typed = repo_input.read().clone();
@@ -352,6 +442,14 @@ fn RepoPicker() -> Element {
     // results nobody is reading any more.
     let mut open = use_signal(|| false);
     let mut highlight = use_signal(|| 0usize);
+    // Every query this picker has already had an answer for.
+    //
+    // Typing a name is not a straight line — it is typed, over-typed, and
+    // backspaced through — and every step back over ground already covered was
+    // a fresh request for an answer we have had once. On the minute-long search
+    // budget that is most of what runs it out. Cleared with the panel, which is
+    // as long as any of it is worth trusting.
+    let mut seen = use_signal(HashMap::<String, Vec<RepoHit>>::new);
 
     let found = use_resource(move || {
         // Read the dependencies here, in the synchronous part: a change to
@@ -363,6 +461,21 @@ fn RepoPicker() -> Element {
             if !showing {
                 return None;
             }
+            let ready = |items| {
+                Some(Suggestions {
+                    query: query.clone(),
+                    items,
+                    error: None,
+                })
+            };
+            // An answer already in hand: no wait, and no request.
+            if let Some(items) = seen.peek().get(&query).cloned() {
+                return ready(items);
+            }
+            // One letter is not a search, and neither is half of one.
+            if !query.is_empty() && query.chars().count() < MIN_QUERY {
+                return ready(Vec::new());
+            }
             // Debounce: the next keystroke drops this task where it stands, so
             // nothing reaches GitHub until the typing stops.
             compat::sleep(SEARCH_DEBOUNCE).await;
@@ -373,11 +486,14 @@ fn RepoPicker() -> Element {
                 github::search_repos(&token, &q, SUGGESTION_LIMIT).await.map_err(|e| format!("{e:#}"))
             };
             Some(match hits {
-                Ok(items) => Suggestions {
-                    query,
-                    items,
-                    error: None,
-                },
+                Ok(items) => {
+                    seen.write().insert(query.clone(), items.clone());
+                    Suggestions {
+                        query,
+                        items,
+                        error: None,
+                    }
+                }
                 Err(e) => Suggestions {
                     query,
                     items: Vec::new(),
@@ -408,7 +524,9 @@ fn RepoPicker() -> Element {
                     // The panel is opened to look something up, so it opens
                     // ready to be typed into.
                     onmounted: move |e| async move {
-                        let _ = e.set_focus(true).await;
+                        if autofocus {
+                            let _ = e.set_focus(true).await;
+                        }
                     },
                     onfocus: move |_| open.set(true),
                     oninput: move |e| {
@@ -482,7 +600,7 @@ fn RepoPicker() -> Element {
                     }
                 } else if !settled {
                     div { class: "ghnote", "Searching GitHub…" }
-                } else if typed.trim().is_empty() {
+                } else if typed.trim().chars().count() < MIN_QUERY {
                     div { class: "ghnote",
                         "Type a name to search GitHub, or paste a link to a pull request."
                     }
@@ -560,7 +678,7 @@ fn BrowseRow(repo: RepoRef, no_prs: bool) -> Element {
     rsx! {
         button {
             class,
-            title: "Open {repo} at its default branch, with no pull request",
+            title: "View {repo} at its default branch, with no pull request",
             // Root scope: loading replaces the list this button lives in.
             onclick: move |_| {
                 spawn_forever(browse_repo(st, repo.clone()));

@@ -145,7 +145,7 @@ fn head_files(st: &St) -> Vec<TreeEntry> {
 pub fn why_not(st: &St) -> Option<&'static str> {
     let ws = st.workspace.read();
     if !ws.is_open() {
-        return Some("Open a repository or a pull request to search it");
+        return Some("View a repository or a pull request to search it");
     }
     (!ws.has_tree())
         .then_some("GitHub would not serve this repository's tree, so there is nothing to search")

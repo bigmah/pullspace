@@ -30,7 +30,7 @@ pub fn TopBar() -> Element {
         Workspace::Empty => (
             "nothing open",
             "wschip local",
-            "Open a repository or a pull request from the GitHub panel",
+            "View a repository or a pull request from the GitHub panel",
         ),
         Workspace::Pr(_) => (
             "pull request",

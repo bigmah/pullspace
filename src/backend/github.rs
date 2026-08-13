@@ -104,6 +104,63 @@ pub fn parse_target(input: &str) -> Option<(RepoRef, Option<u64>)> {
 
 // ------------------------------------------------------------------ request
 
+/// How long until a budget refills, from `x-ratelimit-reset`.
+///
+/// `None` when the header is missing or already in the past — a wait of "0
+/// seconds" is worse than not saying.
+fn seconds_until(reset: Option<&str>) -> Option<u64> {
+    let at: u64 = reset?.trim().parse().ok()?;
+    // web_time reads `Date.now()` in a page; std's SystemTime panics there.
+    let now = web_time::SystemTime::now()
+        .duration_since(web_time::UNIX_EPOCH)
+        .ok()?
+        .as_secs();
+    at.checked_sub(now).filter(|left| *left > 0)
+}
+
+fn wait_phrase(secs: u64) -> String {
+    match secs {
+        s if s <= 90 => format!("Try again in {s} seconds."),
+        s => format!("Try again in {} minutes.", s.div_ceil(60)),
+    }
+}
+
+/// What ran out, how long it is out for, and what still works meanwhile.
+///
+/// Worth this much care because the honest answer is usually reassuring. The
+/// budget people actually exhaust is `search`, which refills every minute and
+/// is spent by typing — while the hourly budget that opens repositories and
+/// pull requests sits there untouched. "Rate limit exceeded" over that reads as
+/// "come back in an hour", and sends people away from an app that would have
+/// opened anything they could name.
+fn rate_limited(token: &str, resource: Option<&str>, reset: Option<&str>) -> anyhow::Error {
+    let wait = seconds_until(reset)
+        .map(wait_phrase)
+        .unwrap_or_else(|| "Try again shortly.".to_string());
+    let anon = token.is_empty();
+
+    if resource == Some("search") {
+        let allowance = if anon {
+            "GitHub allows 10 repository searches a minute when signed out"
+        } else {
+            "GitHub allows 30 repository searches a minute"
+        };
+        return anyhow::anyhow!(
+            "{allowance}, and this browser has used them. {wait} Searching is the \
+             only thing affected — typing a full owner/name, or pasting a link to \
+             a pull request, still opens it."
+        );
+    }
+
+    if anon {
+        return anyhow::anyhow!(
+            "GitHub allows 60 API requests an hour when signed out, and this browser \
+             has used them. {wait} A token raises it to 5000."
+        );
+    }
+    anyhow::anyhow!("GitHub API rate limit exceeded. {wait}")
+}
+
 async fn get_raw(token: &str, url: &str, accept: &str) -> Result<(u16, Vec<u8>)> {
     // An empty token means anonymous: public repos still work, at GitHub's
     // much lower unauthenticated rate limit.
@@ -120,23 +177,22 @@ async fn get_raw(token: &str, url: &str, accept: &str) -> Result<(u16, Vec<u8>)>
     if reply.status == 401 {
         bail!("GitHub rejected the token (401). Sign in again.");
     }
-    if reply.status == 403 && reply.rate_remaining.as_deref() == Some("0") {
-        bail!("GitHub API rate limit exceeded. Try again shortly.");
+    // An emptied budget is a 403 for search and for the API at large, a 429 when
+    // GitHub feels strongly about it, and occasionally a 404. What tells them
+    // apart from a genuine refusal is the budget reading zero.
+    let spent = reply.rate_remaining.as_deref() == Some("0");
+    if spent && matches!(reply.status, 403 | 404 | 429) {
+        return Err(rate_limited(
+            token,
+            reply.rate_resource.as_deref(),
+            reply.rate_reset.as_deref(),
+        ));
+    }
+    if reply.status == 429 {
+        return Err(rate_limited(token, None, reply.rate_reset.as_deref()));
     }
     if reply.status == 403 {
         bail!("GitHub denied access (403). The token may lack the `repo` scope.");
-    }
-    // Anonymous callers get sixty requests an hour, and the browser build runs
-    // anonymous by default — so say which limit ran out, not just that one did.
-    if reply.status == 429 || (reply.status == 404 && reply.rate_remaining.as_deref() == Some("0")) {
-        bail!(
-            "GitHub API rate limit exceeded. {}",
-            if token.is_empty() {
-                "Anonymous browsing gets 60 requests an hour — add a token for 5000."
-            } else {
-                "Try again shortly."
-            }
-        );
     }
     Ok((reply.status, reply.body))
 }
@@ -968,6 +1024,61 @@ pub fn find_file<'a>(files: &'a [PrFile], path: &std::path::Path) -> Option<&'a 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A moment `secs` from now, as `x-ratelimit-reset` writes it.
+    fn reset_in(secs: u64) -> String {
+        let now = web_time::SystemTime::now()
+            .duration_since(web_time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        (now + secs).to_string()
+    }
+
+    #[test]
+    fn a_spent_search_budget_says_so_and_says_what_still_works() {
+        let e = format!(
+            "{:#}",
+            rate_limited("", Some("search"), Some(&reset_in(40)))
+        );
+        assert!(e.contains("10 repository searches a minute"), "{e}");
+        assert!(e.contains("40 seconds"), "{e}");
+        // The whole point: the rest of the app is still open for business.
+        assert!(e.contains("owner/name"), "{e}");
+    }
+
+    #[test]
+    fn a_signed_in_search_budget_is_the_larger_one() {
+        let e = format!("{:#}", rate_limited("ghp_x", Some("search"), None));
+        assert!(e.contains("30 repository searches a minute"), "{e}");
+        assert!(!e.contains("signed out"), "{e}");
+    }
+
+    #[test]
+    fn the_hourly_budget_names_the_token_that_would_raise_it() {
+        let e = format!("{:#}", rate_limited("", Some("core"), Some(&reset_in(1800))));
+        assert!(e.contains("60 API requests an hour"), "{e}");
+        assert!(e.contains("5000"), "{e}");
+        assert!(e.contains("30 minutes"), "{e}");
+    }
+
+    #[test]
+    fn a_reset_already_past_is_not_a_wait_of_zero() {
+        assert_eq!(seconds_until(Some("1")), None);
+        assert_eq!(seconds_until(None), None);
+        assert_eq!(seconds_until(Some("not a number")), None);
+        let e = format!("{:#}", rate_limited("", Some("core"), Some("1")));
+        assert!(e.contains("Try again shortly."), "{e}");
+    }
+
+    #[test]
+    fn waits_read_in_whichever_unit_is_shorter() {
+        assert_eq!(wait_phrase(45), "Try again in 45 seconds.");
+        assert_eq!(wait_phrase(90), "Try again in 90 seconds.");
+        // Rounded up: "1 minute" that is really 91 seconds sends people back
+        // early, and early is another spent request.
+        assert_eq!(wait_phrase(91), "Try again in 2 minutes.");
+        assert_eq!(wait_phrase(3600), "Try again in 60 minutes.");
+    }
 
     #[test]
     fn parses_owner_repo() {

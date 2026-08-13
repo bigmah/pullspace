@@ -20,6 +20,16 @@ pub struct Reply {
     /// `x-ratelimit-remaining`, when it was sent. The one header worth lifting
     /// out: it separates "you may not see this" from "not so fast".
     pub rate_remaining: Option<String>,
+    /// `x-ratelimit-resource`: which budget the number above belongs to.
+    ///
+    /// GitHub keeps more than one, and they are nothing like each other —
+    /// `search` is ten a minute to an anonymous caller where `core` is sixty an
+    /// hour. Running one out says nothing about the others, so an error that
+    /// does not name the one that ran out is telling the reader to give up on
+    /// an app that still works.
+    pub rate_resource: Option<String>,
+    /// `x-ratelimit-reset`: when the budget refills, in seconds since the epoch.
+    pub rate_reset: Option<String>,
 }
 
 /// GET `url` with `headers`.
@@ -41,6 +51,8 @@ pub async fn get(url: &str, headers: &[(&str, &str)]) -> Result<Reply> {
 
     let status = res.status();
     let rate_remaining = res.headers().get("x-ratelimit-remaining");
+    let rate_resource = res.headers().get("x-ratelimit-resource");
+    let rate_reset = res.headers().get("x-ratelimit-reset");
     let body = res
         .binary()
         .await
@@ -50,5 +62,7 @@ pub async fn get(url: &str, headers: &[(&str, &str)]) -> Result<Reply> {
         status,
         body,
         rate_remaining,
+        rate_resource,
+        rate_reset,
     })
 }

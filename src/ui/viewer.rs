@@ -435,7 +435,7 @@ fn Welcome() -> Element {
                 button {
                     class: "primarybtn",
                     onclick: move |_| gh_open.set(true),
-                    "Open a pull request"
+                    "View a pull request"
                 }
             }
         }

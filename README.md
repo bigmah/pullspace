@@ -61,11 +61,18 @@ confirm that in the network tab.
 Make one at <https://github.com/settings/personal-access-tokens/new>.
 *Sign out* removes it from storage.
 
-**Without a token, public repositories still work.** File contents come from
+**Without a token, public repositories still work** — the panel opens straight
+onto the picker, signed in or not. File contents come from
 `raw.githubusercontent.com`, which is not metered, so only metadata — the PR
 list, the file list, the repo tree — spends GitHub's anonymous allowance of 60
 requests an hour, and a tree read once is read off the disk after that. A token
 raises the allowance to 5000 and reaches private repositories.
+
+Repository *search* is metered separately and much harder: **10 a minute signed
+out**, 30 with a token. Answers already seen are remembered for as long as the
+panel is open, so backspacing through a name costs nothing, but running it out
+is easy — it refills within the minute, and typing a full `owner/name` or
+pasting a link goes to the hourly budget instead and keeps working meanwhile.
 
 ## Reviewing a pull request
 

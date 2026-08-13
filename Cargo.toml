@@ -2,6 +2,15 @@
 name = "pullspace"
 version = "0.1.0"
 edition = "2024"
+description = "An IDE-style GitHub pull request reviewer that is a static page — no server, no backend, and your code never leaves the browser."
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/bigmah/pullspace"
+readme = "README.md"
+keywords = ["github", "pull-request", "code-review", "diff", "wasm"]
+categories = ["development-tools", "wasm", "web-programming"]
+# Let-chains (`if x && let Some(y) = z`), which this leans on throughout, are
+# stable from 1.88 in edition 2024.
+rust-version = "1.88"
 
 # One build, one target:
 #   dx build --platform web --release   → a static page: an index.html, a .wasm
@@ -65,8 +74,12 @@ syntect = { version = "5.3.0", default-features = false, features = ["default-fa
 # std::time::Instant panics on wasm32-unknown-unknown.
 web-time = "1"
 
-[profile]
-
+# `wasm-dev` is what `dx build --platform web` uses for a debug build.
+#
+# The two below it are dead here — there is no server and no android build —
+# but they are not removable: the dioxus CLI writes all three back into this
+# file on every `dx build`. Deleting them is undone by the next one, so they
+# stay, labelled, rather than reappearing unexplained.
 [profile.wasm-dev]
 inherits = "dev"
 opt-level = 1

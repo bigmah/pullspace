@@ -42,12 +42,16 @@ async fn settle(promise: js_sys::Promise) -> Option<JsValue> {
 /// gets, since `window()` is `None` there and nothing below is ever reached.
 pub async fn root() -> Option<FileSystemDirectoryHandle> {
     let storage = web_sys::window()?.navigator().storage();
-    let handle: FileSystemDirectoryHandle = settle(storage.get_directory()).await?.dyn_into().ok()?;
+    let handle: FileSystemDirectoryHandle =
+        settle(storage.get_directory()).await?.dyn_into().ok()?;
     dir(&handle, ROOT).await
 }
 
 /// A subdirectory, created if it is not there yet.
-pub async fn dir(parent: &FileSystemDirectoryHandle, name: &str) -> Option<FileSystemDirectoryHandle> {
+pub async fn dir(
+    parent: &FileSystemDirectoryHandle,
+    name: &str,
+) -> Option<FileSystemDirectoryHandle> {
     let opts = FileSystemGetDirectoryOptions::new();
     opts.set_create(true);
     settle(parent.get_directory_handle_with_options(name, &opts))
@@ -57,7 +61,10 @@ pub async fn dir(parent: &FileSystemDirectoryHandle, name: &str) -> Option<FileS
 }
 
 pub async fn read(parent: &FileSystemDirectoryHandle, name: &str) -> Option<Vec<u8>> {
-    let handle: FileSystemFileHandle = settle(parent.get_file_handle(name)).await?.dyn_into().ok()?;
+    let handle: FileSystemFileHandle = settle(parent.get_file_handle(name))
+        .await?
+        .dyn_into()
+        .ok()?;
     let file: File = settle(handle.get_file()).await?.dyn_into().ok()?;
     let buffer = settle(file.array_buffer()).await?;
     Some(Uint8Array::new(&buffer).to_vec())
@@ -106,7 +113,10 @@ pub async fn write(parent: &FileSystemDirectoryHandle, name: &str, bytes: &[u8])
 /// each time it is opened is what makes this the "last used" the sweep sorts
 /// on.
 pub async fn modified(parent: &FileSystemDirectoryHandle, name: &str) -> Option<f64> {
-    let handle: FileSystemFileHandle = settle(parent.get_file_handle(name)).await?.dyn_into().ok()?;
+    let handle: FileSystemFileHandle = settle(parent.get_file_handle(name))
+        .await?
+        .dyn_into()
+        .ok()?;
     let file: File = settle(handle.get_file()).await?.dyn_into().ok()?;
     Some(file.last_modified())
 }
@@ -118,7 +128,9 @@ pub async fn list(parent: &FileSystemDirectoryHandle) -> Vec<String> {
     let entries = parent.keys();
     loop {
         let Ok(promise) = entries.next() else { break };
-        let Some(step) = settle(promise).await else { break };
+        let Some(step) = settle(promise).await else {
+            break;
+        };
         let step: IteratorNext = step.unchecked_into();
         if step.done() {
             break;
@@ -172,5 +184,8 @@ pub async fn persist() -> bool {
     let Ok(promise) = window.navigator().storage().persist() else {
         return false;
     };
-    settle(promise).await.and_then(|v| v.as_bool()).unwrap_or(false)
+    settle(promise)
+        .await
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
 }

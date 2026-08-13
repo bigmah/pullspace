@@ -1,0 +1,12 @@
+# Pinned so that CI, `dx build` and a contributor's first checkout all agree.
+#
+# Exact rather than "stable" on purpose: clippy gains lints with every release,
+# and CI denies warnings — a floating channel means a green repository can turn
+# red on a Thursday because somebody else shipped a lint. Bump this
+# deliberately, and fix what the new toolchain complains about in the same
+# commit.
+[toolchain]
+channel = "1.93.0"
+components = ["rustfmt", "clippy"]
+# What actually ships. `cargo test` builds for the host; this is the other one.
+targets = ["wasm32-unknown-unknown"]

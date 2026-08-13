@@ -6,7 +6,7 @@
 //! GET is all there is, because reading is all pullspace does: it shows you
 //! pull requests, it does not write them.
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use gloo_net::http::Request;
 
 /// What a request came back with.

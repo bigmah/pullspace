@@ -47,6 +47,14 @@ generated `index.html` references its assets by absolute path, so a bundle
 built without it 404s anywhere but a domain root. A user/organisation site or a
 custom domain needs no `base_path`.
 
+For **a server of your own**, [`deploy/Caddyfile`](deploy/Caddyfile) is a
+working configuration with the four things that matter commented in place. The
+one worth knowing before you host this anywhere: **serve it over HTTPS**. The
+Origin Private File System is only handed to a secure context, so over plain
+`http` the local copy quietly becomes a handful of files in memory — no
+persistence, no cheap second visit, and nothing on screen to say so.
+`localhost` is exempt, which is why development never catches it.
+
 ## Signing in
 
 Paste a token. That is a constraint rather than a shortcut: GitHub's OAuth
@@ -296,3 +304,22 @@ dx build --platform web --release
 There are no network tests. They would need a browser to run in, since the only
 HTTP client here is `fetch`; the CORS behaviour they would have covered is
 checked by hand with `curl -H "Origin: https://example.com"`.
+
+CI runs all four of the above on every push and pull request, on the toolchain
+pinned in `rust-toolchain.toml` — the same one a fresh checkout gets, so a
+green run means the compiler agreed with yours and not merely with itself.
+
+## License
+
+Dual-licensed under either of
+
+- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE) or
+  <https://www.apache.org/licenses/LICENSE-2.0>)
+- MIT license ([LICENSE-MIT](LICENSE-MIT) or
+  <https://opensource.org/licenses/MIT>)
+
+at your option.
+
+Unless you explicitly state otherwise, any contribution intentionally submitted
+for inclusion in this work by you, as defined in the Apache-2.0 license, shall
+be dual-licensed as above, without any additional terms or conditions.

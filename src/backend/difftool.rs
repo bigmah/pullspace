@@ -347,7 +347,12 @@ mod tests {
             .iter()
             .find(|r| r.left.as_ref().is_some_and(|l| l.kind == LineKind::Del))
             .expect("paired row");
-        assert!(paired.right.as_ref().is_some_and(|l| l.kind == LineKind::Add));
+        assert!(
+            paired
+                .right
+                .as_ref()
+                .is_some_and(|l| l.kind == LineKind::Add)
+        );
     }
 
     #[test]
@@ -398,7 +403,13 @@ mod tests {
         assert!(diff.gaps.is_empty());
         let bs = blocks(&diff, &HashMap::new());
         assert_eq!(bs.len(), 1);
-        assert!(matches!(bs[0], Block::Lines { header: Some(_), .. }));
+        assert!(matches!(
+            bs[0],
+            Block::Lines {
+                header: Some(_),
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -408,13 +419,7 @@ mod tests {
         let base = shown(&diff, &HashMap::new());
 
         let mut open = HashMap::new();
-        open.insert(
-            0,
-            Expansion {
-                top: 5,
-                bottom: 0,
-            },
-        );
+        open.insert(0, Expansion { top: 5, bottom: 0 });
         assert_eq!(shown(&diff, &open), base + 5);
         let hidden: Vec<_> = blocks(&diff, &open)
             .into_iter()
@@ -436,12 +441,26 @@ mod tests {
         let diff = diff_file(&old, &new);
         let mut open = HashMap::new();
         for (i, g) in diff.gaps.iter().enumerate() {
-            open.insert(i, Expansion { top: 0, bottom: g.len });
+            open.insert(
+                i,
+                Expansion {
+                    top: 0,
+                    bottom: g.len,
+                },
+            );
         }
         assert_eq!(shown(&diff, &open), diff.lines.len());
         let headers = blocks(&diff, &open)
             .iter()
-            .filter(|b| matches!(b, Block::Lines { header: Some(_), .. }))
+            .filter(|b| {
+                matches!(
+                    b,
+                    Block::Lines {
+                        header: Some(_),
+                        ..
+                    }
+                )
+            })
             .count();
         assert_eq!(headers, 1);
         // The bars stay: they are what folds the stretch back up.

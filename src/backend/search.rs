@@ -170,9 +170,7 @@ fn clip(s: &str) -> String {
 /// numbers and single letters are not.
 pub fn is_identifier(word: &str) -> bool {
     let mut chars = word.chars();
-    chars
-        .next()
-        .is_some_and(|c| c.is_alphabetic() || c == '_')
+    chars.next().is_some_and(|c| c.is_alphabetic() || c == '_')
         && word.chars().count() > 1
         && word.chars().all(|c| c.is_alphanumeric() || c == '_')
 }
@@ -305,7 +303,10 @@ mod tests {
         let found = hits("needle", Options::default(), &long);
         assert_eq!(found.len(), 1, "the line still matched");
         assert_eq!(found[0].text.chars().count(), MAX_PREVIEW);
-        assert!(found[0].marks.is_empty(), "but it is off the end of what is shown");
+        assert!(
+            found[0].marks.is_empty(),
+            "but it is off the end of what is shown"
+        );
     }
 
     #[test]
@@ -354,7 +355,10 @@ mod tests {
 
     #[test]
     fn splitting_a_line_with_no_occurrence_leaves_it_whole() {
-        assert_eq!(split_word("nothing here", "total"), vec![(false, "nothing here")]);
+        assert_eq!(
+            split_word("nothing here", "total"),
+            vec![(false, "nothing here")]
+        );
         assert_eq!(split_word("", "total"), Vec::new());
     }
 }

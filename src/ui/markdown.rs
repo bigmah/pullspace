@@ -152,7 +152,11 @@ fn block(st: St, rel: &Path, b: &Block) -> Element {
                 }
             }
         }
-        Block::List { ordered, start, items } => list(st, rel, *ordered, *start, items),
+        Block::List {
+            ordered,
+            start,
+            items,
+        } => list(st, rel, *ordered, *start, items),
         Block::Table { head, rows } => table(st, rel, head, rows),
         Block::Rule => rsx! {
             div { class: "mdrule" }

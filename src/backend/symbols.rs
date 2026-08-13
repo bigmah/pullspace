@@ -133,7 +133,9 @@ fn langs() -> &'static Vec<LangSpec> {
 
 fn spec_for(ext: &str) -> Option<&'static LangSpec> {
     let ext = ext.to_ascii_lowercase();
-    langs().iter().find(|l| l.extensions.contains(&ext.as_str()))
+    langs()
+        .iter()
+        .find(|l| l.extensions.contains(&ext.as_str()))
 }
 
 /// Read one file's definitions into `out`.
@@ -193,26 +195,56 @@ mod tests {
 
     #[test]
     fn rust_patterns() {
-        assert_eq!(first("rs", "pub async fn fetch_data() {"), Some(("fn", "fetch_data".into())));
-        assert_eq!(first("rs", "pub(crate) struct Foo {"), Some(("struct", "Foo".into())));
-        assert_eq!(first("rs", "    fn helper() {"), Some(("fn", "helper".into())));
-        assert_eq!(first("rs", "pub const MAX: usize = 3;"), Some(("const", "MAX".into())));
+        assert_eq!(
+            first("rs", "pub async fn fetch_data() {"),
+            Some(("fn", "fetch_data".into()))
+        );
+        assert_eq!(
+            first("rs", "pub(crate) struct Foo {"),
+            Some(("struct", "Foo".into()))
+        );
+        assert_eq!(
+            first("rs", "    fn helper() {"),
+            Some(("fn", "helper".into()))
+        );
+        assert_eq!(
+            first("rs", "pub const MAX: usize = 3;"),
+            Some(("const", "MAX".into()))
+        );
         assert_eq!(first("rs", "let x = call();"), None);
     }
 
     #[test]
     fn ts_and_py_patterns() {
-        assert_eq!(first("ts", "export default async function main() {"), Some(("fn", "main".into())));
-        assert_eq!(first("ts", "export const config = {"), Some(("var", "config".into())));
-        assert_eq!(first("py", "    async def run(self):"), Some(("fn", "run".into())));
-        assert_eq!(first("py", "class Widget:"), Some(("class", "Widget".into())));
+        assert_eq!(
+            first("ts", "export default async function main() {"),
+            Some(("fn", "main".into()))
+        );
+        assert_eq!(
+            first("ts", "export const config = {"),
+            Some(("var", "config".into()))
+        );
+        assert_eq!(
+            first("py", "    async def run(self):"),
+            Some(("fn", "run".into()))
+        );
+        assert_eq!(
+            first("py", "class Widget:"),
+            Some(("class", "Widget".into()))
+        );
     }
 
     #[test]
     fn a_c_prototype_is_not_a_definition() {
-        assert_eq!(first("c", "int add(int a, int b) {"), Some(("fn", "add".into())));
+        assert_eq!(
+            first("c", "int add(int a, int b) {"),
+            Some(("fn", "add".into()))
+        );
         assert_eq!(first("h", "int add(int a, int b);"), None);
-        assert_eq!(first("c", "#define MAX_LEN 32"), Some(("macro", "MAX_LEN".into())));
+        assert_eq!(
+            first("c", "#define MAX_LEN 32"),
+            Some(("macro", "MAX_LEN".into()))
+        );
     }
 
     #[test]
@@ -223,13 +255,20 @@ mod tests {
         scan_file(Path::new("Makefile"), "build:\n", &mut out);
         assert!(out.is_empty());
         // And an extension is an extension whatever case it arrives in.
-        assert_eq!(first("TSX", "export class Widget {"), Some(("class", "Widget".into())));
+        assert_eq!(
+            first("TSX", "export class Widget {"),
+            Some(("class", "Widget".into()))
+        );
     }
 
     #[test]
     fn one_line_defines_one_thing() {
         let mut out = Vec::new();
-        scan_file(Path::new("a.rs"), "pub struct Foo;\npub enum Bar {}\n", &mut out);
+        scan_file(
+            Path::new("a.rs"),
+            "pub struct Foo;\npub enum Bar {}\n",
+            &mut out,
+        );
         assert_eq!(out.len(), 2);
         assert_eq!(out[0].line, 1);
         assert_eq!(out[1].line, 2);
@@ -239,9 +278,27 @@ mod tests {
     #[test]
     fn the_definition_in_the_file_being_read_comes_first() {
         let index = vec![
-            Symbol { name: "new".into(), kind: "fn", path: "a/z.rs".into(), line: 9, preview: String::new() },
-            Symbol { name: "new".into(), kind: "fn", path: "b/y.rs".into(), line: 3, preview: String::new() },
-            Symbol { name: "other".into(), kind: "fn", path: "b/y.rs".into(), line: 1, preview: String::new() },
+            Symbol {
+                name: "new".into(),
+                kind: "fn",
+                path: "a/z.rs".into(),
+                line: 9,
+                preview: String::new(),
+            },
+            Symbol {
+                name: "new".into(),
+                kind: "fn",
+                path: "b/y.rs".into(),
+                line: 3,
+                preview: String::new(),
+            },
+            Symbol {
+                name: "other".into(),
+                kind: "fn",
+                path: "b/y.rs".into(),
+                line: 1,
+                preview: String::new(),
+            },
         ];
         let found = find_definitions(&index, "new", Some(Path::new("b/y.rs")));
         assert_eq!(found.len(), 2);

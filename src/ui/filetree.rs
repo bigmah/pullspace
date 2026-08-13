@@ -2,9 +2,7 @@ use std::path::PathBuf;
 
 use dioxus::prelude::*;
 
-use crate::backend::tree::{
-    matching_rows, seed_expansion, visible_rows, FileNode, Row, RowKind,
-};
+use crate::backend::tree::{FileNode, Row, RowKind, matching_rows, seed_expansion, visible_rows};
 
 use super::app::St;
 use super::panes::{Edge, Splitter};
@@ -134,7 +132,10 @@ pub fn FileTreePane() -> Element {
         let needle = query.read().trim().to_string();
         let held = tree.read();
         let Some(root) = held.as_ref() else {
-            return Listing { rows: Vec::new(), hidden: 0 };
+            return Listing {
+                rows: Vec::new(),
+                hidden: 0,
+            };
         };
         if needle.is_empty() {
             return Listing {
@@ -294,7 +295,11 @@ fn TreeRow(row: Row) -> Element {
         }
         RowKind::File { status, hint } => {
             let active = st.open.read().as_deref() == Some(row.path.as_path());
-            let cls = if active { "row file active" } else { "row file" };
+            let cls = if active {
+                "row file active"
+            } else {
+                "row file"
+            };
             let path = row.path.clone();
             let badge = status.map(|s| (s.badge(), s.css()));
             let name_cls = match status {

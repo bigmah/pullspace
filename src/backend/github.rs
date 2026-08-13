@@ -1,20 +1,20 @@
 //! Minimal GitHub REST client: enough to list pull requests and pull the two
 //! sides of a file so the existing diff engine can render them.
 //!
-//! Every call here is async and target-agnostic: the desktop build runs it on
-//! a blocking thread through ureq, the wasm build runs it on the browser's
-//! fetch, and [`http`](super::http) is where those two part ways. Nothing in
-//! this module touches the machine, which is what lets the static web build
-//! talk to GitHub with no server of its own in between.
+//! Every call here is async, and none of them touches the machine: the only
+//! transport is [`http`](super::http), which is the browser's own fetch. That
+//! is what lets a static page talk to GitHub with no server of its own in
+//! between — and, since nothing outside that one module is browser-specific,
+//! it is also what keeps the parsing in here testable on the host.
 
 use std::path::PathBuf;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
+use super::FileContent;
 use super::http;
 use super::tree::ChangeKind;
-use super::FileContent;
 
 const API: &str = "https://api.github.com";
 const API_VERSION: &str = "2022-11-28";
@@ -211,10 +211,7 @@ async fn get_raw(token: &str, url: &str, accept: &str) -> Result<(u16, Vec<u8>)>
     // An empty token means anonymous: public repos still work, at GitHub's
     // much lower unauthenticated rate limit.
     let auth = format!("Bearer {token}");
-    let mut headers = vec![
-        ("Accept", accept),
-        ("X-GitHub-Api-Version", API_VERSION),
-    ];
+    let mut headers = vec![("Accept", accept), ("X-GitHub-Api-Version", API_VERSION)];
     if !token.is_empty() {
         headers.push(("Authorization", auth.as_str()));
     }
@@ -765,7 +762,10 @@ impl Snapshot {
 
     /// Where the files are kept on disk, and how it is found again.
     pub fn key(&self) -> String {
-        format!("{}~{}~{}.json", self.repo.owner, self.repo.name, self.commit)
+        format!(
+            "{}~{}~{}.json",
+            self.repo.owner, self.repo.name, self.commit
+        )
     }
 }
 
@@ -1008,7 +1008,10 @@ fn comment_of(raw: RawComment, kind: CommentKind) -> Comment {
 
 /// Read a list endpoint page by page. The bool is true when there was more
 /// than [`MAX_COMMENT_PAGES`] worth.
-async fn get_paged<T: serde::de::DeserializeOwned>(token: &str, base: &str) -> Result<(Vec<T>, bool)> {
+async fn get_paged<T: serde::de::DeserializeOwned>(
+    token: &str,
+    base: &str,
+) -> Result<(Vec<T>, bool)> {
     let mut out = Vec::new();
     for page in 1..=MAX_COMMENT_PAGES {
         let url = format!("{base}?per_page=100&page={page}");
@@ -1027,7 +1030,11 @@ async fn get_paged<T: serde::de::DeserializeOwned>(token: &str, base: &str) -> R
 /// as well would double every one of them.
 fn review_is_noise(raw: &RawComment) -> bool {
     let empty = raw.body.as_deref().unwrap_or_default().trim().is_empty();
-    let state = raw.state.as_deref().unwrap_or_default().to_ascii_uppercase();
+    let state = raw
+        .state
+        .as_deref()
+        .unwrap_or_default()
+        .to_ascii_uppercase();
     // A pending review is a draft, visible only to the person writing it.
     state == "PENDING" || (empty && state != "APPROVED" && state != "CHANGES_REQUESTED")
 }
@@ -1102,7 +1109,11 @@ pub async fn pr_comments(token: &str, repo: &RepoRef, number: u64) -> Result<Thr
 /// repository this way reasonable, and why the clone tries it first whether or
 /// not anyone is signed in. Private repositories 404 here and go to
 /// [`api_blob`] instead.
-pub async fn raw_file(repo: &RepoRef, commit: &str, path: &std::path::Path) -> Result<(u16, Vec<u8>)> {
+pub async fn raw_file(
+    repo: &RepoRef,
+    commit: &str,
+    path: &std::path::Path,
+) -> Result<(u16, Vec<u8>)> {
     let rel = path.to_string_lossy().replace('\\', "/");
     let url = format!(
         "{RAW}/{}/{}/{}/{}",
@@ -1210,7 +1221,10 @@ mod tests {
 
     #[test]
     fn the_hourly_budget_names_the_token_that_would_raise_it() {
-        let e = format!("{:#}", rate_limited("", Some("core"), Some(&reset_in(1800))));
+        let e = format!(
+            "{:#}",
+            rate_limited("", Some("core"), Some(&reset_in(1800)))
+        );
         assert!(e.contains("60 API requests an hour"), "{e}");
         assert!(e.contains("5000"), "{e}");
         assert!(e.contains("30 minutes"), "{e}");
@@ -1322,8 +1336,7 @@ mod tests {
         assert_eq!(hit.public_repos, 0);
 
         // A display name that is the login again says nothing twice.
-        let raw: RawOwner =
-            serde_json::from_str(r#"{"login":"bigmah","name":"BigMah"}"#).unwrap();
+        let raw: RawOwner = serde_json::from_str(r#"{"login":"bigmah","name":"BigMah"}"#).unwrap();
         assert!(owner_of(raw).unwrap().name.is_empty());
     }
 
@@ -1418,7 +1431,10 @@ mod tests {
                 "submitted_at":"2026-08-02T10:00:00Z","html_url":"u"}"#,
         )
         .unwrap();
-        assert!(!review_is_noise(&raw), "a bare approval still says something");
+        assert!(
+            !review_is_noise(&raw),
+            "a bare approval still says something"
+        );
         let c = comment_of(raw, CommentKind::Review);
         assert_eq!(c.created_at, "2026-08-02T10:00:00Z");
         assert_eq!(c.verdict, "approved");
@@ -1515,9 +1531,11 @@ mod tests {
             assert_eq!(found.path, PathBuf::from(path));
             assert_eq!(found.sha, format!("{i:040}"), "{path} found the wrong blob");
         }
-        assert!(snapshot
-            .entry(std::path::Path::new("crates/gguf/src/nope.rs"))
-            .is_none());
+        assert!(
+            snapshot
+                .entry(std::path::Path::new("crates/gguf/src/nope.rs"))
+                .is_none()
+        );
     }
 
     #[test]
@@ -1543,7 +1561,6 @@ mod tests {
         assert_eq!(map.get(&PathBuf::from("b.rs")), Some(&ChangeKind::Deleted));
     }
 }
-
 
 // -------------------------------------------------------------- fetch jobs
 

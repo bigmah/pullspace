@@ -3,9 +3,11 @@
   A fixture for pullspace's HTML preview.
 
   Open this file in pullspace and press "Preview" in the viewer header. The page
-  is parsed and laid out by Blitz, which has no JavaScript engine, and painted
-  to a PNG — so everything below that tries to run is inert text rather than
-  code that has been sandboxed.
+  is drawn by the browser itself, in an iframe carrying an empty `sandbox`
+  attribute — which denies everything the attribute can deny: scripts, forms,
+  navigation, popups, and above all same-origin access. So everything below
+  that tries to run is inert, and none of it can reach the GitHub token sitting
+  in this origin's local storage.
 
   The hostile bits point at *.invalid, a TLD reserved by RFC 2606 that can never
   resolve. Nothing here can reach anything even if it somehow ran.
@@ -15,9 +17,9 @@
 <meta charset="utf-8">
 <title>pullspace preview demo</title>
 
-<!-- 1. A stylesheet in <head>, hosted elsewhere. It is refused — and the page
-     must still paint. (Blitz's own DummyNetProvider drops such a request, which
-     leaves it on the document's critical list and blocks painting forever.) -->
+<!-- 1. A stylesheet in <head>, hosted elsewhere. The frame has no origin, so it
+     is fetched without credentials if it is fetched at all — and this host does
+     not resolve, so it is not. The page must still render regardless. -->
 <link rel="stylesheet" href="https://blocked.invalid/theme.css">
 
 <style>
@@ -95,7 +97,7 @@
 <body>
 <header>
   <h1>pullspace preview demo</h1>
-  <p>Drawn by Blitz · no JavaScript engine · every remote resource refused</p>
+  <p>Drawn in a sandboxed frame · scripts denied · no same-origin access</p>
 </header>
 
 <main>
@@ -127,7 +129,7 @@
       <span class="mark">✓</span>
       <div>
         <b>Remote stylesheet in &lt;head&gt;</b>
-        <span>Refused — and the page still paints rather than hanging blank.</span>
+        <span>Unreachable — and the page still renders rather than hanging blank.</span>
       </div>
     </div>
     <div class="check">
@@ -174,12 +176,14 @@
   </table>
 
   <h2>Code block</h2>
-<pre><span class="c">// The provider that refuses everything, from src/backend/htmlview.rs</span>
-<span class="k">impl</span> NetProvider <span class="k">for</span> OfflineNet {
-    <span class="k">fn</span> fetch(&amp;<span class="k">self</span>, _doc: <span class="k">usize</span>, req: Request, handler: <span class="k">Box</span>&lt;<span class="k">dyn</span> NetHandler&gt;) {
-        <span class="c">// Answer it — a dropped request for a stylesheet blocks painting.</span>
-        handler.bytes(req.url.to_string(), Bytes::<span class="s">new</span>());
-    }
+<pre><span class="c">// The frame that draws this page, from src/ui/viewer.rs</span>
+iframe {
+    class: <span class="s">"previewframe"</span>,
+    <span class="c">// Denies everything the attribute can deny — including</span>
+    <span class="c">// same-origin access, so it cannot read this page's storage.</span>
+    <span class="s">"sandbox"</span>: <span class="s">""</span>,
+    <span class="c">// Inline: nothing is served, so there is no URL to leak.</span>
+    srcdoc: <span class="s">"{html}"</span>,
 }</pre>
 </main>
 

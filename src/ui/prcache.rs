@@ -61,7 +61,9 @@ fn remember(st: &St, path: &Path, state: PrFileState) {
     let mut order = order.write();
     order.push_back(path.to_path_buf());
     while order.len() > MEMORY_FILES {
-        let Some(oldest) = order.pop_front() else { break };
+        let Some(oldest) = order.pop_front() else {
+            break;
+        };
         // Its own entry, superseded by a later read of the same file.
         if order.contains(&oldest) || st.open.peek().as_deref() == Some(oldest.as_path()) {
             continue;
@@ -138,7 +140,10 @@ pub fn ensure_hover(st: St, rel: &Path) {
 /// One job per file the PR changes — what the clone fetches before it fetches
 /// anything else, since it is what the review is about.
 pub fn changed_jobs(pr: &PrDetail) -> Vec<FetchJob> {
-    pr.files.iter().map(|f| FetchJob::new(pr, &f.path)).collect()
+    pr.files
+        .iter()
+        .map(|f| FetchJob::new(pr, &f.path))
+        .collect()
 }
 
 /// The fallback for a browser with nowhere to keep anything: read the pull

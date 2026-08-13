@@ -55,12 +55,25 @@ pub struct Item {
 
 #[derive(Clone, PartialEq, Debug)]
 pub enum Block {
-    Heading { level: u8, spans: Vec<Span> },
+    Heading {
+        level: u8,
+        spans: Vec<Span>,
+    },
     Para(Vec<Span>),
-    Code { lang: String, text: String },
+    Code {
+        lang: String,
+        text: String,
+    },
     Quote(Vec<Block>),
-    List { ordered: bool, start: u64, items: Vec<Item> },
-    Table { head: Vec<Vec<Span>>, rows: Vec<Vec<Vec<Span>>> },
+    List {
+        ordered: bool,
+        start: u64,
+        items: Vec<Item>,
+    },
+    Table {
+        head: Vec<Vec<Span>>,
+        rows: Vec<Vec<Vec<Span>>>,
+    },
     Rule,
 }
 
@@ -86,7 +99,10 @@ pub fn readme_of<'a>(paths: impl IntoIterator<Item = &'a Path>) -> Option<PathBu
         if path.parent().is_some_and(|p| !p.as_os_str().is_empty()) {
             continue;
         }
-        let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or_default();
+        let stem = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or_default();
         if !stem.eq_ignore_ascii_case("readme") {
             continue;
         }
@@ -115,9 +131,8 @@ pub struct Doc {
 
 /// Parse markdown into blocks.
 pub fn parse(text: &str) -> Doc {
-    let options = Options::ENABLE_TABLES
-        | Options::ENABLE_STRIKETHROUGH
-        | Options::ENABLE_TASKLISTS;
+    let options =
+        Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS;
     let mut reader = Reader {
         events: Parser::new_ext(text, options),
         raw_html: false,
@@ -254,7 +269,10 @@ impl Reader<'_> {
                 let lang = match kind {
                     CodeBlockKind::Fenced(info) => {
                         // ```rust,ignore — the first word is the language.
-                        info.split([',', ' ']).next().unwrap_or_default().to_string()
+                        info.split([',', ' '])
+                            .next()
+                            .unwrap_or_default()
+                            .to_string()
                     }
                     CodeBlockKind::Indented => String::new(),
                 };
@@ -277,7 +295,7 @@ impl Reader<'_> {
 
     fn inline(&mut self) -> Vec<Span> {
         let mut acc = Inline::default();
-        while let Some(ev) = self.events.next() {
+        for ev in self.events.by_ref() {
             if !acc.step(ev) {
                 break;
             }
@@ -289,7 +307,7 @@ impl Reader<'_> {
     /// A code block's text, which arrives as text events and nothing else.
     fn verbatim(&mut self) -> String {
         let mut out = String::new();
-        while let Some(ev) = self.events.next() {
+        for ev in self.events.by_ref() {
             match ev {
                 Event::Text(t) => out.push_str(&t),
                 Event::End(_) => break,
@@ -341,7 +359,7 @@ impl Reader<'_> {
     /// Consume a container whose contents are not drawn, however deeply nested.
     fn skip(&mut self) {
         let mut depth = 1usize;
-        while let Some(ev) = self.events.next() {
+        for ev in self.events.by_ref() {
             match ev {
                 Event::Start(_) => depth += 1,
                 Event::End(_) => {
@@ -413,7 +431,10 @@ mod tests {
         // Markdown wins over a bare one, whatever order they arrive in.
         let both = [Path::new("README"), Path::new("readme.md")];
         assert_eq!(readme_of(both), Some(PathBuf::from("readme.md")));
-        assert_eq!(readme_of([Path::new("README")]), Some(PathBuf::from("README")));
+        assert_eq!(
+            readme_of([Path::new("README")]),
+            Some(PathBuf::from("README"))
+        );
         assert_eq!(readme_of([Path::new("src/main.rs")]), None);
     }
 
@@ -527,7 +548,12 @@ mod tests {
     #[test]
     fn ordered_lists_start_where_they_say() {
         let blocks = doc("3. three\n4. four\n");
-        let Block::List { ordered, start, items } = &blocks[0] else {
+        let Block::List {
+            ordered,
+            start,
+            items,
+        } = &blocks[0]
+        else {
             panic!("expected a list")
         };
         assert!(ordered);
@@ -552,9 +578,15 @@ mod tests {
         let Block::Table { head, rows } = &blocks[0] else {
             panic!("expected a table: {blocks:?}")
         };
-        assert_eq!(head.iter().map(|c| plain(c)).collect::<Vec<_>>(), ["a", "b"]);
+        assert_eq!(
+            head.iter().map(|c| plain(c)).collect::<Vec<_>>(),
+            ["a", "b"]
+        );
         assert_eq!(rows.len(), 2);
-        assert_eq!(rows[1].iter().map(|c| plain(c)).collect::<Vec<_>>(), ["3", "4"]);
+        assert_eq!(
+            rows[1].iter().map(|c| plain(c)).collect::<Vec<_>>(),
+            ["3", "4"]
+        );
     }
 
     #[test]
@@ -569,9 +601,7 @@ mod tests {
 
     #[test]
     fn raw_html_is_dropped_rather_than_printed() {
-        let blocks = doc(
-            "<div align=\"center\">\n<script>alert(1)</script>\n</div>\n\nafter\n",
-        );
+        let blocks = doc("<div align=\"center\">\n<script>alert(1)</script>\n</div>\n\nafter\n");
         // Whatever else happens, the tags and the script are not text on screen.
         let text = paras(&blocks).join(" ");
         assert!(!text.contains("script"), "{text:?}");

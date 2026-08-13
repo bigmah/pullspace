@@ -4,14 +4,14 @@ use dioxus::prelude::*;
 
 use std::collections::HashMap;
 
+use crate::backend::FileContent;
 use crate::backend::difftool::{
-    blocks, diff_file, stats, to_rows, Block, Expansion, FileDiff, Line, LineKind, STEP,
+    Block, Expansion, FileDiff, Line, LineKind, STEP, blocks, diff_file, stats, to_rows,
 };
-use crate::backend::highlight::{highlight, Span};
+use crate::backend::highlight::{Span, highlight};
 use crate::backend::markdown;
 use crate::backend::search::split_word;
 use crate::backend::tree::ChangeKind;
-use crate::backend::FileContent;
 
 use super::app::{PrFileState, St, ViewMode, Workspace};
 use super::ide;
@@ -159,8 +159,7 @@ pub fn Viewer() -> Element {
     let preview = use_resource(move || {
         let wanted = *st.view_mode.read() == ViewMode::Preview;
         let source = match &*data.read() {
-            Pane::Ready { rel, old, new } if wanted && is_html(rel) => match (new, old)
-            {
+            Pane::Ready { rel, old, new } if wanted && is_html(rel) => match (new, old) {
                 (FileContent::Text(t), _) => Some(t.clone()),
                 // Deleted by the PR: draw the version that is going away.
                 (FileContent::Absent, FileContent::Text(t)) => Some(t.clone()),
@@ -256,7 +255,9 @@ pub fn Viewer() -> Element {
         },
         ViewMode::Preview => match &*preview.read() {
             None => rsx! { div { class: "notice", "Drawing the page…" } },
-            Some(None) => rsx! { div { class: "notice", "Nothing to draw — this file has no text." } },
+            Some(None) => {
+                rsx! { div { class: "notice", "Nothing to draw — this file has no text." } }
+            }
             Some(Some(html)) => render_preview(html),
         },
     };
@@ -264,26 +265,23 @@ pub fn Viewer() -> Element {
     let mut vm = st.view_mode;
     // A disabled button at 30% opacity with no explanation is a puzzle; the
     // tooltip is where the reason goes.
-    let mode_btn = |label: &'static str,
-                    m: ViewMode,
-                    cur: ViewMode,
-                    enabled: bool,
-                    why: &'static str| {
-        let cls = if m == cur && enabled {
-            "modebtn on"
-        } else {
-            "modebtn"
-        };
-        rsx! {
-            button {
-                class: cls,
-                title: "{why}",
-                disabled: !enabled,
-                onclick: move |_| vm.set(m),
-                "{label}"
+    let mode_btn =
+        |label: &'static str, m: ViewMode, cur: ViewMode, enabled: bool, why: &'static str| {
+            let cls = if m == cur && enabled {
+                "modebtn on"
+            } else {
+                "modebtn"
+            };
+            rsx! {
+                button {
+                    class: cls,
+                    title: "{why}",
+                    disabled: !enabled,
+                    onclick: move |_| vm.set(m),
+                    "{label}"
+                }
             }
-        }
-    };
+        };
     // Nothing to diff or draw until the file itself has arrived.
     let diffable = settled && status.is_some();
     let diff_why = if diffable {
@@ -695,11 +693,7 @@ fn plural(n: usize) -> &'static str {
     if n == 1 { "line" } else { "lines" }
 }
 
-fn render_inline(
-    diff: &FileDiff,
-    open: &HashMap<usize, Expansion>,
-    mark: Option<&str>,
-) -> Element {
+fn render_inline(diff: &FileDiff, open: &HashMap<usize, Expansion>, mark: Option<&str>) -> Element {
     rsx! {
         div { class: "code inline",
             for block in blocks(diff, open) {
@@ -753,11 +747,7 @@ fn split_cell(l: Option<&Line>, right: bool, mark: Option<&str>) -> Element {
     }
 }
 
-fn render_split(
-    diff: &FileDiff,
-    open: &HashMap<usize, Expansion>,
-    mark: Option<&str>,
-) -> Element {
+fn render_split(diff: &FileDiff, open: &HashMap<usize, Expansion>, mark: Option<&str>) -> Element {
     rsx! {
         div { class: "code split",
             for block in blocks(diff, open) {

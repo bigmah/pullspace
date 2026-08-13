@@ -138,11 +138,25 @@ fn bounds(edge: Edge, st: &St) -> (f64, f64) {
     let (lo, hi) = match edge {
         Edge::Sidebar => {
             let room = w - right_reserved(st) - MIN_CENTER;
-            (MIN_SIDE, if w > 0.0 { room.min(MAX_SIDE) } else { MAX_SIDE })
+            (
+                MIN_SIDE,
+                if w > 0.0 {
+                    room.min(MAX_SIDE)
+                } else {
+                    MAX_SIDE
+                },
+            )
         }
         Edge::Conv => {
             let room = w - *st.side_w.peek() - MIN_CENTER;
-            (MIN_CONV, if w > 0.0 { room.min(MAX_CONV) } else { MAX_CONV })
+            (
+                MIN_CONV,
+                if w > 0.0 {
+                    room.min(MAX_CONV)
+                } else {
+                    MAX_CONV
+                },
+            )
         }
         Edge::Bottom => {
             let room = h - MIN_ABOVE;

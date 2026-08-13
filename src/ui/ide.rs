@@ -23,9 +23,9 @@ use std::time::Duration;
 use dioxus::prelude::*;
 
 use crate::backend::github::TreeEntry;
-use crate::backend::highlight::{highlight, Span};
+use crate::backend::highlight::{Span, highlight};
 use crate::backend::scan::{self, Flow, Walked};
-use crate::backend::search::{self, Hit, Matcher, Options, MAX_HITS};
+use crate::backend::search::{self, Hit, MAX_HITS, Matcher, Options};
 use crate::backend::symbols::{self, Symbol};
 
 use super::app::St;
@@ -509,9 +509,7 @@ pub fn select_word(st: St) {
 /// Put the cursor in the search box, with whatever is in it selected — so the
 /// shortcut is "search for something else" and not "search again".
 pub fn focus_search() {
-    document::eval(
-        "var e=document.querySelector('.searchbox'); if(e){e.focus();e.select();}",
-    );
+    document::eval("var e=document.querySelector('.searchbox'); if(e){e.focus();e.select();}");
 }
 
 /// Put the cursor in the explorer's filter box.
@@ -586,8 +584,13 @@ fn escape(st: St) {
     sel.set(None);
 }
 
+/// One toggle: what the button says, what it says on hover, and the field it
+/// flips — which is what lets the three be drawn by one loop rather than three
+/// near-identical blocks.
+pub type Toggle = (&'static str, &'static str, fn(&mut Options) -> &mut bool);
+
 /// The three toggles, as the buttons that set them.
-pub const TOGGLES: [(&str, &str, fn(&mut Options) -> &mut bool); 3] = [
+pub const TOGGLES: [Toggle; 3] = [
     ("Aa", "Match case", |o| &mut o.case),
     ("ab", "Whole word", |o| &mut o.word),
     (".*", "Regular expression", |o| &mut o.regex),

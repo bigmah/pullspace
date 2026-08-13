@@ -9,11 +9,13 @@ use dioxus::prelude::*;
 use crate::backend::auth::Token;
 use crate::backend::clone::Progress;
 use crate::backend::difftool::Expansion;
-use crate::backend::github::{statuses_of, PrDetail, PrSummary, RepoRef, RepoView, Snapshot, Thread};
+use crate::backend::github::{
+    PrDetail, PrSummary, RepoRef, RepoView, Snapshot, Thread, statuses_of,
+};
 use crate::backend::markdown;
 use crate::backend::search::Options;
-use crate::backend::tree::{build_tree_from_paths, filter_changed, ChangeKind, FileNode};
-use crate::backend::{blobs, layout, FileContent};
+use crate::backend::tree::{ChangeKind, FileNode, build_tree_from_paths, filter_changed};
+use crate::backend::{FileContent, blobs, layout};
 
 use super::bottom::Bottom;
 use super::conversation::ConvPane;
@@ -114,7 +116,10 @@ pub enum Account {
 pub enum PrList {
     Idle,
     Loading(String),
-    Ready { repo: RepoRef, items: Vec<PrSummary> },
+    Ready {
+        repo: RepoRef,
+        items: Vec<PrSummary>,
+    },
     Failed(String),
 }
 
@@ -151,7 +156,10 @@ const TRAIL: usize = 60;
 #[derive(Clone, PartialEq)]
 pub enum PrFileState {
     Loading,
-    Ready { base: FileContent, head: FileContent },
+    Ready {
+        base: FileContent,
+        head: FileContent,
+    },
     Failed(String),
 }
 
@@ -500,11 +508,13 @@ impl St {
             return;
         };
         let mut expansions = self.expansions;
-        expansions
-            .write()
-            .entry(rel)
-            .or_default()
-            .insert(gap, Expansion { top: 0, bottom: len });
+        expansions.write().entry(rel).or_default().insert(
+            gap,
+            Expansion {
+                top: 0,
+                bottom: len,
+            },
+        );
     }
 
     /// Fold one stretch back up.
@@ -538,7 +548,11 @@ impl St {
         let Some(rel) = self.open.read().clone() else {
             return HashMap::new();
         };
-        self.expansions.read().get(&rel).cloned().unwrap_or_default()
+        self.expansions
+            .read()
+            .get(&rel)
+            .cloned()
+            .unwrap_or_default()
     }
 
     /// Whether a repo-relative path is one of the files on show. What a link in
@@ -632,7 +646,9 @@ impl St {
 
     pub fn go_back(&self) {
         let mut trail = self.trail;
-        let Some(spot) = trail.write().pop() else { return };
+        let Some(spot) = trail.write().pop() else {
+            return;
+        };
         if let Some(here) = self.here() {
             let mut ahead = self.ahead;
             ahead.write().push(here);
@@ -642,7 +658,9 @@ impl St {
 
     pub fn go_forward(&self) {
         let mut ahead = self.ahead;
-        let Some(spot) = ahead.write().pop() else { return };
+        let Some(spot) = ahead.write().pop() else {
+            return;
+        };
         if let Some(here) = self.here() {
             let mut trail = self.trail;
             trail.write().push(here);
@@ -797,7 +815,10 @@ pub fn App() -> Element {
         let opened = {
             let held = st.workspace.read();
             held.trees().map(|(head, base)| {
-                let changed = held.pr().map(super::prcache::changed_jobs).unwrap_or_default();
+                let changed = held
+                    .pr()
+                    .map(super::prcache::changed_jobs)
+                    .unwrap_or_default();
                 (head, base, changed)
             })
         };

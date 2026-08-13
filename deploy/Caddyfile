@@ -1,0 +1,65 @@
+# pullspace, on a server of your own.
+#
+# There is no backend to proxy to and no runtime to keep alive — the whole
+# deployment is a directory of static files:
+#
+#   dx build --platform web --release
+#   rsync -a --delete target/dx/pullspace/release/web/public/ \
+#         you@host:/var/www/pullspace/
+#
+# Swap the domain below and `caddy reload`. Four things here are not
+# decoration; each one is commented where it sits.
+
+pullspace.example.com {
+	root * /var/www/pullspace
+
+	encode zstd gzip
+
+	# 1. Assets carry a content hash in their filename — `pullspace_bg-e4d1…
+	#    .wasm` — so the bytes behind a given URL never change, and a year is
+	#    as good as forever.
+	@assets path /assets/*
+	header @assets Cache-Control "public, max-age=31536000, immutable"
+
+	# 2. index.html is the one file that names the new hashes after a deploy.
+	#    Cached, it is how you ship an update that nobody receives.
+	@html path / /index.html
+	header @html Cache-Control "no-cache"
+
+	header {
+		# 3. The token goes to these two hosts and nowhere else. That is true
+		#    of the code either way; this is what makes it enforced by the
+		#    browser rather than promised by a README.
+		#
+		#    `connect-src` alone, deliberately. A `default-src` would also
+		#    govern the HTML preview's `srcdoc` iframe, and `script-src`
+		#    cannot be tightened: dioxus's `document::eval` — the keyboard
+		#    shortcuts, scroll-to-line, and the search box's focus — runs
+		#    through `new Function`, and index.html carries an inline script.
+		Content-Security-Policy "connect-src 'self' https://api.github.com https://raw.githubusercontent.com"
+
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "no-referrer"
+
+		# 4. HTTPS is load-bearing, not hygiene. The Origin Private File
+		#    System is only handed to a secure context, so over plain http
+		#    the local copy silently degrades to a few files held in memory —
+		#    no persistence, no cheap second visit, and nothing on screen
+		#    saying so. `localhost` is exempt, which is exactly why this is
+		#    never caught in development.
+		Strict-Transport-Security "max-age=31536000"
+	}
+
+	file_server {
+		# `dx` emits both `pullspace_bg-<hash>.wasm` (4.3 MB) and a `.wasm.br`
+		# (1.15 MB) beside it. Without this, every visitor downloads the
+		# larger one and the bundle size in the README stops being true.
+		precompressed br gzip
+	}
+}
+
+# Deliberately no `try_files … /index.html`. pullspace has no server-side
+# routes, and a rewrite would turn every mistyped asset path into a 200 that
+# serves the page instead — which reads as "the app is broken" rather than
+# "that file is not there". Add one only if path-based routing ever arrives;
+# hash routing (`#/owner/repo/pull/1`) never reaches the server at all.

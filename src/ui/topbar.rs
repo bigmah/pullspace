@@ -72,19 +72,21 @@ pub fn TopBar() -> Element {
 
     // How the clone is getting on, while it still is. Once everything is on
     // disk there is nothing to report and the note goes away.
-    let cloning = (*st.cloning.read())
-        .filter(|at| !at.finished())
-        .map(|at| {
-            let note = format!("cloning {}/{}", at.done, at.total);
-            let why = format!(
-                "Reading {} into this browser's filesystem, so the rest of this \
+    let cloning = (*st.cloning.read()).filter(|at| !at.finished()).map(|at| {
+        let note = format!("cloning {}/{}", at.done, at.total);
+        let why = format!(
+            "Reading {} into this browser's filesystem, so the rest of this \
                  repository opens without waiting. {} {} already here.",
-                size_label(at.expected),
-                at.cached,
-                if at.cached == 1 { "file was" } else { "files were" },
-            );
-            (note, why)
-        });
+            size_label(at.expected),
+            at.cached,
+            if at.cached == 1 {
+                "file was"
+            } else {
+                "files were"
+            },
+        );
+        (note, why)
+    });
 
     // One note at a time. A reload in flight is the more urgent of the two,
     // and two of these pulsing out of phase in the corner of the eye is one
@@ -354,7 +356,11 @@ fn RefreshButton(
     // is a puzzle — hold the spin briefly so the click is acknowledged.
     let mut nudged = use_signal(|| false);
     let spinning = reloading || *nudged.read();
-    let cls = if spinning { "iconbtn lg spin" } else { refresh_cls };
+    let cls = if spinning {
+        "iconbtn lg spin"
+    } else {
+        refresh_cls
+    };
 
     rsx! {
         button {

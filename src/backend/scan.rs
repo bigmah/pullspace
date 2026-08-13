@@ -84,7 +84,9 @@ fn remember(sha: &str, text: Option<Rc<str>>) {
         }
         c.bytes += size;
         while c.bytes > TEXT_CACHE_BYTES {
-            let Some(oldest) = c.order.pop_front() else { break };
+            let Some(oldest) = c.order.pop_front() else {
+                break;
+            };
             if let Some(Some(gone)) = c.map.remove(&oldest) {
                 c.bytes = c.bytes.saturating_sub(gone.len());
             }
@@ -245,12 +247,12 @@ pub async fn walk(
             // this scan did not cover.
             Read::Absent => at.missing += 1,
         }
-        if seen % REPORT_EVERY == 0 {
+        if seen.is_multiple_of(REPORT_EVERY) {
             progress(seen, total);
         }
         // A repository is thousands of files and the tab has a cursor blinking
         // in it. Nothing here is in a hurry.
-        if seen % YIELD_EVERY == 0 {
+        if seen.is_multiple_of(YIELD_EVERY) {
             gloo_timers::future::TimeoutFuture::new(0).await;
         }
     }

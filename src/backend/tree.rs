@@ -86,7 +86,12 @@ impl DirTmp {
         cur.files.insert(file, rel.to_path_buf());
     }
 
-    fn build(self, name: String, path: PathBuf, statuses: &HashMap<PathBuf, ChangeKind>) -> FileNode {
+    fn build(
+        self,
+        name: String,
+        path: PathBuf,
+        statuses: &HashMap<PathBuf, ChangeKind>,
+    ) -> FileNode {
         let mut children = Vec::new();
         let mut changed = 0;
         for (dname, dtmp) in self.dirs {
@@ -336,10 +341,7 @@ mod tests {
     use super::*;
 
     fn statuses(pairs: &[(&str, ChangeKind)]) -> HashMap<PathBuf, ChangeKind> {
-        pairs
-            .iter()
-            .map(|(p, k)| (PathBuf::from(p), *k))
-            .collect()
+        pairs.iter().map(|(p, k)| (PathBuf::from(p), *k)).collect()
     }
 
     fn names(node: &FileNode) -> Vec<String> {
@@ -386,7 +388,10 @@ mod tests {
         assert_eq!(rows_of(&tree, &expanded), vec!["", "src"]);
 
         expanded.insert(PathBuf::from("src"), true);
-        assert_eq!(rows_of(&tree, &expanded), vec!["", "src", "src/deep", "src/a.rs"]);
+        assert_eq!(
+            rows_of(&tree, &expanded),
+            vec!["", "src", "src/deep", "src/a.rs"]
+        );
     }
 
     #[test]
@@ -395,7 +400,7 @@ mod tests {
         let tree = build_tree_from_paths("pr", paths, &statuses(&[]));
         let mut expanded = HashMap::new();
         seed_expansion(&tree, true, &mut expanded);
-        assert_eq!(expanded[&PathBuf::from("src")], false, "nothing changed yet");
+        assert!(!expanded[&PathBuf::from("src")], "nothing changed yet");
 
         // The same tree, now with a change in it — the state of a directory
         // already seen must not be rewritten under the reader.
@@ -405,7 +410,7 @@ mod tests {
             &statuses(&[("src/deep/b.rs", ChangeKind::Modified)]),
         );
         seed_expansion(&changed, false, &mut expanded);
-        assert_eq!(expanded[&PathBuf::from("src")], false, "stayed put");
+        assert!(!expanded[&PathBuf::from("src")], "stayed put");
         assert_eq!(rows_of(&changed, &expanded), vec!["", "src"]);
     }
 
@@ -421,11 +426,17 @@ mod tests {
             &statuses(&[("new/x.rs", ChangeKind::Added)]),
         );
         seed_expansion(&later, false, &mut expanded);
-        assert_eq!(expanded[&PathBuf::from("new")], false);
+        assert!(!expanded[&PathBuf::from("new")]);
         // It shows up, carrying its count — it just does not unroll.
         let rows = visible_rows(&later, &expanded);
         let dir = rows.iter().find(|r| r.name == "new").unwrap();
-        assert_eq!(dir.kind, RowKind::Dir { open: false, changed: 1 });
+        assert_eq!(
+            dir.kind,
+            RowKind::Dir {
+                open: false,
+                changed: 1
+            }
+        );
     }
 
     #[test]

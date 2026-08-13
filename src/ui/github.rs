@@ -12,10 +12,10 @@ use std::time::Duration;
 
 use dioxus::prelude::*;
 
-use crate::backend::auth::{self, open_browser, Token};
+use crate::backend::auth::{self, Token, open_browser};
 use crate::backend::blobs;
 use crate::backend::github::{
-    self, parse_owner, parse_target, OwnerHit, PrSummary, RepoHit, RepoRef, RepoView,
+    self, OwnerHit, PrSummary, RepoHit, RepoRef, RepoView, parse_owner, parse_target,
 };
 
 use super::app::{Account, PrList, St};
@@ -173,8 +173,7 @@ const NEW_TOKEN_URL: &str = "https://github.com/settings/personal-access-tokens/
 /// is up from the first frame, while the saved token is still being checked, so
 /// a rejection arrives after whatever was decided on the way in.
 fn form_open(form: &Signal<Option<bool>>, account: &Account) -> bool {
-    form.read()
-        .unwrap_or(matches!(account, Account::Failed(_)))
+    form.read().unwrap_or(matches!(account, Account::Failed(_)))
 }
 
 /// Signed out: say what that costs, and offer the token form to anyone it costs

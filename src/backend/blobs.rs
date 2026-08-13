@@ -127,8 +127,10 @@ async fn build() -> bool {
         opfs::remove_all(&root, "blob").await;
         opfs::remove_all(&root, "snap").await;
     }
-    let (Some(blobs), Some(snaps)) = (opfs::dir(&root, "blob").await, opfs::dir(&root, "snap").await)
-    else {
+    let (Some(blobs), Some(snaps)) = (
+        opfs::dir(&root, "blob").await,
+        opfs::dir(&root, "snap").await,
+    ) else {
         UNAVAILABLE.with(|u| *u.borrow_mut() = true);
         return false;
     };

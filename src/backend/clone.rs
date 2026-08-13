@@ -23,12 +23,12 @@ use std::cell::{Cell, RefCell};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use futures_util::stream::{self, StreamExt};
 
+use super::FileContent;
 use super::blobs;
 use super::github::{self, FetchJob, RepoRef, Snapshot, TreeEntry};
-use super::FileContent;
 
 /// How many files to fetch at once. The CDN is HTTP/2 and does not mind, but a
 /// browser tab has other things to do with its connection and its main thread.
@@ -352,9 +352,11 @@ pub async fn hydrate(
 
     let token = &token;
     let repo = &repo;
-    let mut stream = stream::iter(files.into_iter().map(|want| async move {
-        fetch(token, repo, &want).await.map_err(|_| ())
-    }))
+    let mut stream = stream::iter(
+        files
+            .into_iter()
+            .map(|want| async move { fetch(token, repo, &want).await.map_err(|_| ()) }),
+    )
     .buffer_unordered(CONCURRENCY);
 
     while let Some(result) = stream.next().await {
@@ -366,7 +368,7 @@ pub async fn hydrate(
         // Not every file: a repository is thousands of them, and each report
         // redraws the bar it is written on. Often enough to look like it is
         // moving is what a progress note is for.
-        if at.done <= 2 || at.done % REPORT_EVERY == 0 || at.finished() {
+        if at.done <= 2 || at.done.is_multiple_of(REPORT_EVERY) || at.finished() {
             progress(at);
         }
         if !wanted() {
@@ -390,7 +392,7 @@ pub async fn hydrate(
         }
         // And a turn for the event loop regardless, so the tree still scrolls
         // and the panes still drag while several thousand files come down.
-        if at.done % YIELD_EVERY == 0 {
+        if at.done.is_multiple_of(YIELD_EVERY) {
             breathe(0).await;
         }
     }

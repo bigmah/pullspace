@@ -37,9 +37,7 @@ pub fn Bottom() -> Element {
                 rsx! { div { class: "panel-empty", "Searching…" } },
             )
         }
-        Panel::Results { title, hits, note } => {
-            (title.clone(), note.clone(), hit_list(st, hits))
-        }
+        Panel::Results { title, hits, note } => (title.clone(), note.clone(), hit_list(st, hits)),
         Panel::Defs { name, syms } => (
             format!("DEFINITIONS  {name} — {}", syms.len()),
             None,
@@ -54,7 +52,10 @@ pub fn Bottom() -> Element {
             },
         ),
         Panel::Peek {
-            name, syms, at, body,
+            name,
+            syms,
+            at,
+            body,
         } => {
             let sym = syms.get(*at);
             let where_ = sym
@@ -156,7 +157,11 @@ fn marked(text: &str, marks: &[(usize, usize)]) -> Element {
     let mut parts: Vec<(bool, String)> = Vec::new();
     let mut at = 0;
     for &(start, end) in marks {
-        if start < at || end > text.len() || !text.is_char_boundary(start) || !text.is_char_boundary(end) {
+        if start < at
+            || end > text.len()
+            || !text.is_char_boundary(start)
+            || !text.is_char_boundary(end)
+        {
             continue;
         }
         if start > at {

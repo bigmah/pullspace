@@ -1642,6 +1642,11 @@ button { font-family: inherit; user-select: none; }
   box-shadow: inset 2px 0 0 var(--accent);
 }
 
+/* An account is a different kind of row from a repository: it opens a list
+   rather than loading anything. The accent on the login says so, and the
+   trailing slash is the shape of what clicking it types into the box. */
+.repoitem.account .reponame { color: var(--accent); }
+
 .repotop { display: flex; align-items: baseline; gap: 8px; overflow: hidden; }
 
 .reponame {

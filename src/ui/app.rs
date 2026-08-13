@@ -290,6 +290,16 @@ impl St {
         self.token_value().unwrap_or_default()
     }
 
+    /// Whose token it is, empty when signed out. What tells "list this
+    /// account's repositories" from "list mine" — only one of those two can
+    /// see anything private.
+    pub fn viewer(&self) -> String {
+        match &*self.account.peek() {
+            Account::SignedIn { login } => login.clone(),
+            _ => String::new(),
+        }
+    }
+
     fn bump_tick(&self) {
         let mut tick = self.refresh_tick;
         let v = *tick.peek();

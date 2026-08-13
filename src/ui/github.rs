@@ -14,7 +14,9 @@ use dioxus::prelude::*;
 
 use crate::backend::auth::{self, open_browser, Token};
 use crate::backend::blobs;
-use crate::backend::github::{self, parse_target, PrSummary, RepoHit, RepoRef, RepoView};
+use crate::backend::github::{
+    self, parse_owner, parse_target, OwnerHit, PrSummary, RepoHit, RepoRef, RepoView,
+};
 
 use super::app::{Account, PrList, St};
 use super::compat;
@@ -384,6 +386,25 @@ const SEARCH_DEBOUNCE: Duration = Duration::from_millis(350);
 /// GitHub, and nobody reads what comes back.
 const MIN_QUERY: usize = 2;
 
+/// How much of one account's repositories to hold. A page, the largest GitHub
+/// gives — fetched once, so that typing inside an account narrows what is
+/// already here rather than costing a request per keystroke.
+const OWNER_PAGE: u32 = 100;
+
+/// One question for the picker to answer: what is typed, and who is asking.
+///
+/// All three are read in the render pass and carried into the lookup rather
+/// than read again once it gets there. A lookup runs after a debounce and a
+/// round trip, and the box may well have moved on by then — what comes back
+/// should be an answer to the question that was asked.
+#[derive(Clone)]
+struct Ask {
+    query: String,
+    token: String,
+    /// The signed-in login, empty when signed out.
+    viewer: String,
+}
+
 /// What the last lookup turned up, and what it was looking for.
 ///
 /// The query travels with the results because the box runs ahead of them: it is
@@ -392,15 +413,219 @@ const MIN_QUERY: usize = 2;
 #[derive(Clone, PartialEq)]
 struct Suggestions {
     query: String,
+    /// The account the query names, when it names one. Offered above the
+    /// repositories, since "everything DioxusLabs owns" is a different answer
+    /// from "repositories with dioxus in the name".
+    owner: Option<OwnerHit>,
+    /// Whose repositories these are, when the query is scoped to one account.
+    scope: Option<String>,
     items: Vec<RepoHit>,
     error: Option<String>,
 }
 
+impl Suggestions {
+    fn for_query(query: String) -> Self {
+        Suggestions {
+            query,
+            owner: None,
+            scope: None,
+            items: Vec::new(),
+            error: None,
+        }
+    }
+
+    /// The list as it is drawn and as the arrow keys walk it — one sequence, so
+    /// that what is highlighted and what Enter opens cannot disagree.
+    fn rows(&self) -> Vec<Row> {
+        self.owner
+            .iter()
+            .cloned()
+            .map(Row::Owner)
+            .chain(self.items.iter().cloned().map(Row::Repo))
+            .collect()
+    }
+}
+
+/// One row of the picker's list.
+#[derive(Clone, PartialEq)]
+enum Row {
+    /// An account. Opens up what it owns rather than loading anything.
+    Owner(OwnerHit),
+    Repo(RepoHit),
+}
+
 /// The suggestions on offer, read from outside the render pass.
-fn suggested(found: &Resource<Option<Suggestions>>) -> Vec<RepoHit> {
+fn suggested(found: &Resource<Option<Suggestions>>) -> Vec<Row> {
     match &*found.peek() {
-        Some(Some(s)) => s.items.clone(),
+        Some(Some(s)) => s.rows(),
         _ => Vec::new(),
+    }
+}
+
+/// The account a scoped query names, and whatever is typed after the slash.
+///
+/// `dioxuslabs/` is everything that account owns; `dioxuslabs/d` narrows it.
+/// A second slash means a URL or a link to a pull request, and neither of those
+/// is a filter — they go the ordinary way, through [`parse_target`].
+fn owner_scope(q: &str) -> Option<(String, String)> {
+    let (owner, rest) = q.split_once('/')?;
+    if rest.contains('/') {
+        return None;
+    }
+    Some((parse_owner(owner)?, rest.trim().to_string()))
+}
+
+/// The repositories of one account whose names contain `frag`.
+fn narrow(all: &[RepoHit], frag: &str) -> Vec<RepoHit> {
+    let needle = frag.to_lowercase();
+    let mut hits: Vec<RepoHit> = all
+        .iter()
+        .filter(|h| h.repo.name.to_lowercase().contains(&needle))
+        .cloned()
+        .collect();
+    // What starts with it first, what merely contains it after — and within
+    // each, the order GitHub sent them in: most recently pushed.
+    hits.sort_by_key(|h| !h.repo.name.to_lowercase().starts_with(&needle));
+    hits.truncate(SUGGESTION_LIMIT as usize);
+    hits
+}
+
+/// What to offer for one query, and what to spend finding it out.
+///
+/// Four answers, because there are four things a person types into this box:
+/// nothing, which offers their own repositories; an account, which offers
+/// everything it owns; `owner/…`, which narrows that list as you type; and
+/// free text, which is a search of GitHub at large.
+async fn suggest(
+    ask: Ask,
+    mut seen: Signal<HashMap<String, Suggestions>>,
+    owned: Signal<HashMap<String, Vec<RepoHit>>>,
+) -> Suggestions {
+    let q = ask.query.clone();
+    let scope = owner_scope(&q);
+
+    // An answer already in hand: no wait, and no request.
+    if let Some(done) = seen.peek().get(&q) {
+        return done.clone();
+    }
+    // Nor is one needed to narrow a list already fetched, which is what makes
+    // typing inside an account cost nothing at all. Narrowing to nothing falls
+    // through to a search instead: a page of an account's repositories is not
+    // always all of them.
+    if let Some((owner, frag)) = &scope {
+        let held = owned.peek().get(&owner.to_lowercase()).cloned();
+        if let Some(all) = held {
+            let items = narrow(&all, frag);
+            if !items.is_empty() || frag.is_empty() {
+                return Suggestions {
+                    scope: Some(owner.clone()),
+                    items,
+                    ..Suggestions::for_query(q)
+                };
+            }
+        }
+    }
+    // One letter is not a search, and neither is half of one. A scoped query is
+    // exempt: `k/` names an account rather than guessing at one.
+    if scope.is_none() && !q.is_empty() && q.chars().count() < MIN_QUERY {
+        return Suggestions::for_query(q);
+    }
+    // Debounce: the next keystroke drops this task where it stands, so nothing
+    // reaches GitHub until the typing stops.
+    compat::sleep(SEARCH_DEBOUNCE).await;
+
+    let out = match &scope {
+        Some((owner, frag)) => scoped(&ask, owner, frag, owned).await,
+        None if q.is_empty() => mine(&ask).await,
+        None => searched(&ask).await,
+    };
+    // Errors are not answers. A budget that has since refilled should not go on
+    // being reported for the rest of the session.
+    if out.error.is_none() {
+        seen.write().insert(q, out.clone());
+    }
+    out
+}
+
+/// Nothing typed: the signed-in account's own repositories.
+async fn mine(ask: &Ask) -> Suggestions {
+    let base = Suggestions::for_query(ask.query.clone());
+    match github::my_repos(&ask.token, SUGGESTION_LIMIT).await {
+        Ok(items) => Suggestions { items, ..base },
+        Err(e) => Suggestions {
+            error: Some(format!("{e:#}")),
+            ..base
+        },
+    }
+}
+
+/// Free text: what GitHub's index ranks for it, and — when the text is shaped
+/// like a login — the account of that name.
+///
+/// Both at once, so the account row arrives with the repositories rather than
+/// after them. They are separate budgets as well as separate requests, which is
+/// why one running out does not take the other's answer down with it.
+async fn searched(ask: &Ask) -> Suggestions {
+    let base = Suggestions::for_query(ask.query.clone());
+    let account = async {
+        match parse_owner(&ask.query) {
+            Some(login) => github::lookup_owner(&ask.token, &login).await,
+            None => None,
+        }
+    };
+    let (owner, repos) = futures_util::future::join(
+        account,
+        github::search_repos(&ask.token, &ask.query, SUGGESTION_LIMIT),
+    )
+    .await;
+    match repos {
+        Ok(items) => Suggestions {
+            owner,
+            items,
+            ..base
+        },
+        Err(e) => Suggestions {
+            owner,
+            error: Some(format!("{e:#}")),
+            ..base
+        },
+    }
+}
+
+/// One account's repositories, narrowed by whatever follows the slash.
+///
+/// The list comes down once and every keystroke after that filters what is
+/// already here — which is the point of scoping at all. `dioxuslabs/d` is a
+/// question about one account, and the search index answers a different one.
+async fn scoped(
+    ask: &Ask,
+    owner: &str,
+    frag: &str,
+    mut owned: Signal<HashMap<String, Vec<RepoHit>>>,
+) -> Suggestions {
+    let base = Suggestions::for_query(ask.query.clone());
+    let all = match github::owner_repos(&ask.token, &ask.viewer, owner, OWNER_PAGE).await {
+        Ok(all) => all,
+        Err(e) => {
+            return Suggestions {
+                error: Some(format!("{e:#}")),
+                ..base
+            };
+        }
+    };
+    owned.write().insert(owner.to_lowercase(), all.clone());
+
+    let items = narrow(&all, frag);
+    // Past the page, or renamed, or private to a token that cannot see it:
+    // whatever the reason a name typed in full is not in the list, it is still
+    // worth looking up directly — which is what a plain search does with it.
+    if items.is_empty() && !frag.is_empty() {
+        return searched(ask).await;
+    }
+    Suggestions {
+        scope: Some(owner.to_string()),
+        items,
+        ..base
     }
 }
 
@@ -412,6 +637,37 @@ fn choose(st: St, mut open: Signal<bool>, repo: RepoRef) {
     open.set(false);
     // Root scope: closing the list unmounts the row that was clicked.
     spawn_forever(load_repo_prs(st, repo));
+}
+
+/// Step into an account: the box becomes `login/`, and the list under it
+/// becomes that account's repositories.
+///
+/// It rewrites what is typed rather than keeping the account somewhere of its
+/// own, so backspacing over the slash is how you leave again. Nothing to
+/// explain, and nothing that can get out of step with the box.
+fn drill(st: St, mut highlight: Signal<usize>, login: &str) {
+    let mut input = st.repo_input;
+    input.set(format!("{login}/"));
+    highlight.set(0);
+}
+
+/// Enter, or Load: open whatever is typed.
+///
+/// Unless what is typed is an account, which has nothing to open — a person is
+/// not a pull request. Stepping into it is what was meant, and it is what the
+/// box does with `torvalds` typed in and nothing highlighted.
+fn go(st: St, mut open: Signal<bool>, highlight: Signal<usize>) {
+    let raw = st.repo_input.peek().clone();
+    if parse_target(&raw).is_none()
+        && let Some(login) = parse_owner(&raw)
+    {
+        open.set(true);
+        return drill(st, highlight, &login);
+    }
+    open.set(false);
+    // Root scope so closing the panel mid-load does not strand it on
+    // "Loading…".
+    spawn_forever(open_target(st));
 }
 
 /// Star counts run long, and the exact number is not what anyone reads.
@@ -428,9 +684,14 @@ fn stars_label(stars: u64) -> String {
 /// an `owner/repo` or pull request link straight in.
 ///
 /// Searching is what the box is for — a link is the fallback, not the price of
-/// entry. With nothing typed it offers the account's own repositories, since
-/// the pull requests you are asked to review are nearly always on one; signed
-/// out there is no such account, so it waits to be typed into instead.
+/// entry. Three things can be searched for, because three things are how people
+/// remember where code lives: the repository, the organisation that keeps it,
+/// or the person who wrote it. An account found this way is a row like any
+/// other, and opening it lists what it owns.
+///
+/// With nothing typed it offers the account's own repositories, since the pull
+/// requests you are asked to review are nearly always on one; signed out there
+/// is no such account, so it waits to be typed into instead.
 #[component]
 fn RepoPicker(autofocus: bool) -> Element {
     let st = use_context::<St>();
@@ -449,75 +710,46 @@ fn RepoPicker(autofocus: bool) -> Element {
     // a fresh request for an answer we have had once. On the minute-long search
     // budget that is most of what runs it out. Cleared with the panel, which is
     // as long as any of it is worth trusting.
-    let mut seen = use_signal(HashMap::<String, Vec<RepoHit>>::new);
+    let seen = use_signal(HashMap::<String, Suggestions>::new);
+    // And every account whose repositories have been listed, by login. Keyed
+    // apart from the queries above because one fetch answers all of them:
+    // `dioxuslabs/`, `dioxuslabs/d` and `dioxuslabs/dio` are one list, filtered
+    // three ways.
+    let owned = use_signal(HashMap::<String, Vec<RepoHit>>::new);
 
     let found = use_resource(move || {
         // Read the dependencies here, in the synchronous part: a change to
         // either cancels the lookup in flight and starts the next one.
         let showing = *open.read();
-        let query = st.repo_input.read().trim().to_string();
-        let token = st.api_token();
+        let ask = Ask {
+            query: st.repo_input.read().trim().to_string(),
+            token: st.api_token(),
+            viewer: st.viewer(),
+        };
         async move {
             if !showing {
                 return None;
             }
-            let ready = |items| {
-                Some(Suggestions {
-                    query: query.clone(),
-                    items,
-                    error: None,
-                })
-            };
-            // An answer already in hand: no wait, and no request.
-            if let Some(items) = seen.peek().get(&query).cloned() {
-                return ready(items);
-            }
-            // One letter is not a search, and neither is half of one.
-            if !query.is_empty() && query.chars().count() < MIN_QUERY {
-                return ready(Vec::new());
-            }
-            // Debounce: the next keystroke drops this task where it stands, so
-            // nothing reaches GitHub until the typing stops.
-            compat::sleep(SEARCH_DEBOUNCE).await;
-            let q = query.clone();
-            let hits = if q.is_empty() {
-                github::my_repos(&token, SUGGESTION_LIMIT).await.map_err(|e| format!("{e:#}"))
-            } else {
-                github::search_repos(&token, &q, SUGGESTION_LIMIT).await.map_err(|e| format!("{e:#}"))
-            };
-            Some(match hits {
-                Ok(items) => {
-                    seen.write().insert(query.clone(), items.clone());
-                    Suggestions {
-                        query,
-                        items,
-                        error: None,
-                    }
-                }
-                Err(e) => Suggestions {
-                    query,
-                    items: Vec::new(),
-                    error: Some(e),
-                },
-            })
+            Some(suggest(ask, seen, owned).await)
         }
     });
 
     let showing = *open.read();
     let current = found.cloned().flatten();
     let settled = current.as_ref().is_some_and(|s| s.query == typed.trim());
-    let items = current.as_ref().map(|s| s.items.clone()).unwrap_or_default();
+    let rows = current.as_ref().map(|s| s.rows()).unwrap_or_default();
+    let scope = current.as_ref().and_then(|s| s.scope.clone());
     let error = current.as_ref().and_then(|s| s.error.clone());
-    let hi = (*highlight.read()).min(items.len().saturating_sub(1));
+    let hi = (*highlight.read()).min(rows.len().saturating_sub(1));
 
     rsx! {
         div { class: "ghsection",
-            div { class: "ghlabel", "Repository or pull request" }
+            div { class: "ghlabel", "Repository, owner or pull request" }
             div { class: "ghrow",
                 input {
                     class: "ghinput",
                     r#type: "text",
-                    placeholder: "search repositories · owner/repo · or a link to a pull request",
+                    placeholder: "search repos, orgs and users · owner/repo · or a link to a pull request",
                     spellcheck: "false",
                     autocomplete: "off",
                     value: "{typed}",
@@ -537,14 +769,14 @@ fn RepoPicker(autofocus: bool) -> Element {
                     onkeydown: move |e| {
                         // Whatever is on screen, rather than the render that
                         // produced this handler — the list moves under it.
-                        let items = suggested(&found);
-                        let at = (*highlight.peek()).min(items.len().saturating_sub(1));
+                        let rows = suggested(&found);
+                        let at = (*highlight.peek()).min(rows.len().saturating_sub(1));
                         match e.key() {
-                            Key::ArrowDown if !items.is_empty() => {
+                            Key::ArrowDown if !rows.is_empty() => {
                                 e.prevent_default();
-                                highlight.set((at + 1).min(items.len() - 1));
+                                highlight.set((at + 1).min(rows.len() - 1));
                             }
-                            Key::ArrowUp if !items.is_empty() => {
+                            Key::ArrowUp if !rows.is_empty() => {
                                 e.prevent_default();
                                 highlight.set(at.saturating_sub(1));
                             }
@@ -557,17 +789,13 @@ fn RepoPicker(autofocus: bool) -> Element {
                                     open.set(false);
                                 }
                             }
-                            Key::Enter => match items.get(at) {
+                            Key::Enter => match rows.get(at) {
                                 // What is highlighted in the list wins…
-                                Some(hit) => choose(st, open, hit.repo.clone()),
+                                Some(Row::Repo(hit)) => choose(st, open, hit.repo.clone()),
+                                Some(Row::Owner(o)) => drill(st, highlight, &o.login),
                                 // …but a pasted link, or a name typed out in
-                                // full, never needed the list. Root scope so
-                                // closing the panel mid-load does not strand
-                                // it on "Loading…".
-                                None => {
-                                    open.set(false);
-                                    spawn_forever(open_target(st));
-                                }
+                                // full, never needed the list.
+                                None => go(st, open, highlight),
                             },
                             _ => {}
                         }
@@ -575,40 +803,111 @@ fn RepoPicker(autofocus: bool) -> Element {
                 }
                 button {
                     class: "primarybtn",
-                    onclick: move |_| {
-                        open.set(false);
-                        spawn_forever(open_target(st));
-                    },
+                    onclick: move |_| go(st, open, highlight),
                     "Load"
                 }
             }
             if showing {
+                // Shown above the list rather than instead of it: a spent
+                // search budget can arrive alongside an account that was found
+                // on a different one, and dropping either would be a lie.
                 if let Some(e) = error {
                     div { class: "gherror", "{e}" }
-                } else if !items.is_empty() {
+                }
+                if !rows.is_empty() {
+                    if let Some(owner) = scope.clone() {
+                        div { class: "ghlabel", "Repositories in {owner}" }
+                    }
                     div { class: "repolist",
-                        for (i , hit) in items.iter().enumerate() {
-                            RepoRow {
-                                key: "{hit.repo}",
-                                hit: hit.clone(),
-                                active: i == hi,
-                                open,
-                                index: i,
-                                highlight,
+                        for (i , row) in rows.iter().enumerate() {
+                            match row {
+                                Row::Owner(o) => rsx! {
+                                    OwnerRow {
+                                        key: "owner:{o.login}",
+                                        owner: o.clone(),
+                                        active: i == hi,
+                                        index: i,
+                                        highlight,
+                                    }
+                                },
+                                Row::Repo(hit) => rsx! {
+                                    RepoRow {
+                                        key: "repo:{hit.repo}",
+                                        hit: hit.clone(),
+                                        active: i == hi,
+                                        open,
+                                        index: i,
+                                        highlight,
+                                    }
+                                },
                             }
                         }
                     }
                 } else if !settled {
                     div { class: "ghnote", "Searching GitHub…" }
+                } else if let Some(owner) = scope {
+                    div { class: "ghnote", "{owner} has no repositories to show." }
                 } else if typed.trim().chars().count() < MIN_QUERY {
                     div { class: "ghnote",
-                        "Type a name to search GitHub, or paste a link to a pull request."
+                        "Type a repository, organisation or user name to search GitHub, \
+                         or paste a link to a pull request."
                     }
                 } else {
-                    div { class: "ghnote", "No repositories match “{typed}”." }
+                    div { class: "ghnote", "Nothing on GitHub matches “{typed}”." }
                 }
             }
         }
+    }
+}
+
+/// An account: the row that opens up what it owns.
+///
+/// It sits above the repositories rather than among them because it is a
+/// different kind of answer — a place to look rather than a thing to open — and
+/// it reads as one: the login with the slash already on the end, which is
+/// exactly what clicking it types.
+#[component]
+fn OwnerRow(owner: OwnerHit, active: bool, index: usize, highlight: Signal<usize>) -> Element {
+    let st = use_context::<St>();
+    let class = if active {
+        "repoitem account on"
+    } else {
+        "repoitem account"
+    };
+    let login = owner.login.clone();
+    let mut highlight = highlight;
+    rsx! {
+        div {
+            class: "{class}",
+            // Keeps the caret in the box. Stepping into an account only
+            // rewrites what is typed, and the next thing anyone does is type
+            // the rest of it.
+            onmousedown: move |e| e.prevent_default(),
+            onclick: move |_| drill(st, highlight, &login),
+            onmouseenter: move |_| highlight.set(index),
+            div { class: "repotop",
+                span { class: "reponame", "{owner.login}/" }
+                span { class: "repotag", if owner.org { "org" } else { "user" } }
+                if owner.public_repos > 0 {
+                    span { class: "repostars", "{owner.public_repos} public" }
+                }
+            }
+            div { class: "repodesc", "{owner_blurb(&owner)}" }
+        }
+    }
+}
+
+/// The line under an account's login: who they are, and what the row does.
+fn owner_blurb(owner: &OwnerHit) -> String {
+    let what = if owner.org {
+        "this organisation"
+    } else {
+        "this account"
+    };
+    if owner.name.is_empty() {
+        format!("Browse the repositories {what} owns")
+    } else {
+        format!("{} — browse what {what} owns", owner.name)
     }
 }
 
@@ -830,4 +1129,93 @@ pub(super) async fn open_pr(st: St, repo: RepoRef, number: u64) {
 
     prs.set(PrList::Idle);
     st.enter_pr(detail);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn hit(full: &str) -> RepoHit {
+        let (owner, name) = full.split_once('/').unwrap();
+        RepoHit {
+            repo: RepoRef {
+                owner: owner.to_string(),
+                name: name.to_string(),
+            },
+            description: String::new(),
+            private: false,
+            fork: false,
+            archived: false,
+            stars: 0,
+            pushed: String::new(),
+        }
+    }
+
+    #[test]
+    fn a_trailing_slash_scopes_the_query_to_one_account() {
+        assert_eq!(
+            owner_scope("DioxusLabs/"),
+            Some(("DioxusLabs".to_string(), String::new()))
+        );
+        assert_eq!(
+            owner_scope("DioxusLabs/dio"),
+            Some(("DioxusLabs".to_string(), "dio".to_string()))
+        );
+    }
+
+    #[test]
+    fn a_link_is_not_a_filter() {
+        // Two slashes: a URL, or a pull request. Both go the ordinary way.
+        assert_eq!(owner_scope("https://github.com/rust-lang/rust"), None);
+        assert_eq!(owner_scope("rust-lang/rust/pull/12345"), None);
+        // And free text is not scoped at all.
+        assert_eq!(owner_scope("diff viewer"), None);
+    }
+
+    #[test]
+    fn narrowing_matches_anywhere_but_ranks_the_start_first() {
+        let all = [hit("o/serde"), hit("o/dioxus-cli"), hit("o/dioxus")];
+        let got = narrow(&all, "dioxus");
+        let names: Vec<_> = got.iter().map(|h| h.repo.name.clone()).collect();
+        assert_eq!(names, ["dioxus-cli", "dioxus"], "serde does not contain it");
+
+        // Case is not something anyone types carefully into a filter.
+        assert_eq!(narrow(&all, "DIOX").len(), 2);
+        // A substring that starts nothing still matches.
+        assert_eq!(narrow(&all, "-cli").len(), 1);
+    }
+
+    #[test]
+    fn an_empty_filter_keeps_the_order_github_sent() {
+        let all = [hit("o/newest"), hit("o/older"), hit("o/oldest")];
+        let names: Vec<_> = narrow(&all, "")
+            .iter()
+            .map(|h| h.repo.name.clone())
+            .collect();
+        assert_eq!(names, ["newest", "older", "oldest"]);
+    }
+
+    #[test]
+    fn narrowing_stops_at_what_the_list_can_show() {
+        let all: Vec<RepoHit> = (0..40).map(|i| hit(&format!("o/thing{i}"))).collect();
+        assert_eq!(narrow(&all, "thing").len(), SUGGESTION_LIMIT as usize);
+    }
+
+    #[test]
+    fn the_rows_put_the_account_above_its_repositories() {
+        let found = Suggestions {
+            owner: Some(OwnerHit {
+                login: "DioxusLabs".to_string(),
+                org: true,
+                name: String::new(),
+                public_repos: 42,
+            }),
+            items: vec![hit("DioxusLabs/dioxus")],
+            ..Suggestions::for_query("dioxuslabs".to_string())
+        };
+        assert!(matches!(
+            found.rows().as_slice(),
+            [Row::Owner(_), Row::Repo(_)]
+        ));
+    }
 }

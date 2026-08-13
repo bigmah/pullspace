@@ -69,6 +69,20 @@ impl std::fmt::Display for RepoRef {
     }
 }
 
+/// Strip scheme / host / SSH prefix down to the `owner/repo/...` tail.
+///
+/// `None` when there was none of that to strip, which is how the caller tells
+/// something pasted from a browser from something typed by hand — the two do
+/// not mean quite the same thing once the host is off the front.
+fn strip_host(s: &str) -> Option<&str> {
+    s.strip_prefix("https://")
+        .or_else(|| s.strip_prefix("http://"))
+        .map(|r| r.trim_start_matches("www."))
+        .and_then(|r| r.strip_prefix("github.com/"))
+        .or_else(|| s.strip_prefix("git@github.com:"))
+        .or_else(|| s.strip_prefix("github.com/"))
+}
+
 /// Accepts what a person is likely to paste: `owner/repo`, a browser URL, an
 /// SSH remote, or a link to a specific pull request.
 pub fn parse_target(input: &str) -> Option<(RepoRef, Option<u64>)> {
@@ -77,15 +91,7 @@ pub fn parse_target(input: &str) -> Option<(RepoRef, Option<u64>)> {
         return None;
     }
 
-    // Strip scheme / host / SSH prefix down to the `owner/repo/...` tail.
-    let rest = s
-        .strip_prefix("https://")
-        .or_else(|| s.strip_prefix("http://"))
-        .map(|r| r.trim_start_matches("www."))
-        .and_then(|r| r.strip_prefix("github.com/"))
-        .or_else(|| s.strip_prefix("git@github.com:"))
-        .or_else(|| s.strip_prefix("github.com/"))
-        .unwrap_or(s);
+    let rest = strip_host(s).unwrap_or(s);
 
     let mut parts = rest.split('/').filter(|p| !p.is_empty());
     let owner = parts.next()?.to_string();
@@ -100,6 +106,46 @@ pub fn parse_target(input: &str) -> Option<(RepoRef, Option<u64>)> {
         _ => None,
     };
     Some((RepoRef { owner, name }, number))
+}
+
+/// The account one piece of text names, when it names an account and not a
+/// repository inside one.
+///
+/// `torvalds`, `torvalds/`, `@torvalds`, and the two URLs GitHub hands out for
+/// an account: its profile, and the `orgs/…/repositories` page the
+/// Repositories tab lands on. Anything with a repository in it belongs to
+/// [`parse_target`] instead.
+///
+/// The login is checked against GitHub's own rule rather than sent as typed:
+/// it is what keeps a half-written search phrase from costing a request that
+/// can only come back 404.
+pub fn parse_owner(input: &str) -> Option<String> {
+    let s = input.trim();
+    let hosted = strip_host(s);
+    let rest = hosted.unwrap_or(s);
+    // Only from a URL: `orgs/x` typed by hand is a repository called `x`.
+    let rest = match hosted {
+        Some(_) => rest.strip_prefix("orgs/").unwrap_or(rest),
+        None => rest,
+    };
+
+    let mut parts = rest.split('/').filter(|p| !p.is_empty());
+    let login = parts.next()?.trim_start_matches('@');
+    // The Repositories tab is still the account; a repository name is not.
+    if !matches!(parts.next(), None | Some("repositories")) {
+        return None;
+    }
+    is_login(login).then(|| login.to_string())
+}
+
+/// GitHub's rule for a login: letters, digits and hyphens, up to 39 of them,
+/// and not starting or ending with one.
+fn is_login(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 39
+        && !s.starts_with('-')
+        && !s.ends_with('-')
+        && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
 }
 
 // ------------------------------------------------------------------ request
@@ -358,7 +404,116 @@ pub async fn my_repos(token: &str, limit: u32) -> Result<Vec<RepoHit>> {
          &affiliation=owner,collaborator,organization_member"
     );
     let raw: Vec<RawRepo> = get_json(token, &url).await?;
-    Ok(raw.into_iter().filter_map(hit_of).collect())
+    Ok(hits_of(raw))
+}
+
+fn hits_of(raw: Vec<RawRepo>) -> Vec<RepoHit> {
+    raw.into_iter().filter_map(hit_of).collect()
+}
+
+// -------------------------------------------------------- finding an account
+
+#[derive(Deserialize)]
+struct RawOwner {
+    login: String,
+    /// `User` or `Organization`.
+    #[serde(rename = "type", default)]
+    kind: String,
+    /// The display name — "The Rust Programming Language" over `rust-lang`.
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    public_repos: u64,
+}
+
+/// An account offered as a suggestion: the row that opens up everything it
+/// owns, rather than one repository.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct OwnerHit {
+    pub login: String,
+    /// An organisation rather than a person. Only decoration — both list their
+    /// repositories the same way.
+    pub org: bool,
+    /// The display name, empty when the account has none or it is the login
+    /// again.
+    pub name: String,
+    pub public_repos: u64,
+}
+
+fn owner_of(raw: RawOwner) -> Option<OwnerHit> {
+    if raw.login.is_empty() {
+        return None;
+    }
+    let name = raw.name.unwrap_or_default();
+    let name = if name.eq_ignore_ascii_case(&raw.login) {
+        String::new()
+    } else {
+        name
+    };
+    Some(OwnerHit {
+        org: raw.kind == "Organization",
+        login: raw.login,
+        name,
+        public_repos: raw.public_repos,
+    })
+}
+
+/// The account a name belongs to, if it belongs to one.
+///
+/// This is what makes typing an organisation's name work rather than nearly
+/// work: the search index ranks repositories by *their* names, so an
+/// organisation whose repositories are not called after it — which is most of
+/// them — cannot be found by searching for it. A login, on the other hand, is
+/// a lookup and always exact.
+///
+/// It costs one request on the `core` budget, where typing otherwise spends
+/// only `search`. That is the trade, and it is the right way round: `core` is
+/// sixty an hour signed out against ten a minute for `search`, and this only
+/// goes out for text shaped like a login in the first place.
+///
+/// `None` covers every way it can fail, because they all mean the same thing
+/// here — no account row to offer, and a search still on its way.
+pub async fn lookup_owner(token: &str, login: &str) -> Option<OwnerHit> {
+    if !is_login(login) {
+        return None;
+    }
+    let url = format!("{API}/users/{}", encode_segment(login));
+    owner_of(get_json::<RawOwner>(token, &url).await.ok()?)
+}
+
+/// Everything one account owns, most recently pushed first.
+///
+/// Three endpoints, because GitHub keeps three lists and only two of them can
+/// see anything private: `/user/repos` for the signed-in account itself,
+/// `/orgs/…/repos` for an organisation the token is a member of, and
+/// `/users/…/repos`, which is public, answers for people and organisations
+/// alike, and is where anonymous browsing ends up.
+pub async fn owner_repos(
+    token: &str,
+    viewer: &str,
+    owner: &str,
+    limit: u32,
+) -> Result<Vec<RepoHit>> {
+    let login = encode_segment(owner);
+    let page = format!("sort=pushed&direction=desc&per_page={limit}");
+
+    // Your own account, which is the one whose private repositories you are
+    // most likely to be looking for.
+    if !viewer.is_empty() && viewer.eq_ignore_ascii_case(owner) {
+        let url = format!("{API}/user/repos?affiliation=owner&{page}");
+        return Ok(hits_of(get_json(token, &url).await?));
+    }
+    // A member's token sees an organisation's private repositories here and
+    // nowhere else. Anonymously this answers with the same public list as the
+    // call below, so it is not worth the request — and 404s for a person.
+    if !token.is_empty() {
+        let url = format!("{API}/orgs/{login}/repos?type=all&{page}");
+        if let Ok(raw) = get_json::<Vec<RawRepo>>(token, &url).await {
+            return Ok(hits_of(raw));
+        }
+    }
+    let url = format!("{API}/users/{login}/repos?{page}");
+    Ok(hits_of(get_json(token, &url).await?))
 }
 
 /// A repository's default branch and the commit at its tip.
@@ -1107,6 +1262,69 @@ mod tests {
         assert!(parse_target("").is_none());
         assert!(parse_target("   ").is_none());
         assert!(parse_target("just-an-owner").is_none());
+    }
+
+    #[test]
+    fn an_owner_is_read_however_it_arrives() {
+        for typed in [
+            "torvalds",
+            "  torvalds  ",
+            "torvalds/",
+            "@torvalds",
+            "github.com/torvalds",
+            "https://github.com/torvalds",
+            "https://www.github.com/torvalds/",
+            "https://github.com/orgs/torvalds/repositories",
+        ] {
+            assert_eq!(parse_owner(typed).as_deref(), Some("torvalds"), "{typed}");
+        }
+    }
+
+    #[test]
+    fn a_repository_is_not_an_owner() {
+        // Both halves named: that is a target, not an account.
+        assert!(parse_owner("rust-lang/rust").is_none());
+        assert!(parse_owner("https://github.com/rust-lang/rust/pull/1").is_none());
+        // `orgs/` only counts as GitHub's own URL, never as something typed.
+        assert_eq!(parse_owner("orgs/rust-lang").as_deref(), None);
+    }
+
+    #[test]
+    fn only_a_login_shaped_name_is_worth_a_request() {
+        assert!(parse_owner("").is_none());
+        assert!(parse_owner("two words").is_none());
+        assert!(parse_owner("dots.and.such").is_none());
+        assert!(parse_owner("-leading").is_none());
+        assert!(parse_owner("trailing-").is_none());
+        assert!(parse_owner(&"a".repeat(40)).is_none());
+        assert_eq!(parse_owner(&"a".repeat(39)).unwrap().len(), 39);
+    }
+
+    #[test]
+    fn an_owner_hit_keeps_what_tells_two_accounts_apart() {
+        let raw: RawOwner = serde_json::from_str(
+            r#"{"login":"rust-lang","type":"Organization",
+                "name":"The Rust Programming Language","public_repos":142}"#,
+        )
+        .unwrap();
+        let hit = owner_of(raw).unwrap();
+        assert!(hit.org);
+        assert_eq!(hit.name, "The Rust Programming Language");
+        assert_eq!(hit.public_repos, 142);
+    }
+
+    #[test]
+    fn an_owner_hit_survives_a_bare_response() {
+        let raw: RawOwner = serde_json::from_str(r#"{"login":"bigmah"}"#).unwrap();
+        let hit = owner_of(raw).unwrap();
+        assert!(!hit.org, "no type means a person, which is the common case");
+        assert!(hit.name.is_empty());
+        assert_eq!(hit.public_repos, 0);
+
+        // A display name that is the login again says nothing twice.
+        let raw: RawOwner =
+            serde_json::from_str(r#"{"login":"bigmah","name":"BigMah"}"#).unwrap();
+        assert!(owner_of(raw).unwrap().name.is_empty());
     }
 
     #[test]

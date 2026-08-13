@@ -1,0 +1,18 @@
+# Read by `dx build` when producing the web bundle. Everything the running app
+# needs is decided in Cargo.toml and src/main.rs; this names the page and says
+# where it will be served from.
+
+[application]
+name = "pullspace"
+
+[web.app]
+title = "pullspace"
+
+# Uncomment for a GitHub Pages *project* site — `user.github.io/pullspace/`.
+#
+# The generated index.html references its .js and .wasm by absolute path, so a
+# bundle built without this 404s everywhere except the domain root. Set it to
+# the repository name; leave it off for a user/organisation site or a custom
+# domain, which are served from `/` already.
+#
+# base_path = "pullspace"

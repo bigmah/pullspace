@@ -1,37 +1,37 @@
 //! Minimal GitHub REST client: enough to list pull requests and pull the two
 //! sides of a file so the existing diff engine can render them.
 //!
-//! Everything here is blocking and side-effect free apart from the network —
-//! callers run it off the UI thread.
+//! Every call here is async and target-agnostic: the desktop build runs it on
+//! a blocking thread through ureq, the wasm build runs it on the browser's
+//! fetch, and [`http`](super::http) is where those two part ways. Nothing in
+//! this module touches the machine, which is what lets the static web build
+//! talk to GitHub with no server of its own in between.
 
 use std::path::PathBuf;
-use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
+use super::http;
 use super::tree::ChangeKind;
 use super::FileContent;
 
 const API: &str = "https://api.github.com";
 const API_VERSION: &str = "2022-11-28";
-/// ureq defaults to 10 MB, which a recursive tree blows past on large repos —
-/// rust-lang/rust alone answers with ~20 MB. Bounded, but generously.
-const MAX_RESPONSE_BYTES: u64 = 64 * 1024 * 1024;
+/// Public file bytes, straight from the CDN.
+///
+/// Worth the special case twice over: it is not metered against the API's rate
+/// limit, and it answers `Access-Control-Allow-Origin: *`, so the static web
+/// build can read any public repository from a browser with no token at all.
+/// It takes no `Authorization` header — sending one would turn a plain
+/// cross-origin GET into a preflighted one, which this host does not answer —
+/// so private repositories go the long way, through [`API`].
+const RAW: &str = "https://raw.githubusercontent.com";
 /// GitHub itself stops at 3000 files per PR; 100 per page.
 const MAX_FILE_PAGES: u32 = 30;
 /// 100 comments per page, per kind. A thread past this is one nobody is
 /// reading to the end of anyway, and the pane says when it was cut short.
 const MAX_COMMENT_PAGES: u32 = 5;
-
-fn agent() -> ureq::Agent {
-    ureq::Agent::config_builder()
-        .http_status_as_error(false)
-        .timeout_global(Some(Duration::from_secs(30)))
-        .user_agent("pullspace")
-        .build()
-        .into()
-}
 
 /// Percent-encode one path segment. Avoids a dependency for the handful of
 /// characters that actually show up in repo paths.
@@ -57,7 +57,7 @@ fn encode_path(path: &str) -> String {
 
 // -------------------------------------------------------------- repo target
 
-#[derive(Clone, PartialEq, Eq, Debug)]
+#[derive(Clone, Default, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct RepoRef {
     pub owner: String,
     pub name: String,
@@ -102,52 +102,47 @@ pub fn parse_target(input: &str) -> Option<(RepoRef, Option<u64>)> {
     Some((RepoRef { owner, name }, number))
 }
 
-/// Pull an `owner/repo` out of a git remote URL, so a local clone can offer
-/// its own PRs without the user typing anything.
-pub fn repo_from_remote(url: &str) -> Option<RepoRef> {
-    parse_target(url).map(|(r, _)| r)
-}
-
 // ------------------------------------------------------------------ request
 
-fn get_raw(token: &str, url: &str, accept: &str) -> Result<(u16, Vec<u8>)> {
-    let mut req = agent()
-        .get(url)
-        .header("Accept", accept)
-        .header("X-GitHub-Api-Version", API_VERSION);
+async fn get_raw(token: &str, url: &str, accept: &str) -> Result<(u16, Vec<u8>)> {
     // An empty token means anonymous: public repos still work, at GitHub's
     // much lower unauthenticated rate limit.
+    let auth = format!("Bearer {token}");
+    let mut headers = vec![
+        ("Accept", accept),
+        ("X-GitHub-Api-Version", API_VERSION),
+    ];
     if !token.is_empty() {
-        req = req.header("Authorization", &format!("Bearer {token}"));
+        headers.push(("Authorization", auth.as_str()));
     }
-    let mut res = req.call().with_context(|| format!("GET {url}"))?;
+    let reply = http::get(url, &headers).await?;
 
-    let status = res.status().as_u16();
-    let rate_remaining = res
-        .headers()
-        .get("x-ratelimit-remaining")
-        .and_then(|v| v.to_str().ok())
-        .map(|v| v.to_string());
-    let body = res
-        .body_mut()
-        .with_config()
-        .limit(MAX_RESPONSE_BYTES)
-        .read_to_vec()?;
-
-    if status == 401 {
+    if reply.status == 401 {
         bail!("GitHub rejected the token (401). Sign in again.");
     }
-    if status == 403 && rate_remaining.as_deref() == Some("0") {
+    if reply.status == 403 && reply.rate_remaining.as_deref() == Some("0") {
         bail!("GitHub API rate limit exceeded. Try again shortly.");
     }
-    if status == 403 {
+    if reply.status == 403 {
         bail!("GitHub denied access (403). The token may lack the `repo` scope.");
     }
-    Ok((status, body))
+    // Anonymous callers get sixty requests an hour, and the browser build runs
+    // anonymous by default — so say which limit ran out, not just that one did.
+    if reply.status == 429 || (reply.status == 404 && reply.rate_remaining.as_deref() == Some("0")) {
+        bail!(
+            "GitHub API rate limit exceeded. {}",
+            if token.is_empty() {
+                "Anonymous browsing gets 60 requests an hour — add a token for 5000."
+            } else {
+                "Try again shortly."
+            }
+        );
+    }
+    Ok((reply.status, reply.body))
 }
 
-fn get_json<T: serde::de::DeserializeOwned>(token: &str, url: &str) -> Result<T> {
-    let (status, body) = get_raw(token, url, "application/vnd.github+json")?;
+async fn get_json<T: serde::de::DeserializeOwned>(token: &str, url: &str) -> Result<T> {
+    let (status, body) = get_raw(token, url, "application/vnd.github+json").await?;
     if status == 404 {
         bail!(
             "Not found (404). Check the name — and if it is a private repository, \
@@ -168,8 +163,8 @@ struct User {
 }
 
 /// Verify a token and get the account it belongs to.
-pub fn viewer_login(token: &str) -> Result<String> {
-    let user: User = get_json(token, &format!("{API}/user"))?;
+pub async fn viewer_login(token: &str) -> Result<String> {
+    let user: User = get_json(token, &format!("{API}/user")).await?;
     Ok(user.login)
 }
 
@@ -201,7 +196,7 @@ struct RawSearch {
 }
 
 /// A repository offered as a suggestion in the picker.
-#[derive(Clone, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct RepoHit {
     pub repo: RepoRef,
     pub description: String,
@@ -245,7 +240,7 @@ fn hit_of(raw: RawRepo) -> Option<RepoHit> {
 /// An exact `owner/name` is looked up directly as well and pinned to the top:
 /// search runs off an index that a brand-new, renamed or private repository may
 /// not be in yet, and the name typed in full is not a guess to be ranked.
-pub fn search_repos(token: &str, query: &str, limit: u32) -> Result<Vec<RepoHit>> {
+pub async fn search_repos(token: &str, query: &str, limit: u32) -> Result<Vec<RepoHit>> {
     let q = query.trim();
     if q.is_empty() {
         return Ok(Vec::new());
@@ -260,7 +255,7 @@ pub fn search_repos(token: &str, query: &str, limit: u32) -> Result<Vec<RepoHit>
         );
         // A 404 here is the ordinary case — half of a repository name typed so
         // far is not a repository — so the error is the answer, not a failure.
-        if let Ok(raw) = get_json::<RawRepo>(token, &url) {
+        if let Ok(raw) = get_json::<RawRepo>(token, &url).await {
             out.extend(hit_of(raw));
         }
     }
@@ -278,7 +273,7 @@ pub fn search_repos(token: &str, query: &str, limit: u32) -> Result<Vec<RepoHit>
         "{API}/search/repositories?q={}&per_page={limit}",
         encode_segment(text.trim()),
     );
-    match get_json::<RawSearch>(token, &url) {
+    match get_json::<RawSearch>(token, &url).await {
         Ok(raw) => {
             for hit in raw.items.into_iter().filter_map(hit_of) {
                 if !out.iter().any(|h: &RepoHit| h.repo == hit.repo) {
@@ -298,7 +293,7 @@ pub fn search_repos(token: &str, query: &str, limit: u32) -> Result<Vec<RepoHit>
 /// The signed-in account's repositories, most recently pushed first — what the
 /// picker offers before anything is typed, since the pull requests you are
 /// asked to review are nearly always on one of them.
-pub fn my_repos(token: &str, limit: u32) -> Result<Vec<RepoHit>> {
+pub async fn my_repos(token: &str, limit: u32) -> Result<Vec<RepoHit>> {
     if token.is_empty() {
         return Ok(Vec::new());
     }
@@ -306,12 +301,12 @@ pub fn my_repos(token: &str, limit: u32) -> Result<Vec<RepoHit>> {
         "{API}/user/repos?sort=pushed&direction=desc&per_page={limit}\
          &affiliation=owner,collaborator,organization_member"
     );
-    let raw: Vec<RawRepo> = get_json(token, &url)?;
+    let raw: Vec<RawRepo> = get_json(token, &url).await?;
     Ok(raw.into_iter().filter_map(hit_of).collect())
 }
 
 /// A repository's default branch and the commit at its tip.
-#[derive(Clone, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct RepoHead {
     pub branch: String,
     pub sha: String,
@@ -322,11 +317,11 @@ pub struct RepoHead {
 /// Two requests, because the repository record names the branch but not its
 /// head. A repository with no commits has nothing to browse, and says so rather
 /// than surfacing a bare 404.
-pub fn repo_head(token: &str, repo: &RepoRef) -> Result<RepoHead> {
+pub async fn repo_head(token: &str, repo: &RepoRef) -> Result<RepoHead> {
     let owner = encode_segment(&repo.owner);
     let name = encode_segment(&repo.name);
 
-    let raw: RawRepo = get_json(token, &format!("{API}/repos/{owner}/{name}"))?;
+    let raw: RawRepo = get_json(token, &format!("{API}/repos/{owner}/{name}")).await?;
     let branch = if raw.default_branch.is_empty() {
         // Every non-empty repository has one; fall back to the symbolic name
         // rather than refusing over a field GitHub is expected to send.
@@ -342,6 +337,7 @@ pub fn repo_head(token: &str, repo: &RepoRef) -> Result<RepoHead> {
             encode_segment(&branch)
         ),
     )
+    .await
     .with_context(|| format!("reading the tip of {branch} — {repo} may have no commits yet"))?;
 
     Ok(RepoHead {
@@ -355,16 +351,14 @@ pub fn repo_head(token: &str, repo: &RepoRef) -> Result<RepoHead> {
 /// The same shape the explorer already reads out of a [`PrDetail`], minus
 /// everything that only a pull request has: nothing is changed, so there is no
 /// diff, no base side and no changed-file list.
-#[derive(Clone, PartialEq, Debug)]
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
 pub struct RepoView {
     pub repo: RepoRef,
     /// The branch `head_sha` came from, for the breadcrumb.
     pub branch: String,
     pub head_sha: String,
     /// Every file in the repository at `head_sha`.
-    pub tree: Vec<PathBuf>,
-    /// True if GitHub returned only part of the tree.
-    pub tree_truncated: bool,
+    pub tree: Snapshot,
 }
 
 impl RepoView {
@@ -402,7 +396,7 @@ struct RawPr {
     base: RawRef,
 }
 
-#[derive(Clone, PartialEq, Debug)]
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
 pub struct PrSummary {
     pub number: u64,
     pub title: String,
@@ -420,13 +414,13 @@ fn author_of(user: &Option<User>) -> String {
 }
 
 /// Open pull requests, most recently updated first.
-pub fn list_prs(token: &str, repo: &RepoRef) -> Result<Vec<PrSummary>> {
+pub async fn list_prs(token: &str, repo: &RepoRef) -> Result<Vec<PrSummary>> {
     let url = format!(
         "{API}/repos/{}/{}/pulls?state=open&sort=updated&direction=desc&per_page=50",
         encode_segment(&repo.owner),
         encode_segment(&repo.name),
     );
-    let raw: Vec<RawPr> = get_json(token, &url)?;
+    let raw: Vec<RawPr> = get_json(token, &url).await?;
     Ok(raw
         .into_iter()
         .map(|p| PrSummary {
@@ -463,7 +457,7 @@ fn change_kind(status: &str) -> ChangeKind {
     }
 }
 
-#[derive(Clone, PartialEq, Debug)]
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
 pub struct PrFile {
     pub path: PathBuf,
     /// Set for renames — the path to read on the base side.
@@ -494,30 +488,107 @@ struct RawTreeEntry {
     path: String,
     #[serde(rename = "type")]
     kind: String,
+    #[serde(default)]
+    sha: String,
+    #[serde(default)]
+    size: u64,
+}
+
+/// One file of a repository at one commit: where it is, and which git blob it
+/// is made of.
+///
+/// The SHA is the point. It is git's hash of the file's contents, so it is the
+/// same forty characters in every commit, branch and repository that file ever
+/// appears in — which is what lets a local copy be kept once and found again by
+/// a pull request opened a week later against a commit that did not exist yet.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct TreeEntry {
+    pub path: PathBuf,
+    pub sha: String,
+    /// Bytes, as GitHub counts them. What the clone budgets against, so it is
+    /// spent before a single request is made.
+    pub size: u64,
+}
+
+/// Every file in a repository as of one commit — a checkout's worth of
+/// filenames, without the contents.
+///
+/// Kept sorted by path, so a lookup is a binary search rather than a hash map
+/// alongside: this is written to disk as-is and read back on the next visit.
+#[derive(Clone, Default, PartialEq, Debug, Serialize, Deserialize)]
+pub struct Snapshot {
+    pub repo: RepoRef,
+    pub commit: String,
+    pub files: Vec<TreeEntry>,
+    /// GitHub returned only part of the tree — past about 100k entries / 7 MB.
+    pub truncated: bool,
+}
+
+impl Snapshot {
+    /// A snapshot of a commit whose tree could not be read. Everything degrades
+    /// to fetching by path, which is what the app did before it had a store.
+    pub fn unknown(repo: &RepoRef, commit: &str) -> Self {
+        Snapshot {
+            repo: repo.clone(),
+            commit: commit.to_string(),
+            files: Vec::new(),
+            truncated: false,
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.files.is_empty()
+    }
+
+    pub fn paths(&self) -> impl Iterator<Item = &std::path::Path> {
+        self.files.iter().map(|f| f.path.as_path())
+    }
+
+    /// The blob one path is made of at this commit.
+    pub fn entry(&self, path: &std::path::Path) -> Option<&TreeEntry> {
+        self.files
+            .binary_search_by(|f| f.path.as_path().cmp(path))
+            .ok()
+            .map(|i| &self.files[i])
+    }
+
+    /// Where the files are kept on disk, and how it is found again.
+    pub fn key(&self) -> String {
+        format!("{}~{}~{}.json", self.repo.owner, self.repo.name, self.commit)
+    }
 }
 
 /// Every file in the repository as of `sha`, in one request, so a pull request
 /// can be browsed like a checkout rather than just a list of changes.
-///
-/// The bool is GitHub's `truncated` flag — true past 100k entries / 7 MB, where
-/// it silently returns a partial tree.
-pub fn repo_tree(token: &str, repo: &RepoRef, sha: &str) -> Result<(Vec<PathBuf>, bool)> {
+pub async fn repo_tree(token: &str, repo: &RepoRef, sha: &str) -> Result<Snapshot> {
     let url = format!(
         "{API}/repos/{}/{}/git/trees/{}?recursive=1",
         encode_segment(&repo.owner),
         encode_segment(&repo.name),
         encode_segment(sha),
     );
-    let raw: RawTree = get_json(token, &url)?;
-    let paths = raw
+    let raw: RawTree = get_json(token, &url).await?;
+    let mut files: Vec<TreeEntry> = raw
         .tree
         .into_iter()
         // "tree" entries are directories and "commit" entries are submodules;
         // the file tree is rebuilt from the blob paths alone.
         .filter(|e| e.kind == "blob")
-        .map(|e| PathBuf::from(e.path))
+        .map(|e| TreeEntry {
+            path: PathBuf::from(e.path),
+            sha: e.sha,
+            size: e.size,
+        })
         .collect();
-    Ok((paths, raw.truncated))
+    // Git writes trees in its own order, which is nearly but not quite this
+    // one. Sorting here is what makes `entry` a binary search.
+    files.sort_by(|a, b| a.path.cmp(&b.path));
+    Ok(Snapshot {
+        repo: repo.clone(),
+        commit: sha.to_string(),
+        files,
+        truncated: raw.truncated,
+    })
 }
 
 #[derive(Deserialize)]
@@ -530,7 +601,7 @@ struct RawCommit {
     sha: String,
 }
 
-#[derive(Clone, PartialEq, Debug)]
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
 pub struct PrDetail {
     pub repo: RepoRef,
     pub number: u64,
@@ -552,12 +623,15 @@ pub struct PrDetail {
     /// True if the PR has more files than we fetched.
     pub truncated: bool,
     /// Every file in the repo at `head_sha`, so the explorer can show the whole
-    /// tree and not just what changed. Filled in by the caller — from a local
-    /// clone when there is one, else [`repo_tree`] — and empty when neither
-    /// worked, which degrades to a changed-files-only explorer.
-    pub tree: Vec<PathBuf>,
-    /// True if GitHub returned only part of the repository tree.
-    pub tree_truncated: bool,
+    /// tree and not just what changed. Filled in by the caller from
+    /// [`repo_tree`], and empty when that failed — which degrades to a
+    /// changed-files-only explorer.
+    pub tree: Snapshot,
+    /// The same at the merge base, which is what the left-hand side of every
+    /// diff is read from. Only the changed files are ever wanted out of it, but
+    /// having it by blob SHA is what lets those come from the local store
+    /// too — the base commit is usually a branch tip that has been read before.
+    pub base_tree: Snapshot,
 }
 
 /// Load a PR: metadata, the merge base, the changed-file list, and the full
@@ -565,11 +639,11 @@ pub struct PrDetail {
 ///
 /// The merge base matters — diffing against `base.sha` would show every commit
 /// that landed on the base branch since the PR was opened as part of the PR.
-pub fn load_pr(token: &str, repo: &RepoRef, number: u64) -> Result<PrDetail> {
+pub async fn load_pr(token: &str, repo: &RepoRef, number: u64) -> Result<PrDetail> {
     let owner = encode_segment(&repo.owner);
     let name = encode_segment(&repo.name);
 
-    let pr: RawPr = get_json(token, &format!("{API}/repos/{owner}/{name}/pulls/{number}"))?;
+    let pr: RawPr = get_json(token, &format!("{API}/repos/{owner}/{name}/pulls/{number}")).await?;
 
     let compare: RawCompare = get_json(
         token,
@@ -578,6 +652,7 @@ pub fn load_pr(token: &str, repo: &RepoRef, number: u64) -> Result<PrDetail> {
             pr.base.sha, pr.head.sha
         ),
     )
+    .await
     .with_context(|| format!("resolving the merge base for #{number}"))?;
 
     let mut files = Vec::new();
@@ -585,7 +660,7 @@ pub fn load_pr(token: &str, repo: &RepoRef, number: u64) -> Result<PrDetail> {
     for page in 1..=MAX_FILE_PAGES {
         let url =
             format!("{API}/repos/{owner}/{name}/pulls/{number}/files?per_page=100&page={page}");
-        let raw: Vec<RawFile> = get_json(token, &url)?;
+        let raw: Vec<RawFile> = get_json(token, &url).await?;
         let full_page = raw.len() == 100;
         files.extend(raw.into_iter().map(|f| PrFile {
             path: PathBuf::from(&f.filename),
@@ -602,6 +677,8 @@ pub fn load_pr(token: &str, repo: &RepoRef, number: u64) -> Result<PrDetail> {
         }
     }
 
+    let base_sha = compare.merge_base_commit.sha;
+    let head_sha = pr.head.sha;
     Ok(PrDetail {
         repo: repo.clone(),
         number: pr.number,
@@ -613,12 +690,12 @@ pub fn load_pr(token: &str, repo: &RepoRef, number: u64) -> Result<PrDetail> {
         html_url: pr.html_url,
         head_ref: pr.head.name,
         base_ref: pr.base.name,
-        base_sha: compare.merge_base_commit.sha,
-        head_sha: pr.head.sha,
+        tree: Snapshot::unknown(repo, &head_sha),
+        base_tree: Snapshot::unknown(repo, &base_sha),
+        base_sha,
+        head_sha,
         files,
         truncated,
-        tree: Vec::new(),
-        tree_truncated: false,
     })
 }
 
@@ -627,7 +704,7 @@ pub fn load_pr(token: &str, repo: &RepoRef, number: u64) -> Result<PrDetail> {
 /// Where a piece of writing on a pull request came from. GitHub keeps these on
 /// three separate endpoints, and they read differently enough to be worth
 /// telling apart once they are back in one list.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum CommentKind {
     /// The pull request's own discussion thread.
     Discussion,
@@ -637,7 +714,7 @@ pub enum CommentKind {
     Inline,
 }
 
-#[derive(Clone, PartialEq, Debug)]
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
 pub struct Comment {
     pub kind: CommentKind,
     pub author: String,
@@ -655,7 +732,7 @@ pub struct Comment {
 }
 
 /// Everything written on a pull request, oldest first.
-#[derive(Clone, PartialEq, Debug, Default)]
+#[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
 pub struct Thread {
     pub comments: Vec<Comment>,
     /// True when one of the lists ran past [`MAX_COMMENT_PAGES`].
@@ -720,11 +797,11 @@ fn comment_of(raw: RawComment, kind: CommentKind) -> Comment {
 
 /// Read a list endpoint page by page. The bool is true when there was more
 /// than [`MAX_COMMENT_PAGES`] worth.
-fn get_paged<T: serde::de::DeserializeOwned>(token: &str, base: &str) -> Result<(Vec<T>, bool)> {
+async fn get_paged<T: serde::de::DeserializeOwned>(token: &str, base: &str) -> Result<(Vec<T>, bool)> {
     let mut out = Vec::new();
     for page in 1..=MAX_COMMENT_PAGES {
         let url = format!("{base}?per_page=100&page={page}");
-        let raw: Vec<T> = get_json(token, &url)?;
+        let raw: Vec<T> = get_json(token, &url).await?;
         let full_page = raw.len() == 100;
         out.extend(raw);
         if !full_page {
@@ -751,7 +828,7 @@ fn review_is_noise(raw: &RawComment) -> bool {
 /// Three requests, because GitHub keeps the three on separate endpoints. A
 /// failure on any of them fails the lot — a conversation with a third of itself
 /// silently missing is worse than one that says it could not be loaded.
-pub fn pr_comments(token: &str, repo: &RepoRef, number: u64) -> Result<Thread> {
+pub async fn pr_comments(token: &str, repo: &RepoRef, number: u64) -> Result<Thread> {
     let owner = encode_segment(&repo.owner);
     let name = encode_segment(&repo.name);
 
@@ -762,6 +839,7 @@ pub fn pr_comments(token: &str, repo: &RepoRef, number: u64) -> Result<Thread> {
         token,
         &format!("{API}/repos/{owner}/{name}/issues/{number}/comments"),
     )
+    .await
     .with_context(|| format!("reading the discussion on #{number}"))?;
     truncated |= more;
     comments.extend(
@@ -774,6 +852,7 @@ pub fn pr_comments(token: &str, repo: &RepoRef, number: u64) -> Result<Thread> {
         token,
         &format!("{API}/repos/{owner}/{name}/pulls/{number}/comments"),
     )
+    .await
     .with_context(|| format!("reading the line comments on #{number}"))?;
     truncated |= more;
     comments.extend(
@@ -786,6 +865,7 @@ pub fn pr_comments(token: &str, repo: &RepoRef, number: u64) -> Result<Thread> {
         token,
         &format!("{API}/repos/{owner}/{name}/pulls/{number}/reviews"),
     )
+    .await
     .with_context(|| format!("reading the reviews of #{number}"))?;
     truncated |= more;
     comments.extend(
@@ -805,52 +885,78 @@ pub fn pr_comments(token: &str, repo: &RepoRef, number: u64) -> Result<Thread> {
     })
 }
 
-/// One side of a file, at a specific commit. A 404 means the file does not
-/// exist there — expected for the base side of an added file.
-pub fn file_at(token: &str, repo: &RepoRef, sha: &str, path: &std::path::Path) -> Result<FileContent> {
+/// One file's bytes from the CDN, named by commit and path.
+///
+/// Not metered, and no credential to send — which is what makes reading a whole
+/// repository this way reasonable, and why the clone tries it first whether or
+/// not anyone is signed in. Private repositories 404 here and go to
+/// [`api_blob`] instead.
+pub async fn raw_file(repo: &RepoRef, commit: &str, path: &std::path::Path) -> Result<(u16, Vec<u8>)> {
     let rel = path.to_string_lossy().replace('\\', "/");
     let url = format!(
-        "{API}/repos/{}/{}/contents/{}?ref={}",
+        "{RAW}/{}/{}/{}/{}",
         encode_segment(&repo.owner),
         encode_segment(&repo.name),
+        encode_segment(commit),
         encode_path(&rel),
+    );
+    let reply = http::get(&url, &[]).await?;
+    Ok((reply.status, reply.body))
+}
+
+/// One blob's bytes from the API, named by its git SHA.
+///
+/// Reaches private repositories, and costs one of the hour's requests each
+/// time. The blob SHA is enough on its own — no commit, no path — because it is
+/// what the content hashes to.
+pub async fn api_blob(token: &str, repo: &RepoRef, sha: &str) -> Result<(u16, Vec<u8>)> {
+    let url = format!(
+        "{API}/repos/{}/{}/git/blobs/{}",
+        encode_segment(&repo.owner),
+        encode_segment(&repo.name),
         encode_segment(sha),
     );
-    // The `raw` media type returns file bytes instead of base64-in-JSON.
-    let (status, body) = get_raw(token, &url, "application/vnd.github.raw")?;
+    // The `raw` media type returns the blob's bytes instead of base64-in-JSON.
+    get_raw(token, &url, "application/vnd.github.raw").await
+}
+
+/// One side of a file, at a specific commit, for a caller that knows the path
+/// but not the blob it is made of — a repository whose tree would not load, or
+/// a base side with no base tree behind it.
+///
+/// A 404 means the file does not exist there, which is expected for the base
+/// side of an added file. Anonymous callers are sent to [`RAW`]: against the
+/// API an unauthenticated browser would spend its whole hourly allowance on a
+/// medium pull request, and against the CDN it spends none of it.
+pub async fn file_at(
+    token: &str,
+    repo: &RepoRef,
+    sha: &str,
+    path: &std::path::Path,
+) -> Result<FileContent> {
+    let (status, body) = if token.is_empty() {
+        raw_file(repo, sha, path).await?
+    } else {
+        let rel = path.to_string_lossy().replace('\\', "/");
+        let url = format!(
+            "{API}/repos/{}/{}/contents/{}?ref={}",
+            encode_segment(&repo.owner),
+            encode_segment(&repo.name),
+            encode_path(&rel),
+            encode_segment(sha),
+        );
+        get_raw(token, &url, "application/vnd.github.raw").await?
+    };
+
     if status == 404 {
         return Ok(FileContent::Absent);
     }
     if !(200..300).contains(&status) {
-        bail!("GitHub returned HTTP {status} for {rel}");
+        bail!("GitHub returned HTTP {status} for {}", path.display());
     }
     Ok(FileContent::from_bytes(&body))
 }
 
-/// The `owner/repo` for a local clone's `origin` (or the only remote), if it
-/// points at GitHub.
-pub fn repo_from_local(root: &std::path::Path) -> Option<RepoRef> {
-    let repo = git2::Repository::discover(root).ok()?;
-    let names = repo.remotes().ok()?;
-    // `remotes()` yields Result<Option<&str>> per entry; keep only real names.
-    let list: Vec<String> = names
-        .iter()
-        .filter_map(|r| r.ok().flatten())
-        .map(String::from)
-        .collect();
-    let preferred = list
-        .iter()
-        .find(|n| n.as_str() == "origin")
-        .or_else(|| list.first())?;
-    let remote = repo.find_remote(preferred.as_str()).ok()?;
-    let url = remote.url().ok()?;
-    if !url.contains("github.com") {
-        return None;
-    }
-    repo_from_remote(url)
-}
-
-/// Turn a PR's file list into the status map the tree and viewer already speak.
 pub fn statuses_of(files: &[PrFile]) -> std::collections::HashMap<PathBuf, ChangeKind> {
     files.iter().map(|f| (f.path.clone(), f.status)).collect()
 }
@@ -883,18 +989,6 @@ mod tests {
         let (r, n) = parse_target("https://github.com/rust-lang/rust/pull/12345").unwrap();
         assert_eq!(r.to_string(), "rust-lang/rust");
         assert_eq!(n, Some(12345));
-    }
-
-    #[test]
-    fn parses_ssh_remote() {
-        let (r, _) = parse_target("git@github.com:owner/name.git").unwrap();
-        assert_eq!(r.to_string(), "owner/name");
-    }
-
-    #[test]
-    fn parses_https_remote_with_git_suffix() {
-        let r = repo_from_remote("https://github.com/owner/name.git").unwrap();
-        assert_eq!(r.to_string(), "owner/name");
     }
 
     #[test]
@@ -969,85 +1063,6 @@ mod tests {
             deletions: 0,
         };
         assert_eq!(plain.base_path(), &PathBuf::from("same.rs"));
-    }
-
-    /// Talks to github.com, so it is not part of the normal run:
-    /// `cargo test -- --ignored live_pr_round_trip --nocapture`.
-    /// Anonymous, so it is subject to the 60 req/hour unauthenticated limit.
-    #[test]
-    #[ignore = "hits the network"]
-    fn live_pr_round_trip() {
-        // A long-merged PR, so the shape of the response is stable.
-        let repo = RepoRef {
-            owner: "DioxusLabs".to_string(),
-            name: "dioxus".to_string(),
-        };
-        let pr = load_pr("", &repo, 1).expect("load PR");
-        assert_eq!(pr.number, 1);
-        assert!(!pr.base_sha.is_empty(), "merge base resolved");
-        assert!(!pr.files.is_empty(), "PR has files");
-
-        // `load_pr` deliberately leaves the tree to the caller, so that a
-        // local clone can supply it instead of downloading it.
-        assert!(pr.tree.is_empty(), "tree is the caller's job");
-
-        // The repo tree must be a superset of the changed files (deletions
-        // aside), or the explorer would be missing files the PR touches.
-        let (tree, _) = repo_tree("", &repo, &pr.head_sha).expect("repo tree");
-        assert!(tree.len() > pr.files.len(), "tree is the whole repo");
-        for f in &pr.files {
-            if f.status != ChangeKind::Deleted {
-                assert!(tree.contains(&f.path), "{:?} missing from tree", f.path);
-            }
-        }
-
-        let f = &pr.files[0];
-        let head = file_at("", &repo, &pr.head_sha, &f.path).expect("head side");
-        assert!(
-            matches!(head, FileContent::Text(_) | FileContent::Binary),
-            "head content present"
-        );
-        let base = file_at("", &repo, &pr.base_sha, f.base_path()).expect("base side");
-        // Absent is legitimate here — it just means the file was added.
-        let _ = base;
-    }
-
-    /// Also hits the network: `cargo test -- --ignored live_repo_head`.
-    ///
-    /// The path a repository with no open pull requests takes: resolve the
-    /// default branch, then list it.
-    #[test]
-    #[ignore = "hits the network"]
-    fn live_repo_head() {
-        let repo = RepoRef {
-            owner: "DioxusLabs".to_string(),
-            name: "dioxus".to_string(),
-        };
-        let head = repo_head("", &repo).expect("default branch");
-        assert!(!head.branch.is_empty(), "GitHub names the default branch");
-        assert_eq!(head.sha.len(), 40, "a full commit sha: {}", head.sha);
-
-        let (tree, _) = repo_tree("", &repo, &head.sha).expect("repo tree");
-        assert!(tree.len() > 1, "the whole repository, not one file");
-        assert!(tree.contains(&PathBuf::from("Cargo.toml")));
-    }
-
-    /// Also hits the network: `cargo test -- --ignored live_repo_search`.
-    #[test]
-    #[ignore = "hits the network"]
-    fn live_repo_search() {
-        // A name, not a link — the whole point of the picker's search box.
-        let hits = search_repos("", "dioxus", 8).expect("search");
-        assert!(!hits.is_empty(), "a common name finds something");
-        assert!(
-            hits.iter().any(|h| h.repo.name.contains("dioxus")),
-            "results are actually about the query: {hits:?}"
-        );
-
-        // A complete name resolves exactly, and answers with itself alone.
-        let exact = search_repos("", "DioxusLabs/dioxus", 8).expect("exact");
-        assert_eq!(exact.len(), 1);
-        assert_eq!(exact[0].repo.to_string(), "DioxusLabs/dioxus");
     }
 
     #[test]
@@ -1133,32 +1148,47 @@ mod tests {
         assert_eq!(raw.body.unwrap_or_default(), "");
     }
 
-    /// Hits the network: `cargo test -- --ignored live_pr_conversation`.
     #[test]
-    #[ignore = "hits the network"]
-    fn live_pr_conversation() {
-        let repo = RepoRef {
-            owner: "DioxusLabs".to_string(),
-            name: "dioxus".to_string(),
+    fn a_path_finds_its_own_blob_and_never_a_neighbour() {
+        // `-` sorts before `/` as bytes, but a path is compared component by
+        // component, where `gguf` sorts before `gguf-rs`. The lookup is a
+        // binary search, so it and the sort behind it have to agree about
+        // which — and if they ever stop agreeing, the failure is a file served
+        // with another file's contents, which nothing downstream can see is
+        // wrong. A source file that arrives as a `.gguf` model reads as binary.
+        let paths = [
+            "README.md",
+            "crates/gguf-rs/src/lib.rs",
+            "crates/gguf/src/lib.rs",
+            "crates/gguf/src/read.rs",
+            "crates/gguf/tests/model.gguf",
+        ];
+        let mut files: Vec<TreeEntry> = paths
+            .iter()
+            .enumerate()
+            .map(|(i, p)| TreeEntry {
+                path: PathBuf::from(p),
+                sha: format!("{i:040}"),
+                size: 10,
+            })
+            .collect();
+        // Exactly what `repo_tree` does with what GitHub sends.
+        files.sort_by(|a, b| a.path.cmp(&b.path));
+        let snapshot = Snapshot {
+            repo: RepoRef::default(),
+            commit: "c".into(),
+            files,
+            truncated: false,
         };
-        // Merged, and approved by a reviewer — so there is something in the
-        // thread and it is not going to change again.
-        let thread = pr_comments("", &repo, 5533).expect("conversation");
-        assert!(!thread.truncated, "a small thread is not truncated");
-        assert!(
-            thread
-                .comments
-                .iter()
-                .any(|c| c.kind == CommentKind::Review && c.verdict == "approved"),
-            "the approval is in the thread: {:?}",
-            thread.comments
-        );
-        // Everyone in it is named, and merging three lists is only worth doing
-        // if the result comes out in order.
-        assert!(thread.comments.iter().all(|c| !c.author.is_empty()));
-        let mut sorted = thread.comments.clone();
-        sorted.sort_by(|a, b| a.created_at.cmp(&b.created_at));
-        assert_eq!(sorted, thread.comments);
+
+        for (i, path) in paths.iter().enumerate() {
+            let found = snapshot.entry(std::path::Path::new(path)).unwrap();
+            assert_eq!(found.path, PathBuf::from(path));
+            assert_eq!(found.sha, format!("{i:040}"), "{path} found the wrong blob");
+        }
+        assert!(snapshot
+            .entry(std::path::Path::new("crates/gguf/src/nope.rs"))
+            .is_none());
     }
 
     #[test]
@@ -1185,3 +1215,76 @@ mod tests {
     }
 }
 
+
+// -------------------------------------------------------------- fetch jobs
+
+/// Everything needed to read one file of a pull request or browsed repository,
+/// lifted out of app state so the read can travel.
+///
+/// It carries both what the file is called and what it hashes to. The names are
+/// what the CDN answers to; the hashes are what the local store is keyed by, so
+/// a job whose blobs are already on disk needs no network at all — see
+/// [`clone::read_pair`](super::clone::read_pair).
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+pub struct FetchJob {
+    pub repo: RepoRef,
+    pub base_sha: String,
+    pub head_sha: String,
+    pub path: PathBuf,
+    /// Differs from `path` for renames.
+    pub base_path: PathBuf,
+    /// The git blob at each side, when a tree was read to say what it is —
+    /// which is both what the local store is keyed by and how big the answer
+    /// should turn out to be. `None` falls back to reading by path.
+    pub head_blob: Option<TreeEntry>,
+    pub base_blob: Option<TreeEntry>,
+    /// `None` for a file the PR does not touch — browsable, but not a diff.
+    pub status: Option<ChangeKind>,
+}
+
+impl FetchJob {
+    /// For any path in the PR's repository, changed or not.
+    pub fn new(pr: &PrDetail, rel: &std::path::Path) -> Self {
+        // Unchanged files are in the repo tree but not the PR's file list.
+        let f = find_file(&pr.files, rel);
+        let base_path = f.map_or_else(|| rel.to_path_buf(), |f| f.base_path().clone());
+        FetchJob {
+            repo: pr.repo.clone(),
+            base_sha: pr.base_sha.clone(),
+            head_sha: pr.head_sha.clone(),
+            head_blob: pr.tree.entry(rel).cloned(),
+            base_blob: pr.base_tree.entry(&base_path).cloned(),
+            path: rel.to_path_buf(),
+            base_path,
+            status: f.map(|f| f.status),
+        }
+    }
+
+    /// For a path in a repository being browsed on its own. Nothing is changed
+    /// here, so there is only ever one side to read.
+    pub fn browsing(view: &RepoView, rel: &std::path::Path) -> Self {
+        FetchJob {
+            repo: view.repo.clone(),
+            base_sha: String::new(),
+            head_sha: view.head_sha.clone(),
+            head_blob: view.tree.entry(rel).cloned(),
+            base_blob: None,
+            path: rel.to_path_buf(),
+            base_path: rel.to_path_buf(),
+            status: None,
+        }
+    }
+
+    /// Whether this side is worth reading at all.
+    ///
+    /// An added file has no base side, a deleted one has no head side, and an
+    /// untouched file is never diffed — so in each case a read would be wasted
+    /// or 404 anyway.
+    pub fn wants_base(&self) -> bool {
+        !matches!(self.status, None | Some(ChangeKind::Added))
+    }
+
+    pub fn wants_head(&self) -> bool {
+        self.status != Some(ChangeKind::Deleted)
+    }
+}

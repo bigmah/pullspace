@@ -3,16 +3,23 @@ use std::path::PathBuf;
 use dioxus::prelude::*;
 
 use crate::backend::difftool::{diff_hunks, stats, to_rows, Hunk, Line, LineKind};
-use crate::backend::gitio::{head_file, index_file, worktree_file};
 use crate::backend::highlight::{highlight, Span};
-use crate::backend::htmlview;
 use crate::backend::markdown;
-use crate::backend::mirror;
+use crate::backend::search::split_word;
 use crate::backend::tree::ChangeKind;
 use crate::backend::FileContent;
 
-use super::app::{DiffSide, PrFileState, St, ViewMode, Workspace};
+use super::app::{PrFileState, St, ViewMode, Workspace};
+use super::ide;
 use super::prcache::ensure_path;
+
+/// Files offered in Preview. The browser lays HTML out itself, so this is the
+/// whole test — there is no renderer here with opinions of its own.
+fn is_html(path: &std::path::Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("html") || e.eq_ignore_ascii_case("htm"))
+}
 
 const BIG_FILE_BYTES: usize = 400_000;
 const BIG_FILE_LINES: usize = 6_000;
@@ -23,18 +30,9 @@ enum SourceLines {
     Plain(Vec<String>),
 }
 
-/// A rendered HTML page, ready to hand to an `<img>`.
-#[derive(Clone, PartialEq)]
-struct Shot {
-    uri: String,
-    /// The width to show it at — half what it was drawn at.
-    css_width: u32,
-    clipped: bool,
-    blocked: usize,
-}
-
-/// What the viewer has to show right now. Local files resolve synchronously;
-/// pull request files arrive over the network, hence `Loading`/`Failed`.
+/// What the viewer has to show right now. Local files resolve synchronously on
+/// the desktop; pull request files — and, in a browser, every file — arrive
+/// over the network, hence `Loading`/`Failed`.
 #[derive(Clone, PartialEq)]
 enum Pane {
     Empty,
@@ -42,15 +40,10 @@ enum Pane {
     Failed(String),
     Ready {
         rel: PathBuf,
-        /// Left-hand side: HEAD, the index, or the PR's merge base.
+        /// Left-hand side: the PR's merge base.
         old: FileContent,
-        /// Right-hand side: the working tree, the index, or the PR's head
-        /// commit.
+        /// Right-hand side: the PR's head commit.
         new: FileContent,
-        /// Which pair of sides these are, once the choice has been resolved
-        /// against what this file actually has staged. `Worktree` for anything
-        /// that is not the local working tree — there is only one diff there.
-        side: DiffSide,
     },
 }
 
@@ -64,13 +57,12 @@ fn scroll_js(line: usize) -> String {
 pub fn Viewer() -> Element {
     let st = use_context::<St>();
 
-    // Jump-to-line requests (definitions, references, search hits).
+    // Jump-to-line requests (definitions, references, search hits). The
+    // request is not consumed — see `St::scroll_to`; this fires on the write,
+    // and what the signal holds afterwards is nobody's business.
     use_effect(move || {
-        let mut ps = st.pending_scroll;
-        let target = *ps.read();
-        if let Some(line) = target {
+        if let Some(line) = *st.scroll_to.read() {
             document::eval(&scroll_js(line));
-            ps.set(None);
         }
     });
 
@@ -79,92 +71,44 @@ pub fn Viewer() -> Element {
     // and is a no-op when the content is cached or on its way.
     use_effect(move || {
         let rel = st.open.read().clone();
-        if !st.workspace.read().is_remote() {
-            return;
-        }
         if let Some(rel) = rel {
             ensure_path(st, &rel);
         }
     });
 
-    // Resolve the two sides of the open file, from disk or from the PR cache.
+    // Resolve the two sides of the open file out of the cache.
     let data = use_memo(move || {
         st.refresh_tick.read();
         let Some(rel) = st.open.read().clone() else {
             return Pane::Empty;
         };
-        let ws = st.workspace.read();
-        if ws.is_remote() {
-            return match st.pr_files.read().get(&rel) {
-                None | Some(PrFileState::Loading) => Pane::Loading,
-                Some(PrFileState::Failed(e)) => Pane::Failed(e.clone()),
-                Some(PrFileState::Ready { base, head }) => Pane::Ready {
-                    rel,
-                    old: base.clone(),
-                    new: head.clone(),
-                    side: DiffSide::Worktree,
-                },
-            };
-        }
-        // Both sides of a comparison come out of the object database, which is
-        // fast enough to read here rather than through a cache: no request, no
-        // waiting, and nothing that has to be warmed up first.
-        if let Some(view) = ws.compare() {
-            let read = |sha: &str, path: &std::path::Path| {
-                mirror::blob_at(&view.git_dir, sha, path).unwrap_or(FileContent::Absent)
-            };
-            return Pane::Ready {
-                old: read(&view.base_sha, &view.base_path(&rel)),
-                new: read(&view.head_sha, &rel),
+        match st.pr_files.read().get(&rel) {
+            None | Some(PrFileState::Loading) => Pane::Loading,
+            Some(PrFileState::Failed(e)) => Pane::Failed(e.clone()),
+            Some(PrFileState::Ready { base, head }) => Pane::Ready {
                 rel,
-                side: DiffSide::Worktree,
-            };
-        }
-        // Read below, so the working tree's two sides are not resolved with a
-        // guard on the workspace still open.
-        drop(ws);
-        let root = st.root_path();
-        // Which pair of sides: everything since the last commit, or one half of
-        // it. A file with nothing on the half being asked for shows the other —
-        // see `DiffSide::resolve`.
-        let side = st
-            .diff_side
-            .read()
-            .resolve(st.stages.read().get(&rel).copied());
-        Pane::Ready {
-            old: match side {
-                DiffSide::Unstaged => index_file(&root, &rel),
-                _ => head_file(&root, &rel),
+                old: base.clone(),
+                new: head.clone(),
             },
-            new: match side {
-                DiffSide::Staged => index_file(&root, &rel),
-                _ => worktree_file(&root, &rel),
-            },
-            rel,
-            side,
         }
     });
 
     let hunks = use_memo(move || {
         let guard = data.read();
-        let Pane::Ready { rel, old, new, side } = &*guard else {
+        let Pane::Ready { rel, old, new } = &*guard else {
             return None;
         };
         let status = st.statuses.read().get(rel).copied()?;
-        // A file that is new on this side has nothing to compare against, even
-        // if a path of the same name exists in the base. Except against the
-        // index: a file added and then edited again is new to the repository
-        // and not at all new to the index, and what was edited since `git add`
-        // is exactly the question that view is being asked.
-        let fresh = matches!(status, ChangeKind::Untracked | ChangeKind::Added)
-            && *side != DiffSide::Unstaged;
+        // An added file has nothing to compare against, even if a path of the
+        // same name exists in the base.
+        let fresh = matches!(status, ChangeKind::Added);
         let old_text = if fresh { "" } else { old.text()? };
         Some(diff_hunks(old_text, new.text()?))
     });
 
     let source_lines = use_memo(move || {
         let guard = data.read();
-        let Pane::Ready { rel, old, new, .. } = &*guard else {
+        let Pane::Ready { rel, old, new } = &*guard else {
             return None;
         };
         let text = match new {
@@ -190,7 +134,7 @@ pub fn Viewer() -> Element {
     let doc = use_memo(move || {
         let wanted = *st.view_mode.read() == ViewMode::Preview;
         let guard = data.read();
-        let Pane::Ready { rel, old, new, .. } = &*guard else {
+        let Pane::Ready { rel, old, new } = &*guard else {
             return None;
         };
         if !wanted || !markdown::is_markdown(rel) {
@@ -205,13 +149,13 @@ pub fn Viewer() -> Element {
         Some(markdown::parse(text))
     });
 
-    // Draw the page, off the UI thread and only while the preview is the mode
-    // being asked for. Keyed on the file's own text, so a reload that changes
-    // it redraws and one that does not costs nothing.
+    // Draw the page, wherever the service layer draws it, and only while the
+    // preview is the mode being asked for. Keyed on the file's own text, so a
+    // reload that changes it redraws and one that does not costs nothing.
     let preview = use_resource(move || {
         let wanted = *st.view_mode.read() == ViewMode::Preview;
         let source = match &*data.read() {
-            Pane::Ready { rel, old, new, .. } if wanted && htmlview::is_html(rel) => match (new, old)
+            Pane::Ready { rel, old, new } if wanted && is_html(rel) => match (new, old)
             {
                 (FileContent::Text(t), _) => Some(t.clone()),
                 // Deleted by the PR: draw the version that is going away.
@@ -222,31 +166,19 @@ pub fn Viewer() -> Element {
         };
         async move {
             let text = source?;
-            let done = tokio::task::spawn_blocking(move || htmlview::render(&text)).await;
-            Some(match done {
-                Ok(Ok(p)) => Ok(Shot {
-                    uri: htmlview::data_uri(&p.png),
-                    css_width: p.css_size().0,
-                    clipped: p.clipped,
-                    blocked: p.blocked,
-                }),
-                Ok(Err(e)) => Err(format!("{e:#}")),
-                // Blitz is a young engine. A page that trips it takes the
-                // blocking task down, not the app — so say so and carry on.
-                Err(e) if e.is_panic() => {
-                    Err("This page could not be laid out — its source is still readable in Source view.".to_string())
-                }
-                Err(e) => Err(e.to_string()),
-            })
+            Some(text)
         }
     });
 
     // A new file starts at the top. The scroll container outlives the file in
     // it, so without this, opening something short after reading deep into
     // something long lands you at the bottom of it.
+    //
+    // Unless it was opened *at* somewhere, in which case the effect above is
+    // already on its way there and this would fight it.
     use_effect(move || {
         let _ = st.open.read();
-        if st.pending_scroll.peek().is_some() {
+        if st.at_line.peek().is_some() {
             return;
         }
         document::eval("var e=document.querySelector('.codewrap'); if(e) e.scrollTop=0;");
@@ -256,33 +188,27 @@ pub fn Viewer() -> Element {
     // Loading and failure replace the file, not the window around it: a header
     // that blinks out and back every time an uncached file is clicked is worse
     // jank than the wait it is reporting.
-    let (rel, new_side, side, pending) = match &*guard {
+    let (rel, new_side, pending) = match &*guard {
         Pane::Empty => return rsx! { Welcome {} },
         Pane::Loading => (
             st.open.read().clone().unwrap_or_default(),
             FileContent::Absent,
-            DiffSide::Worktree,
-            Some(rsx! { div { class: "notice", "Loading from GitHub…" } }),
+            Some(rsx! { div { class: "notice", "Loading…" } }),
         ),
         Pane::Failed(e) => (
             st.open.read().clone().unwrap_or_default(),
             FileContent::Absent,
-            DiffSide::Worktree,
             Some(rsx! { div { class: "notice error", "{e}" } }),
         ),
-        Pane::Ready { rel, new, side, .. } => (rel.clone(), new.clone(), *side, None),
+        Pane::Ready { rel, new, .. } => (rel.clone(), new.clone(), None),
     };
     let settled = pending.is_none();
 
     let status = st.statuses.read().get(&rel).copied();
     let deleted_note =
         settled && new_side == FileContent::Absent && status == Some(ChangeKind::Deleted);
-    // Go to Definition / Find References run against whatever was indexed —
-    // the local repository, or this pull request's own checkout.
-    let symbols_enabled = st.scan_root.read().dir().is_some();
-
     let prose = markdown::is_markdown(&rel);
-    let previewable = htmlview::is_html(&rel) || prose;
+    let previewable = is_html(&rel) || prose;
     // Only changed files have a diff to show, and only HTML has a page to draw.
     let mode = match *st.view_mode.read() {
         ViewMode::Preview if !previewable => ViewMode::Source,
@@ -294,22 +220,26 @@ pub fn Viewer() -> Element {
     let badge = status.map(|s| (s.badge(), s.css()));
     let diff_stats = hunks.read().as_ref().map(|h| stats(h));
 
-    let selected = st.selected.read().clone();
+    // The identifier picked out of the code, if one has been. Every line that
+    // holds it gets it marked — which is why this is threaded all the way down
+    // rather than done in CSS: only the lines that match pay for it.
+    let mark = st.selected.read().clone();
+    let mark = mark.as_deref();
 
     let body = match mode {
         ViewMode::Source => match source_lines.read().as_ref() {
-            Some(SourceLines::Colored(lines)) => render_colored(st, lines, symbols_enabled),
-            Some(SourceLines::Plain(lines)) => render_plain(lines),
+            Some(SourceLines::Colored(lines)) => render_colored(lines, mark),
+            Some(SourceLines::Plain(lines)) => render_plain(lines, mark),
             None => rsx! { div { class: "notice", "Binary file — no preview." } },
         },
         ViewMode::Inline => match hunks.read().as_ref() {
             Some(h) if h.is_empty() => rsx! { div { class: "notice", "No differences." } },
-            Some(h) => render_inline(h),
+            Some(h) => render_inline(h, mark),
             None => rsx! { div { class: "notice", "Binary file — cannot diff." } },
         },
         ViewMode::Split => match hunks.read().as_ref() {
             Some(h) if h.is_empty() => rsx! { div { class: "notice", "No differences." } },
-            Some(h) => render_split(h),
+            Some(h) => render_split(h, mark),
             None => rsx! { div { class: "notice", "Binary file — cannot diff." } },
         },
         ViewMode::Preview if prose => match doc.read().as_ref() {
@@ -319,8 +249,7 @@ pub fn Viewer() -> Element {
         ViewMode::Preview => match &*preview.read() {
             None => rsx! { div { class: "notice", "Drawing the page…" } },
             Some(None) => rsx! { div { class: "notice", "Nothing to draw — this file has no text." } },
-            Some(Some(Err(e))) => rsx! { div { class: "notice error", "{e}" } },
-            Some(Some(Ok(shot))) => render_preview(shot),
+            Some(Some(html)) => render_preview(html),
         },
     };
 
@@ -357,39 +286,28 @@ pub fn Viewer() -> Element {
         "Waiting for the file"
     };
 
-    // The staged/unstaged choice, which only the working tree has. Its buttons
-    // are the same control as the mode group beside them, so they are built the
-    // same way — and a half this file does not have is disabled rather than
-    // left to answer "no differences".
-    let mut diff_side = st.diff_side;
-    let stage = st.stages.read().get(&rel).copied();
-    let sided = diffable && !st.workspace.read().is_remote() && stage.is_some();
-    let side_btn = |s: DiffSide| {
-        let has = stage.is_some_and(|stage| s.exists_for(stage));
-        let cls = if s == side && has {
-            "modebtn on"
-        } else {
-            "modebtn"
-        };
-        let why = match (has, s) {
-            (true, _) => s.why(),
-            (false, DiffSide::Staged) => "Nothing about this file is staged yet",
-            (false, _) => "This file is staged exactly as it is on disk",
-        };
-        rsx! {
-            button {
-                class: cls,
-                title: "{why}",
-                disabled: !has,
-                onclick: move |_| diff_side.set(s),
-                "{s.label()}"
-            }
-        }
-    };
+    let (can_back, can_fwd) = (st.can_go_back(), st.can_go_forward());
+    let selected = st.selected.read().clone();
 
     rsx! {
         div { class: "viewer",
             div { class: "viewhdr",
+                // Following a definition three files away is only worth doing
+                // if getting back is one key. These are that key, drawn.
+                button {
+                    class: "iconbtn sm",
+                    title: "Back  (⌘[)",
+                    disabled: !can_back,
+                    onclick: move |_| st.go_back(),
+                    "‹"
+                }
+                button {
+                    class: "iconbtn sm",
+                    title: "Forward  (⌘])",
+                    disabled: !can_fwd,
+                    onclick: move |_| st.go_forward(),
+                    "›"
+                }
                 span { class: "vpath", title: "{rel_str}", "{rel_str}" }
                 if let Some((b, c)) = badge {
                     span { class: "badge {c}", "{b}" }
@@ -403,22 +321,7 @@ pub fn Viewer() -> Element {
                         span { class: "dstat del", "−{ds.removed}" }
                     }
                 }
-                if let Some(stage) = stage {
-                    if sided {
-                        span { class: "stgnote {stage.css()}", title: "{stage.note()}", "{stage.label()}" }
-                    }
-                }
                 span { class: "spacer" }
-                // Which two sides the diff is between. Only where there is a
-                // choice: a pull request's diff is fixed by the two commits it
-                // names, and an unchanged file has no diff at all.
-                if sided {
-                    div { class: "modegroup",
-                        {side_btn(DiffSide::Worktree)}
-                        {side_btn(DiffSide::Staged)}
-                        {side_btn(DiffSide::Unstaged)}
-                    }
-                }
                 // One control, not four loose buttons: these are alternatives,
                 // and a segmented group is what says so.
                 div { class: "modegroup",
@@ -437,11 +340,55 @@ pub fn Viewer() -> Element {
                 }
             }
             if let Some(name) = selected {
-                if symbols_enabled {
-                    SymBar { name }
-                }
+                SymBar { name }
             }
-            div { class: "codewrap", {pending.unwrap_or(body)} }
+            div {
+                class: "codewrap",
+                // A browser already knows where a word starts and ends, and a
+                // double-click is how it is asked. Wrapping every token of
+                // every line in its own clickable span to find out the same
+                // thing costs more than everything else the viewer does.
+                ondoubleclick: move |_| ide::select_word(st),
+                {pending.unwrap_or(body)}
+            }
+        }
+    }
+}
+
+/// What can be done with the identifier that has been picked out.
+#[component]
+fn SymBar(name: String) -> Element {
+    let st = use_context::<St>();
+    let mut sel = st.selected;
+    let (def, peek, refs) = (name.clone(), name.clone(), name.clone());
+    rsx! {
+        div { class: "symbar",
+            span { class: "symname", "{name}" }
+            button {
+                class: "symbtn",
+                title: "Open where this is defined  (F12)",
+                onclick: move |_| ide::goto_def(st, &def),
+                "Go to Definition"
+            }
+            button {
+                class: "symbtn",
+                title: "Show the definition below, without leaving this file",
+                onclick: move |_| ide::peek_def(st, &peek),
+                "Peek"
+            }
+            button {
+                class: "symbtn",
+                title: "Every use of this name in the repository  (⇧F12)",
+                onclick: move |_| ide::find_refs(st, &refs),
+                "Find References"
+            }
+            span { class: "spacer" }
+            button {
+                class: "iconbtn",
+                title: "Clear the selection  (Esc)",
+                onclick: move |_| sel.set(None),
+                "✕"
+            }
         }
     }
 }
@@ -467,14 +414,6 @@ fn Welcome() -> Element {
             format!("{} @ {}", view.repo, view.branch),
             "No README here — pick a file on the left.".to_string(),
         )),
-        Workspace::Compare(view) => Some((
-            view.label(),
-            format!(
-                "{} file{} changed — pick one on the left.",
-                view.files.len(),
-                if view.files.len() == 1 { "" } else { "s" },
-            ),
-        )),
         _ => None,
     };
     if let Some((title, hint)) = showing {
@@ -493,83 +432,50 @@ fn Welcome() -> Element {
                 div { class: "welcome-logo", "pullspace" }
                 div { class: "welcome-sub", "a lightweight diff viewer" }
                 div { class: "welcome-hint", "Pick a file on the left — changed files open as diffs." }
-                div { class: "welcome-hint", "Click an identifier for Go to Definition / Find References." }
                 button {
                     class: "primarybtn",
                     onclick: move |_| gh_open.set(true),
-                    "Review a GitHub pull request"
+                    "Open a pull request"
                 }
             }
         }
     }
 }
 
-#[component]
-fn SymBar(name: String) -> Element {
-    let st = use_context::<St>();
-    let n1 = name.clone();
-    let n2 = name.clone();
-    let mut sel = st.selected;
+/// One run of text, with every whole-word occurrence of the selected
+/// identifier picked out of it.
+///
+/// The `contains` short-circuit is the whole design: with nothing selected, or
+/// on the overwhelming majority of lines that do not mention it, this is the
+/// single span it always was. Only the handful of lines that actually match
+/// pay for being split up.
+fn marked(text: &str, color: Option<&str>, mark: Option<&str>) -> Element {
+    let style = color.map(|c| format!("color:{c}")).unwrap_or_default();
+    let Some(name) = mark.filter(|n| text.contains(*n)) else {
+        return rsx! { span { style: "{style}", "{text}" } };
+    };
+    let parts = split_word(text, name);
+    if !parts.iter().any(|(hit, _)| *hit) {
+        return rsx! { span { style: "{style}", "{text}" } };
+    }
+    let parts: Vec<(bool, String)> = parts
+        .into_iter()
+        .map(|(hit, s)| (hit, s.to_string()))
+        .collect();
     rsx! {
-        div { class: "symbar",
-            span { class: "symname", "{name}" }
-            button { class: "symbtn", onclick: move |_| st.goto_def(&n1), "Go to Definition" }
-            button { class: "symbtn", onclick: move |_| st.find_refs(&n2), "Find References" }
-            span { class: "spacer" }
-            button {
-                class: "iconbtn",
-                title: "Clear the selection",
-                onclick: move |_| sel.set(None),
-                "✕"
+        for (i, (hit, part)) in parts.into_iter().enumerate() {
+            if hit {
+                span { key: "{i}", class: "occ", style: "{style}", "{part}" }
+            } else {
+                span { key: "{i}", style: "{style}", "{part}" }
             }
         }
     }
 }
 
-/// Split text into identifier / non-identifier runs.
-fn tokenize(s: &str) -> Vec<(bool, String)> {
-    let mut out: Vec<(bool, String)> = Vec::new();
-    let mut cur = String::new();
-    let mut cur_word = false;
-    for ch in s.chars() {
-        let is_word = ch.is_alphanumeric() || ch == '_';
-        if !cur.is_empty() && is_word != cur_word {
-            out.push((cur_word, std::mem::take(&mut cur)));
-        }
-        cur_word = is_word;
-        cur.push(ch);
-    }
-    if !cur.is_empty() {
-        out.push((cur_word, cur));
-    }
-    out
-}
-
-fn clickable(tok: &str) -> bool {
-    tok.len() > 1 && tok.chars().next().is_some_and(|c| c.is_alphabetic() || c == '_')
-}
-
-fn token_span(st: St, color: String, is_word: bool, tok: String, enabled: bool) -> Element {
-    if enabled && is_word && clickable(&tok) {
-        let t2 = tok.clone();
-        let mut sel = st.selected;
-        rsx! {
-            span {
-                class: "id",
-                style: "color:{color}",
-                onclick: move |_| sel.set(Some(t2.clone())),
-                "{tok}"
-            }
-        }
-    } else {
-        rsx! {
-            span { style: "color:{color}", "{tok}" }
-        }
-    }
-}
-
-fn render_colored(st: St, lines: &[Vec<Span>], symbols_enabled: bool) -> Element {
+fn render_colored(lines: &[Vec<Span>], mark: Option<&str>) -> Element {
     let lines = lines.to_vec();
+    let mark = mark.map(str::to_string);
     rsx! {
         div { class: "code",
             for (i, spans) in lines.into_iter().enumerate() {
@@ -577,9 +483,7 @@ fn render_colored(st: St, lines: &[Vec<Span>], symbols_enabled: bool) -> Element
                     span { class: "ln", "{i + 1}" }
                     span { class: "lc",
                         for sp in spans {
-                            for (is_word, tok) in tokenize(&sp.text) {
-                                {token_span(st, sp.color.clone(), is_word, tok, symbols_enabled)}
-                            }
+                            {marked(&sp.text, Some(&sp.color), mark.as_deref())}
                         }
                     }
                 }
@@ -588,55 +492,50 @@ fn render_colored(st: St, lines: &[Vec<Span>], symbols_enabled: bool) -> Element
     }
 }
 
-/// The page as a picture, over a bar saying what it is and is not.
+/// The page itself, in a box that cannot reach out of itself.
 ///
-/// "scripts disabled" is not a disclaimer to be buried: this is a drawing of
-/// the page, not the page running, and anyone judging a change by it should
-/// know that up front.
-fn render_preview(shot: &Shot) -> Element {
-    let uri = shot.uri.clone();
-    let blocked = shot.blocked;
-    let clipped = shot.clipped;
+/// The empty `sandbox` matters more here than the convenience does. This page
+/// holds a GitHub token in local storage, and the file being previewed is
+/// someone else's code from a pull request. An empty value denies everything
+/// the attribute can deny — scripts, forms, navigation, popups, and above all
+/// same-origin access, so the frame cannot read the storage it is sitting in.
+fn render_preview(html: &str) -> Element {
     rsx! {
         div { class: "previewwrap",
             div { class: "previewbar",
                 span {
                     class: "previewsafe",
-                    title: "Drawn by Blitz, which has no JavaScript engine — nothing in this page can run",
+                    title: "Rendered in a sandboxed frame — scripts, forms and navigation are all denied, and it cannot see this page",
                     "scripts disabled"
                 }
-                if blocked > 0 {
-                    span {
-                        class: "previewnote",
-                        title: "Stylesheets, images and fonts hosted elsewhere are not fetched",
-                        "{blocked} remote resource{plural(blocked)} blocked"
-                    }
-                }
-                if clipped {
-                    span { class: "previewnote", "page too tall — cut off below" }
+                span {
+                    class: "previewnote",
+                    title: "The frame has no origin, so anything the page hosts elsewhere is fetched without credentials",
+                    "sandboxed"
                 }
             }
-            img {
-                class: "previewimg",
-                style: "width:{shot.css_width}px",
-                src: "{uri}",
+            iframe {
+                class: "previewframe",
+                // Not in dioxus 0.6's iframe element, so spelled as a raw
+                // attribute. Dropping it is not an option — see above.
+                "sandbox": "",
+                // `srcdoc` keeps the page inline: nothing is served, so there
+                // is no URL to leak and nothing to clean up afterwards.
+                srcdoc: "{html}",
             }
         }
     }
 }
 
-fn plural(n: usize) -> &'static str {
-    if n == 1 { "" } else { "s" }
-}
-
-fn render_plain(lines: &[String]) -> Element {
+fn render_plain(lines: &[String], mark: Option<&str>) -> Element {
     let lines = lines.to_vec();
+    let mark = mark.map(str::to_string);
     rsx! {
         div { class: "code",
             for (i, text) in lines.into_iter().enumerate() {
                 div { class: "cl", id: "L{i + 1}",
                     span { class: "ln", "{i + 1}" }
-                    span { class: "lc", "{text}" }
+                    span { class: "lc", {marked(&text, None, mark.as_deref())} }
                 }
             }
         }
@@ -654,20 +553,27 @@ fn num(no: Option<usize>) -> String {
     no.map(|n| n.to_string()).unwrap_or_default()
 }
 
-fn segs_rsx(l: &Line) -> Element {
+/// A diff line's word-level segments, with occurrences marked inside them.
+///
+/// Two kinds of emphasis end up on the same text here: `emph` is what the diff
+/// changed, and `occ` is what the reader picked out. They are different
+/// questions about the same line and both are worth being able to see, so they
+/// nest rather than compete.
+fn segs_rsx(l: &Line, mark: Option<&str>) -> Element {
     let segs = l.segs.clone();
+    let mark = mark.map(str::to_string);
     rsx! {
         for seg in segs {
             if seg.emph {
-                span { class: "emph", "{seg.text}" }
+                span { class: "emph", {marked(&seg.text, None, mark.as_deref())} }
             } else {
-                span { "{seg.text}" }
+                {marked(&seg.text, None, mark.as_deref())}
             }
         }
     }
 }
 
-fn inline_line(l: &Line) -> Element {
+fn inline_line(l: &Line, mark: Option<&str>) -> Element {
     let (cls, sign) = match l.kind {
         LineKind::Ctx => ("cl", " "),
         LineKind::Add => ("cl dl-add", "+"),
@@ -681,7 +587,7 @@ fn inline_line(l: &Line) -> Element {
             span { class: "ln", "{old}" }
             span { class: "ln", "{new}" }
             span { class: "dsign", "{sign}" }
-            span { class: "lc", {segs_rsx(l)} }
+            span { class: "lc", {segs_rsx(l, mark)} }
         }
     }
 }
@@ -699,7 +605,7 @@ fn hunk_header(header: &str) -> Element {
     }
 }
 
-fn render_inline(hunks: &[Hunk]) -> Element {
+fn render_inline(hunks: &[Hunk], mark: Option<&str>) -> Element {
     let hunks = hunks.to_vec();
     rsx! {
         div { class: "code inline",
@@ -707,7 +613,7 @@ fn render_inline(hunks: &[Hunk]) -> Element {
                 div { class: "hunk",
                     {hunk_header(&h.header)}
                     for l in h.lines.iter() {
-                        {inline_line(l)}
+                        {inline_line(l, mark)}
                     }
                 }
             }
@@ -715,7 +621,7 @@ fn render_inline(hunks: &[Hunk]) -> Element {
     }
 }
 
-fn split_cell(l: Option<&Line>, right: bool) -> Element {
+fn split_cell(l: Option<&Line>, right: bool, mark: Option<&str>) -> Element {
     match l {
         None => rsx! { div { class: "scell s-empty" } },
         Some(l) => {
@@ -730,14 +636,14 @@ fn split_cell(l: Option<&Line>, right: bool) -> Element {
                 div { class: "{cls}",
                     {anchor(anchor_no)}
                     span { class: "ln", "{no}" }
-                    span { class: "lc", {segs_rsx(l)} }
+                    span { class: "lc", {segs_rsx(l, mark)} }
                 }
             }
         }
     }
 }
 
-fn render_split(hunks: &[Hunk]) -> Element {
+fn render_split(hunks: &[Hunk], mark: Option<&str>) -> Element {
     let hunks = hunks.to_vec();
     rsx! {
         div { class: "code split",
@@ -746,8 +652,8 @@ fn render_split(hunks: &[Hunk]) -> Element {
                     {hunk_header(&h.header)}
                     for row in to_rows(&h) {
                         div { class: "srow",
-                            {split_cell(row.left.as_ref(), false)}
-                            {split_cell(row.right.as_ref(), true)}
+                            {split_cell(row.left.as_ref(), false, mark)}
+                            {split_cell(row.right.as_ref(), true, mark)}
                         }
                     }
                 }

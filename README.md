@@ -1,63 +1,130 @@
 # pullspace
 
-A lightweight, IDE-style code diff viewer written entirely in Rust, with a
+A lightweight, IDE-style pull request reviewer written entirely in Rust, with a
 [Dioxus](https://dioxuslabs.com) UI.
+
+It is a **static page**. An `index.html`, a `.wasm` and a `.js` — no server, no
+backend, no account with anyone. The page talks to `api.github.com` from the tab
+it is open in, because GitHub answers cross-origin requests.
 
 Two panes, like a traditional IDE but without the weight:
 
-- **Left** — file tree of the repository (respects `.gitignore`), with badges
-  marking changed files: `M` modified, `A` added, `U` untracked, `D` deleted,
-  `R` renamed. A boxed badge is one that has been `git add`ed. Directories
-  containing changes get a dot and auto-expand. The `Δ` button filters the tree
-  down to changed files only.
+- **Left** — the file tree of the repository at the pull request's head commit,
+  with badges marking changed files: `M` modified, `A` added, `D` deleted, `R`
+  renamed. Directories containing changes get a dot and auto-expand. The `Δ`
+  button filters the tree down to changed files only.
 - **Right** — source viewer. Any file opens with full syntax highlighting;
-  changed files open as diffs against `HEAD`, viewable **side-by-side (Split)**
-  or **unified (Inline)**, both with word-level change emphasis. Markdown opens
-  as the prose it is, with **Source** one button away.
+  changed files open as diffs against the merge base, viewable **side-by-side
+  (Split)** or **unified (Inline)**, both with word-level change emphasis.
+  Markdown opens as the prose it is, with **Source** one button away.
 
-The top bar always says what you are looking at — `local`, `pull request`,
-`browsing` or `compare` — because all four draw the same badges and the same
-diffs. See [Staged and unstaged](#staged-and-unstaged).
+A third pane holds the **conversation**: the description, the discussion, the
+review summaries and the comments left on lines of the diff, merged into one
+list in the order they were written.
 
-It opens on the repository's README, drawn rather than listed — which is what a
-repository has a front page for. See [Markdown](#markdown).
+## Running it
 
-IDE-ish niceties:
-
-- **Search in files** — top-bar search box (Enter), results in a bottom panel,
-  click a hit to jump to that line.
-- **Go to Definition** — click any identifier in the source view, then
-  "Go to Definition". Backed by a lightweight regex symbol index
-  (Rust, JS/TS, Python, Go, Ruby, Java/Kotlin/Swift/C#) built in the
-  background at startup.
-- **Find References** — whole-word search for the clicked identifier across
-  the repo.
-- Jumped-to lines scroll into view and flash.
-- **Branches** — the top bar says which one the working tree is on, and opens
-  the panel that compares any two of them. See
-  [Comparing branches](#comparing-branches).
-- **GitHub pull requests** — sign in once, search for a repository by name, and
-  review any of its PRs in the same two panes. See
-  [Reviewing GitHub pull requests](#reviewing-github-pull-requests).
-
-## Running
+Any static host will do. To try it locally:
 
 ```sh
-cargo run --release                    # open the repo containing the cwd
-cargo run --release -- /path/to/repo   # open a specific repo
+cargo install dioxus-cli --version 0.6.3 --locked   # once, for `dx`
+
+dx build --platform web --release
+python3 -m http.server -d target/dx/pullspace/release/web/public 8380
 ```
 
-Optional extras:
+The bundle is about **1 MB brotli-compressed**.
 
-```sh
-pullspace /path/to/repo src/lib.rs              # open straight into a file
-pullspace /path/to/repo src/lib.rs --mode=inline  # source | inline | split | preview
-```
+For a **GitHub Pages project site** — `you.github.io/pullspace/` — uncomment
+`base_path` in `Dioxus.toml` first and set it to the repository name. The
+generated `index.html` references its assets by absolute path, so a bundle
+built without it 404s anywhere but a domain root. A user/organisation site or a
+custom domain needs no `base_path`.
 
-The `⟳` button re-reads git status and the file tree after you make changes
-outside the app — it reloads the pull request from GitHub when you are
-reviewing one, and makes the comparison again when you are comparing two
-branches.
+## Signing in
+
+Paste a token. That is a constraint rather than a shortcut: GitHub's OAuth
+endpoints — `github.com/login/device/code` and `/login/oauth/access_token` —
+send no CORS headers, so no page may call them, and the web flow additionally
+needs a client secret, which means a server holding it. Every OAuth route ends
+at infrastructure somebody has to run and everybody has to trust with their
+tokens.
+
+A pasted token has neither problem. It is kept in `localStorage` on the origin
+serving the page, and it is sent to `api.github.com` and nowhere else. You can
+confirm that in the network tab.
+
+- A **fine-grained** token needs read access to *Contents*, *Pull requests* and
+  *Metadata*.
+- A **classic** token needs `repo`.
+
+Make one at <https://github.com/settings/personal-access-tokens/new>.
+*Sign out* removes it from storage.
+
+**Without a token, public repositories still work.** File contents come from
+`raw.githubusercontent.com`, which is not metered, so only metadata — the PR
+list, the file list, the repo tree — spends GitHub's anonymous allowance of 60
+requests an hour, and a tree read once is read off the disk after that. A token
+raises the allowance to 5000 and reaches private repositories.
+
+## Reviewing a pull request
+
+The chip on the right of the top bar opens the GitHub panel. Type part of a
+repository name and pick it from the results — `↑`/`↓` and `Enter`, or click —
+to list its open pull requests. With the box empty it offers your own
+repositories, most recently pushed first.
+
+Nothing has to be typed in full: `owner/repo` works, an exact name is pinned to
+the top of the results, and pasting a pull request URL jumps straight to it.
+
+The explorer shows the **whole repository** at the PR's head commit, not just
+what changed. Unchanged files open as plain highlighted source; changed ones
+open as diffs against the **merge base** — so you see the PR's own changes, not
+everything that landed on the base branch since it was opened.
+
+Opening a PR **downloads the whole repository** into the browser's filesystem,
+twelve files at a time, starting with the ones the PR changes. The top bar
+shows `cloning n/total` while it runs. It costs a few seconds on the way in and
+after that nothing in the explorer touches the network: every click is a read
+off the disk.
+
+`⟳` re-polls GitHub. New commits move the head, so the changed-file list, the
+tree and the cached contents are all rebuilt from it; the file you are reading
+and the tree you have expanded are kept.
+
+A repository with no open pull requests can be opened on its own, at the tip of
+its default branch — the same two panes, with nothing marked as changed.
+
+## The local copy
+
+What is downloaded stays downloaded. Files are kept in the browser's **Origin
+Private File System** — a real filesystem, private to the site, with none of
+`localStorage`'s 5 MB ceiling — and they are filed under the **git blob hash**
+of their contents rather than under a commit.
+
+That is what makes the second visit cheap. A pull request opened next week has
+a head commit that did not exist today, but nearly every file in it hashes to
+what it hashes to now, so opening it downloads the handful of files that
+actually differ and reads the other few thousand off the disk. The same goes
+for the base side of every diff, for a second pull request on the same
+repository, and for `⟳` after a push.
+
+The GitHub panel says how much is stored and has a **Clear** button. Nothing is
+sent anywhere: the store is per-origin, so it is readable by this page and by
+nothing else, exactly like the token.
+
+A clone runs in the background and gets out of the way of the person it is for:
+it stands aside whenever a file is being opened, since both go through the same
+filesystem and it has thousands of files in hand where the reader has one, and
+it gives the browser a turn every couple of dozen files so the tree still
+scrolls while it works. Hovering a row still warms it — but only when it is not
+already here, which after the first minute it usually is.
+
+Left to itself it stays under **1 GB**. Past that, the repositories you have not
+opened in the longest are dropped, and every file no remaining repository refers
+to goes with them. Files over 1 MB and the ones the viewer would only call
+binary — images, archives, fonts, compiled objects — are not downloaded up
+front; opening one fetches it then.
 
 ## Markdown
 
@@ -66,250 +133,94 @@ boxes, with fenced code run through the same syntax highlighter as the source
 view. `Source` shows the file exactly as written, and the two swap without
 reloading anything.
 
-Links work. An outside one opens in your browser; one pointing at a file in the
+Links work. An outside one opens in a new tab; one pointing at a file in the
 repository opens it in this viewer, resolved relative to the document it is
 written in — so a README that links to `docs/design.md` is a way around the
 repository rather than a dead end.
 
-What is *not* drawn is anything the file smuggles in as HTML. Markdown may
-contain it, and rendering it would mean handing markup out of a repository to
-the webview this app draws its own UI in — which would be a real hole, for the
-sake of a centred banner. The bar says `raw HTML not drawn` when a file
-contained some. Images are not fetched either, for the same reason a pull
-request preview fetches nothing: their alt text is shown in their place.
+What is *not* drawn is anything the file smuggles in as HTML. The bar says
+`raw HTML not drawn` when a file contained some. Images are not fetched either:
+their alt text is shown in their place.
 
-## Staged and unstaged
-
-The `local` chip in the top bar is followed by the two halves of `git add`:
-`4 staged`, `3 unstaged`, or `clean` when the working tree matches `HEAD`. In
-the explorer, a **boxed** badge is staged, a plain one is not, and a badge with
-a boxed left edge is both — added once and changed again since.
-
-A changed file opens with a second control beside the view modes:
-
-| | what it diffs | the command it is |
-|---|---|---|
-| **All** | `HEAD` against the files on disk | `git diff HEAD` |
-| **Staged** | `HEAD` against the index | `git diff --staged` |
-| **Unstaged** | the index against the files on disk | `git diff` |
-
-**All** is the default and the one most files only have. A half a file does not
-have is disabled rather than left to answer "no differences" — and if the
-choice does not apply to the file you open, the view falls back to the half
-that does, so clicking through a review never lands on an empty pane.
-
-This exists only for the working tree. A pull request's diff is fixed by the
-two commits it names, and so is a comparison's; neither has an index anywhere
-in it, so neither shows the control.
-
-## Comparing branches
-
-The top bar shows the branch the working tree is on — or `detached @ 1a2b3c4`
-when it is not on one. Clicking it opens the branch panel: pick a **base** and
-a **head**, press **Compare**, and the two panes fill with the difference the
-same way a pull request does. Changed files carry the usual badges, `Δ` narrows
-the tree to them, and each one opens in Split or Inline against the base.
-
-Comparisons are made against the **merge base** of the two branches, so what
-you see is what the head branch adds — not everything that has landed on the
-base since it forked. That is `git diff base...head`, and it is the same
-comparison GitHub shows. Two branches with no shared history have no merge base;
-the top bar says `unrelated` and diffs their tips instead.
-
-Both sides are read straight out of the object database, so there is no
-network, no cache and no waiting. Nothing is checked out and no ref is moved:
-comparing branches leaves the repository exactly as it was found, and `✕ close
-compare` returns to the working tree.
-
-## Reviewing GitHub pull requests
-
-The top-bar chip on the right opens the GitHub panel. Type part of a repository
-name and pick it from the results — `↑`/`↓` and `Enter`, or click — to list its
-open pull requests. With the box empty it offers your own repositories, most
-recently pushed first, so the usual ones are one click away.
-
-Nothing has to be typed in full: `owner/repo` still works, an exact one is
-pinned to the top of the results, and pasting a pull request URL jumps straight
-to that PR.
-
-The explorer then shows the **whole repository** at the PR's head commit, just
-like a local checkout: changed files carry the usual `M`/`A`/`D`/`R` badges,
-their directories get a dot and auto-expand, and `Δ` narrows the tree to the
-changed files. Unchanged files open as plain highlighted source; changed ones
-open in the same Split / Inline diff views, against the **merge base** — so you
-see the PR's own changes, not everything that landed on the base branch since it
-was opened.
-
-Search, Go to Definition and Find References work in a pull request exactly as
-they do locally — they run against the PR's own head commit, so a definition
-found is the definition as of that commit, not as of your checkout. This needs
-the repository on disk; see the table below.
-
-The repository does not have to be cloned locally. `✕ close PR` returns to the
-local working tree.
-
-### Where the files come from
-
-The top bar shows which of three sources is in play, because it is the
-difference between instant and a network round trip per file:
-
-| Badge | Meaning |
-| --- | --- |
-| `local` | A clone you already had. Fetching one PR ref into it takes about a second and no meaningful disk. |
-| `mirrored` | A bare clone under `~/.cache/pullspace/repos/`, for repos you don't have. |
-| `api` | No local repo available — one HTTPS request per file, and no search. |
-
-Reading a file locally takes about 5 ms against roughly 250 ms over the API,
-and the explorer's whole file tree comes straight from the object database
-(0.7 ms, with none of the API's size limits). Revisiting a PR, or opening
-another PR on the same repo, only fetches the new objects.
-
-On either local source, opening a PR also **checks its head commit out** to
-`~/.cache/pullspace/checkouts/<owner>__<repo>/<sha>/`. That is what makes
-search and the symbol index work: they walk a directory, and this is one. It
-costs a working copy of the repository on disk, which is the deal — reviewing
-tends to circle the same few repositories, so it is paid once and reused. The
-three most recent checkouts per repository are kept.
-
-Submodules are skipped: their objects live in another repository that a mirror
-does not have, and a pull request diffs the gitlink rather than their contents
-— so they are absent from the explorer and from search, exactly as they are
-absent from the diff. When a checkout cannot be made at all (`api`, or a
-failure), the search box says why instead of quietly searching the wrong tree.
-
-Borrowing your own clone only ever **adds** objects and one ref under
-`refs/pullspace/<owner>/<repo>/pr/<n>`. Your branches, tags, HEAD, index and
-working tree are never touched — checkouts are written to pullspace's own cache
-with no index write, never into your repository. To see or remove what was
-added:
-
-```sh
-git for-each-ref refs/pullspace          # what pullspace added
-git for-each-ref --format='%(refname)' refs/pullspace | xargs -n1 git update-ref -d
-```
-
-Mirrors and checkouts together are capped at **5 GB**, evicting
-least-recently-used entries to stay under it — checkouts first, since remaking
-one is a local operation where remaking a mirror is a download. The GitHub
-panel shows the current size and clears it. Override the cap with
-`PULLSPACE_CACHE_MAX_GB`. Clones you already had are never counted against the
-cap and never deleted — they aren't pullspace's to remove.
-
-Whichever source is used, opening a PR warms every file it changes, six at a
-time, so clicking through a review never waits — the top bar shows
-`warming n/total` until it finishes. Other files are fetched when you hover
-them in the tree. They aren't prefetched wholesale: a repository can hold 60k
-of them, though on a local source they are effectively free anyway.
-
-### Signing in
-
-pullspace uses the **OAuth device flow**, which needs no client secret and no
-redirect server — nothing confidential is stored in the binary. It does need a
-client ID, which is public information, and you register that once:
-
-1. Open <https://github.com/settings/applications/new>.
-2. Give it any name; the homepage and callback URL are not used — put anything
-   valid in them (e.g. `http://localhost`).
-3. Create the app, then on its settings page tick **Enable Device Flow**.
-   Sign-in fails with a clear message if you skip this.
-4. Copy the **Client ID** into the panel and press *Sign in with GitHub*. Enter
-   the code shown, in the browser tab that opens — *Copy* puts it on the
-   clipboard, and clicking the code itself selects the whole thing.
-
-The token is written to `~/.config/pullspace/auth.json` with `0600`
-permissions, and the client ID to `config.json` beside it. *Sign out* deletes
-the token.
-
-If you would rather not register an app, pullspace also picks up an existing
-credential at startup, in this order:
-
-| Source | Notes |
-| --- | --- |
-| `~/.config/pullspace/auth.json` | Written by signing in through the app. |
-| `$GITHUB_TOKEN` / `$GH_TOKEN` | Needs the `repo` scope for private repos. |
-| `gh auth token` | Any authenticated [`gh`](https://cli.github.com) CLI. |
-
-`PULLSPACE_GITHUB_CLIENT_ID` overrides the saved client ID. Signing in through
-the app takes precedence over the ambient credentials, so it always has a
-visible effect.
-
-Signing in is optional for public repositories — with no credential the app
-falls back to anonymous requests, subject to GitHub's 60 requests/hour
-unauthenticated limit. Private repositories report a 404 until you sign in.
+HTML files get a **Preview** that is the real page, rendered in an `iframe` with
+an empty `sandbox` — no scripts, no forms, no navigation, and no same-origin
+access, so a previewed file cannot reach the token in local storage.
 
 ## Architecture
 
 ```
 src/
+  main.rs           one launch
   backend/          UI-agnostic engine
-    mod.rs          FileContent: one side of a diff, whatever its source
-    auth.rs         GitHub device flow, token storage & discovery
-    github.rs       GitHub REST: repo search, PR lists, PR files, blob content
-    mirror.rs       local clones, bare mirrors, checkouts; git2 object reads
-    gitio.rs        git2: repo discovery, statuses & staging, HEAD/index blobs
-    branches.rs     git2: HEAD, branch list, merge-base comparison of two refs
-    tree.rs         file-tree model built from the worktree + git status
+    mod.rs          FileContent: one side of a diff
+    http.rs         one GET, on the browser's fetch
+    github.rs       GitHub REST: repo search, PR lists, PR files, trees, blobs
+    auth.rs         the token, and localStorage
+    store.rs        localStorage: what a desktop app would put in ~/.config
+    opfs.rs         the browser's filesystem, as bytes in and bytes out
+    blobs.rs        the local copy: blobs by content hash, manifests, sweeping
+    clone.rs        pulling a whole commit down, and reading files back out
+    layout.rs       pane sizes, kept between visits
+    tree.rs         file-tree model built from a path list + change statuses
     difftool.rs     hunk/line/segment diff model (similar), split-row pairing
     highlight.rs    syntect syntax highlighting (pure-Rust fancy-regex build)
     markdown.rs     markdown parsed to blocks and styled runs (no HTML)
-    symbols.rs      regex-based symbol index (definitions)
-    search.rs       repo-wide text/word search (ignore walker)
   ui/               Dioxus components
     app.rs          state (signals + context), root layout
+    compat.rs       sleep, on the browser's event loop
     github.rs       sign-in, repository search, pull request picker overlay
-    branches.rs     branch chip, compare panel
-    prcache.rs      PR file cache: prefetch, hover warming, source choice
-    topbar.rs       what is on screen, search, index status, account, refresh
-    filetree.rs     recursive tree with status & staging badges
-    viewer.rs       source view, inline & split diff views, symbol actions
+    prcache.rs      what is decoded in memory, and what warms it
+    topbar.rs       what is on screen, warm-up progress, account, refresh
+    filetree.rs     recursive tree with status badges
+    viewer.rs       source view, inline & split diff views
     markdown.rs     markdown drawn as elements; link targets
-    bottom.rs       search / references / definitions results panel
+    conversation.rs the pull request's description and comments
+    panes.rs        draggable dividers
 ```
 
-The backend is deliberately platform-agnostic (pure functions over paths and
-strings); Dioxus compiles to native and wasm, so a web build mainly needs the
-`git2`/filesystem access in `gitio.rs` swapped for a server or wasm-friendly
-data source.
+One crate, one target, and no `#[cfg(target_arch)]` anywhere in it. Everything
+is pure except `http.rs`, `store.rs`, `opfs.rs` and the `open_browser` in
+`auth.rs`, which are the only four places that touch the browser at all — and
+each of them answers "there is no browser here" without complaining, which is
+what keeps `cargo test` running on the host.
+
+`cargo test` still runs natively: the gloo/web-sys crates compile for the host
+even though their calls only work in a page, and everything with tests — the
+diff model, highlighting, markdown, the tree, URL parsing — is pure.
 
 ## Notes & limits
 
-- Local diffs are worktree vs `HEAD` (staged + unstaged combined) unless you
-  ask for one half — see [Staged and unstaged](#staged-and-unstaged); pull
-  request and branch-comparison diffs are merge-base vs head.
-- The staged view reads the index as it is now. `⟳` picks up an `add` or a
-  `reset` made in another terminal, the same as any other change.
-- Nothing in pullspace writes to the index: the staged/unstaged views read it,
-  and staging a change is still something you do in git.
-- A comparison shows commits, so uncommitted work in the working tree is not
-  part of it — `✕ close compare` is where that lives.
-- Search and Go to Definition keep walking the working tree while a comparison
-  is open: it is the copy on disk, and it is the one you can edit.
-- Search / Go to Definition / Find References need files on disk, so in PR mode
-  they work on the `local` and `mirrored` sources but not on `api`.
-- On a pull request, `⟳` re-polls GitHub: new commits move the head, so the
-  changed-file list, the tree, the checkout and the cached contents are all
-  rebuilt from it. The file you are reading and the tree you have expanded are
-  kept, and an unmoved head reuses its checkout and symbol index.
+- The clone is one request per file, because a page cannot do it in one:
+  `github.com`'s smart-HTTP endpoints send no CORS headers, and `codeload`
+  answers archive requests only to GitHub's own origin, so neither the git
+  protocol nor the tarball can be had from a browser tab. What can is
+  `raw.githubusercontent.com`, which answers anybody and is not metered — so a
+  public repository costs bandwidth and none of the API's hourly allowance,
+  whether or not you are signed in. Private repositories have no CDN and are
+  read through the API's blob endpoint, one request of the hour's 5000 each,
+  which is why cloning one is worth doing exactly once.
+- Diffs are merge-base vs head, which is the comparison GitHub's "Files
+  changed" tab shows.
 - The top bar flags a partial explorer: `truncated` (over GitHub's 3000-file
-  cap per PR), `partial tree` (repo past GitHub's recursive-tree limit — about
-  60k files, and only possible on the `api` source), or `changed files only`
-  (the tree could not be read at all).
-- Network git shells out to the `git` CLI. This crate's `git2` is built without
-  the `https` feature, which would drag in `openssl-sys`; reading objects still
-  uses `git2`. Tokens are passed via `--config-env`, so they never appear in
-  process arguments.
-- Files over ~400 KB / 6k lines render without highlighting for speed;
-  binary files are detected and not rendered.
-- Search results are capped at 400 hits.
-- Go to Definition is regex-based (ctags-style), not a full language server —
-  fast and dependency-free, but approximate.
+  cap per PR), `partial tree` (repo past GitHub's recursive-tree limit, about
+  60k files), or `changed files only` (the tree could not be read at all).
+- Highlighting and diffing run on the browser's single thread. Files over
+  ~400 KB / 6k lines render without highlighting for speed; binary files are
+  detected and not rendered.
+- There is no search, no Go to Definition and no Find References. All three
+  walked a directory, and a page has none.
+- There is no local mode: pullspace reviews GitHub, it does not diff your
+  working tree.
 
 ## Development
 
 ```sh
-cargo test    # backend unit tests
-cargo run     # debug build
-
-# Network smoke test against a real public PR, excluded from the normal run:
-cargo test -- --ignored live_pr_round_trip
+cargo test      # the pure logic — diff model, markdown, tree, parsing
+cargo check     # host target, which is what `cargo test` builds
+cargo check --target wasm32-unknown-unknown   # what actually ships
+dx build --platform web --release
 ```
+
+There are no network tests. They would need a browser to run in, since the only
+HTTP client here is `fetch`; the CORS behaviour they would have covered is
+checked by hand with `curl -H "Origin: https://example.com"`.

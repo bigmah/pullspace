@@ -8,7 +8,7 @@
 use dioxus::prelude::*;
 
 use crate::backend::auth::open_browser;
-use crate::backend::github::{pr_comments, Comment, CommentKind, PrDetail, RepoRef};
+use crate::backend::github::{self, Comment, CommentKind, PrDetail, RepoRef};
 
 use super::app::{Conversation, St};
 use super::panes::{Edge, Splitter};
@@ -19,8 +19,7 @@ pub(super) async fn load(st: St, repo: RepoRef, number: u64) {
     let mut conv = st.conv;
     conv.set(Conversation::Loading);
     let token = st.api_token();
-    let target = repo.clone();
-    let got = tokio::task::spawn_blocking(move || pr_comments(&token, &target, number)).await;
+    let got = github::pr_comments(&token, &repo, number).await;
 
     let still_open = st
         .workspace
@@ -31,9 +30,8 @@ pub(super) async fn load(st: St, repo: RepoRef, number: u64) {
         return;
     }
     conv.set(match got {
-        Ok(Ok(thread)) => Conversation::Ready(Box::new(thread)),
-        Ok(Err(e)) => Conversation::Failed(format!("{e:#}")),
-        Err(e) => Conversation::Failed(e.to_string()),
+        Ok(thread) => Conversation::Ready(Box::new(thread)),
+        Err(e) => Conversation::Failed(format!("{e:#}")),
     });
 }
 

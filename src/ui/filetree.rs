@@ -8,7 +8,7 @@ use crate::backend::tree::{
 
 use super::app::St;
 use super::panes::{Edge, Splitter};
-use super::prcache::ensure_path;
+use super::prcache::ensure_hover;
 
 /// How many matches the filter draws. Typing one letter in a large repository
 /// matches thousands of files, and nobody scrolls past the first screen of a
@@ -78,7 +78,7 @@ pub fn FileTreePane() -> Element {
     use_future(move || async move {
         let mut hover = document::eval(HOVER_JS);
         while let Ok(path) = hover.recv::<String>().await {
-            ensure_path(st, &PathBuf::from(path));
+            ensure_hover(st, &PathBuf::from(path));
         }
     });
 
@@ -168,15 +168,6 @@ pub fn FileTreePane() -> Element {
         1 => "1 changed file".to_string(),
         n => format!("{n} changed files"),
     };
-    // How much of that is already added, when there is an index behind it.
-    // Nothing to say on a pull request, where every file is simply changed.
-    let staged = st.stages.read().values().filter(|s| s.is_staged()).count();
-    let changed_title = if staged > 0 {
-        format!("{changed_title} · {staged} staged")
-    } else {
-        changed_title
-    };
-
     // Why the list is empty is not the same question every time, and "no
     // changed files" under a filter that matched nothing is an answer to a
     // question nobody asked.
@@ -305,18 +296,7 @@ fn TreeRow(row: Row) -> Element {
             let active = st.open.read().as_deref() == Some(row.path.as_path());
             let cls = if active { "row file active" } else { "row file" };
             let path = row.path.clone();
-            // Which side of `git add` this one is on, when that is a question
-            // — locally it always is, and on a pull request it never is. Read
-            // from the map rather than carried in the row: staging only ever
-            // changes together with the statuses that rebuild the tree anyway.
-            let stage = st.stages.read().get(&row.path).copied();
-            let badge = status.map(|s| {
-                let (mark, note) = match stage {
-                    Some(stage) => (stage.css(), stage.note()),
-                    None => ("", ""),
-                };
-                (s.badge(), s.css(), mark, note)
-            });
+            let badge = status.map(|s| (s.badge(), s.css()));
             let name_cls = match status {
                 Some(s) => format!("fname {}", s.css()),
                 None => "fname".to_string(),
@@ -337,8 +317,8 @@ fn TreeRow(row: Row) -> Element {
                     if let Some(dir) = hint {
                         span { class: "fpath", "{dir}" }
                     }
-                    if let Some((b, c, mark, note)) = badge {
-                        span { class: "badge {c} {mark}", title: "{note}", "{b}" }
+                    if let Some((b, c)) = badge {
+                        span { class: "badge {c}", "{b}" }
                     }
                 }
             }

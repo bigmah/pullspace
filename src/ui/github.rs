@@ -4,20 +4,13 @@ use std::time::Duration;
 
 use dioxus::prelude::*;
 
-use crate::backend::auth::{
-    open_browser, poll_device_flow, save_client_id, save_token, sign_out, start_device_flow,
-    Token, TokenSource,
-};
-use crate::backend::github::{
-    list_prs, load_pr, my_repos, parse_target, repo_head, repo_tree, search_repos, viewer_login,
-    PrSummary, RepoHit, RepoRef, RepoView,
-};
-use crate::backend::mirror;
+use crate::backend::auth::{self, open_browser, Token};
+use crate::backend::blobs;
+use crate::backend::github::{self, parse_target, PrSummary, RepoHit, RepoRef, RepoView};
 
-use super::app::{Account, PrList, PrSource, ScanRoot, St};
-
-/// Docs for creating the OAuth app this needs.
-const NEW_APP_URL: &str = "https://github.com/settings/applications/new";
+use super::app::{Account, PrList, St};
+use super::compat;
+use super::topbar::size_label;
 
 #[component]
 pub fn GhPanel() -> Element {
@@ -59,63 +52,81 @@ pub fn GhPanel() -> Element {
                         },
                         Account::SignedOut => rsx! { SignIn { error: None } },
                         Account::Failed(e) => rsx! { SignIn { error: Some(e) } },
-                        Account::Connecting { user_code, verification_uri, note } => rsx! {
-                            DevicePrompt { user_code, verification_uri, note }
-                        },
-                        Account::SignedIn { login, source } => rsx! {
-                            SignedIn { login, source }
+                        Account::SignedIn { login } => rsx! {
+                            SignedIn { login }
                         },
                     }
-                    CacheFooter {}
+                    LocalCopy {}
                 }
             }
         }
     }
 }
 
-/// Mirrors and checkouts are the one thing pullspace keeps on disk that the
-/// user might want back, so show the size and offer to drop it.
-#[component]
-fn CacheFooter() -> Element {
-    let mut cleared = use_signal(|| false);
-    let stats = use_memo(move || {
-        cleared.read();
-        mirror::cache_stats()
-    })();
+// --------------------------------------------------------------- local copy
 
-    if stats.is_empty() {
-        return rsx! {};
-    }
-    let mut parts = Vec::new();
-    if stats.repos > 0 {
-        parts.push(format!(
-            "Mirrored {} {}",
-            stats.repos,
-            if stats.repos == 1 { "repository" } else { "repositories" },
-        ));
-    }
-    if stats.checkouts > 0 {
-        parts.push(format!(
-            "{} {}",
-            stats.checkouts,
-            if stats.checkouts == 1 { "checkout" } else { "checkouts" },
-        ));
-    }
-    parts.push(mirror::human_bytes(stats.bytes));
-    let label = parts.join(" · ");
+/// What is on the disk, and the one button for getting rid of it.
+///
+/// Worth a panel of its own because it is the one thing pullspace leaves
+/// behind. Everything else about the app is a page that forgets you: this keeps
+/// entire repositories, and somebody who wants that space back should not have
+/// to go looking through browser settings for it.
+#[component]
+fn LocalCopy() -> Element {
+    let st = use_context::<St>();
+    // Re-read after a clear, and when a clone finishes — but not while one is
+    // running, since asking the browser how full it is on every file it writes
+    // would be the most expensive thing on the page.
+    let settled = use_memo(move || st.cloning.read().is_none_or(|at| at.finished()));
+    let stored = use_resource(move || async move {
+        st.store_gen.read();
+        settled.read();
+        (blobs::stored(), blobs::usage().await)
+    });
+
+    let (files, used) = stored.cloned().unwrap_or((0, None));
+    let size = match used {
+        Some((used, quota)) if quota > 0.0 => format!(
+            " · {} of {} used",
+            size_label(used as u64),
+            size_label(quota as u64)
+        ),
+        _ => String::new(),
+    };
+
     rsx! {
-        div { class: "ghsection ghcache",
-            span { class: "ghnote", "{label}" }
-            span { class: "spacer" }
-            button {
-                class: "dangerbtn",
-                title: "Delete every mirrored repository and checkout pullspace has on disk. They are rebuilt on demand.",
-                onclick: move |_| {
-                    let _ = mirror::clear_cache();
-                    let v = *cleared.peek();
-                    cleared.set(!v);
-                },
-                "Clear"
+        div { class: "ghsection",
+            div { class: "ghrow",
+                div { class: "ghlabel", "Local copy" }
+                span { class: "spacer" }
+                if files > 0 {
+                    button {
+                        class: "linkbtn",
+                        title: "Delete every repository kept in this browser",
+                        // Root scope: emptying the store means deleting every
+                        // file in it, and closing the panel part way through
+                        // must not leave that half done.
+                        onclick: move |_| {
+                            spawn_forever(async move {
+                                blobs::clear().await;
+                                // The decoded copies search reads from are a
+                                // copy of what has just been deleted.
+                                crate::backend::scan::forget();
+                                st.store_changed();
+                            });
+                        },
+                        "Clear"
+                    }
+                }
+            }
+            div { class: "ghhelp",
+                if files == 0 {
+                    "Repositories you open are kept in this browser's own filesystem, so the \
+                     next pull request on one of them opens without downloading it again."
+                } else {
+                    "{files} files kept{size} — so a repository opened before comes back \
+                     instantly, and a pull request on it downloads only what changed."
+                }
             }
         }
     }
@@ -123,37 +134,67 @@ fn CacheFooter() -> Element {
 
 // ------------------------------------------------------------------ sign in
 
+/// Where to make the token pullspace asks for.
+const NEW_TOKEN_URL: &str = "https://github.com/settings/personal-access-tokens/new";
+
+/// Sign-in for the static build: paste a token.
+///
+/// The device flow is not an option here and no amount of work would make it
+/// one — GitHub's OAuth endpoints send no CORS headers, so no page may call
+/// them, and the web flow needs a secret that only a server could hold. Every
+/// alternative ends at infrastructure that would have to be run by someone and
+/// trusted with everyone's tokens.
+///
+/// So: paste one. It is stored on this origin and sent only to
+/// api.github.com — a shorter path than any OAuth flow would give it, and one
+/// you can check for yourself in the network tab.
 #[component]
 fn SignIn(error: Option<String>) -> Element {
     let st = use_context::<St>();
-    let mut client_id_input = st.client_id_input;
-    let id_value = client_id_input.read().clone();
-    let ready = !id_value.trim().is_empty();
+    let mut typed = use_signal(String::new);
+    let value = typed.read().clone();
+    let ready = !value.trim().is_empty();
 
     rsx! {
         if let Some(e) = error {
             div { class: "gherror", "{e}" }
         }
         div { class: "ghsection",
-            div { class: "ghlabel", "OAuth client ID" }
+            div { class: "ghlabel", "GitHub token" }
             input {
                 class: "ghinput",
-                r#type: "text",
-                placeholder: "Ov23li…",
+                // A bearer token is a password, and shoulder-surfing is real.
+                r#type: "password",
+                placeholder: "github_pat_… or ghp_…",
                 spellcheck: "false",
-                value: "{id_value}",
-                oninput: move |e| client_id_input.set(e.value()),
+                autocomplete: "off",
+                value: "{value}",
+                oninput: move |e| typed.set(e.value()),
+                // Pasting then hitting return is the whole interaction.
+                onkeydown: move |e| {
+                    if e.key() == Key::Enter {
+                        let token = typed.peek().trim().to_string();
+                        if !token.is_empty() {
+                            spawn_forever(use_pasted_token(st, token));
+                        }
+                    }
+                },
             }
             div { class: "ghhelp",
-                "pullspace signs in with the OAuth device flow, so it never needs a client secret. "
-                "Register an OAuth app once, tick "
-                b { "Enable Device Flow" }
-                ", and paste its client ID here — it is saved to ~/.config/pullspace/config.json."
+                "A fine-grained token needs read access to "
+                b { "Contents" }
+                ", "
+                b { "Pull requests" }
+                " and "
+                b { "Metadata" }
+                ". A classic token needs "
+                code { "repo" }
+                "."
             }
             button {
                 class: "linkbtn",
-                onclick: move |_| open_browser(NEW_APP_URL),
-                "Register an OAuth app on GitHub →"
+                onclick: move |_| open_browser(NEW_TOKEN_URL),
+                "Create a token on GitHub →"
             }
         }
         div { class: "ghsection",
@@ -161,252 +202,62 @@ fn SignIn(error: Option<String>) -> Element {
                 class: "primarybtn",
                 disabled: !ready,
                 onclick: move |_| {
-                    let id = st.client_id_input.peek().trim().to_string();
-                    if id.is_empty() {
+                    let token = typed.peek().trim().to_string();
+                    if token.is_empty() {
                         return;
                     }
-                    let _ = save_client_id(&id);
-                    // Root scope, not this component's. `device_flow` replaces
-                    // SignIn with DevicePrompt on its very first step, and
-                    // Dioxus cancels a task when the component that spawned it
-                    // unmounts — so a plain `spawn` here kills the sign-in
-                    // before it ever reaches the network.
-                    spawn_forever(device_flow(st, id));
+                    // Root scope, not this component's: signing in unmounts
+                    // SignIn, and Dioxus cancels a task when the component that
+                    // spawned it goes away.
+                    spawn_forever(use_pasted_token(st, token));
                 },
-                "Sign in with GitHub"
+                "Save token"
             }
             div { class: "ghhelp",
-                "Already have a token? pullspace also picks up "
-                code { "GITHUB_TOKEN" }
-                " or an authenticated "
-                code { "gh" }
-                " CLI automatically — restart the app after running "
-                code { "gh auth login" }
-                "."
+                "Kept in this browser's local storage, on this site only. It is sent to "
+                code { "api.github.com" }
+                " and nowhere else — there is no pullspace server to send it to."
             }
         }
-    }
-}
-
-/// Put `text` on the clipboard, reporting whether it worked.
-///
-/// `navigator.clipboard` needs a secure context, which a desktop webview
-/// serving from its own scheme is not always considered to be, so fall back to
-/// the old selection-based command. The outcome comes back either way, because
-/// a Copy button that says "Copied" without having copied anything is worse
-/// than no button — the user only finds out at the point of pasting.
-async fn copy_to_clipboard(text: &str) -> bool {
-    let literal = serde_json::to_string(text).unwrap_or_else(|_| "\"\"".to_string());
-    let mut eval = document::eval(&format!(
-        r#"(async function() {{
-            const text = {literal};
-            try {{
-                if (window.isSecureContext && navigator.clipboard) {{
-                    await navigator.clipboard.writeText(text);
-                    dioxus.send(true);
-                    return;
-                }}
-            }} catch (e) {{}}
-            try {{
-                const ta = document.createElement('textarea');
-                ta.value = text;
-                ta.setAttribute('readonly', '');
-                ta.style.position = 'fixed';
-                ta.style.opacity = '0';
-                document.body.appendChild(ta);
-                ta.select();
-                ta.setSelectionRange(0, ta.value.length);
-                const ok = document.execCommand('copy');
-                document.body.removeChild(ta);
-                dioxus.send(!!ok);
-                return;
-            }} catch (e) {{}}
-            dioxus.send(false);
-        }})();"#
-    ));
-    // Every path above reports back, but a script that fails to reach any of
-    // them would leave the button waiting forever. Time out into the honest
-    // answer instead.
-    let answered = tokio::time::timeout(Duration::from_secs(3), eval.recv::<bool>()).await;
-    matches!(answered, Ok(Ok(true)))
-}
-
-#[component]
-fn DevicePrompt(user_code: String, verification_uri: String, note: String) -> Element {
-    let st = use_context::<St>();
-    let mut account = st.account;
-    let uri = verification_uri.clone();
-    let show_code = !user_code.is_empty();
-
-    // None until the button is pressed; then whether it actually copied.
-    let mut copied = use_signal(|| None::<bool>);
-    let code = user_code.clone();
-    let shortcut = if cfg!(target_os = "macos") { "⌘C" } else { "Ctrl+C" };
-    let copy_label = match *copied.read() {
-        None => "Copy".to_string(),
-        Some(true) => "Copied ✓".to_string(),
-        Some(false) => format!("Copy failed — select it and press {shortcut}"),
-    };
-
-    rsx! {
         div { class: "ghsection",
-            if show_code {
-                div { class: "ghlabel", "Enter this code at GitHub" }
-                div { class: "ghcoderow",
-                    div {
-                        class: "ghcode",
-                        // Clicking selects the whole code, so the keyboard
-                        // route works even if the clipboard call does not.
-                        title: "Click to select, or use Copy",
-                        "{user_code}"
-                    }
-                    button {
-                        class: "copybtn",
-                        onclick: move |_| {
-                            let text = code.clone();
-                            async move {
-                                let ok = copy_to_clipboard(&text).await;
-                                copied.set(Some(ok));
-                                if ok {
-                                    // Back to "Copy" so a second copy still
-                                    // looks like it did something.
-                                    tokio::time::sleep(Duration::from_secs(2)).await;
-                                    copied.set(None);
-                                }
-                            }
-                        },
-                        "{copy_label}"
-                    }
-                }
-                button {
-                    class: "primarybtn",
-                    onclick: move |_| open_browser(&uri),
-                    "Open {verification_uri}"
-                }
-            }
-            div { class: "ghnote", "{note}" }
-            button {
-                class: "linkbtn",
-                onclick: move |_| account.set(Account::SignedOut),
-                "Cancel"
+            div { class: "ghhelp",
+                "Without a token you can still browse public repositories, at GitHub's "
+                "anonymous limit of 60 API requests an hour. File contents do not count "
+                "against it."
             }
         }
     }
 }
 
-/// Drive the device flow to completion, reporting each step through `account`.
-async fn device_flow(st: St, client_id: String) {
+/// Verify a pasted token before keeping it — a typo should not be something
+/// you have to sign out of.
+async fn use_pasted_token(st: St, token: String) {
     let mut account = st.account;
-    account.set(Account::Connecting {
-        user_code: String::new(),
-        verification_uri: String::new(),
-        note: "Asking GitHub for a code…".to_string(),
-    });
-
-    let cid = client_id.clone();
-    let device = match tokio::task::spawn_blocking(move || start_device_flow(&cid)).await {
-        Ok(Ok(d)) => d,
-        Ok(Err(e)) => return account.set(Account::Failed(format!("{e:#}"))),
-        Err(e) => return account.set(Account::Failed(e.to_string())),
-    };
-
-    account.set(Account::Connecting {
-        user_code: device.user_code.clone(),
-        verification_uri: device.verification_uri.clone(),
-        note: "Waiting for you to approve the app on GitHub…".to_string(),
-    });
-    open_browser(&device.verification_uri);
-
-    // GitHub rejects polls faster than `interval`, and asks for +5s each time
-    // it says slow_down.
-    let mut interval = device.interval.max(5);
-    let mut waited = 0u64;
-    loop {
-        tokio::time::sleep(Duration::from_secs(interval)).await;
-        waited += interval;
-        if waited >= device.expires_in {
-            return account.set(Account::Failed(
-                "That code expired before it was approved. Try again.".to_string(),
-            ));
-        }
-
-        // Bail out if the user cancelled while we were sleeping.
-        if !matches!(*st.account.peek(), Account::Connecting { .. }) {
-            return;
-        }
-
-        let cid = client_id.clone();
-        let code = device.device_code.clone();
-        match tokio::task::spawn_blocking(move || poll_device_flow(&cid, &code)).await {
-            Ok(Ok(crate::backend::auth::PollOutcome::Pending)) => continue,
-            Ok(Ok(crate::backend::auth::PollOutcome::SlowDown { interval: bump })) => {
-                interval += bump;
-            }
-            Ok(Ok(crate::backend::auth::PollOutcome::Token(token))) => {
-                return finish_sign_in(st, token).await;
-            }
-            Ok(Ok(crate::backend::auth::PollOutcome::Denied)) => {
-                return account.set(Account::Failed("Sign-in was denied on GitHub.".to_string()));
-            }
-            Ok(Ok(crate::backend::auth::PollOutcome::Expired)) => {
-                return account.set(Account::Failed(
-                    "That code expired before it was approved. Try again.".to_string(),
-                ));
-            }
-            Ok(Err(e)) => return account.set(Account::Failed(format!("{e:#}"))),
-            Err(e) => return account.set(Account::Failed(e.to_string())),
-        }
-    }
-}
-
-/// Persist the token and confirm which account it belongs to.
-async fn finish_sign_in(st: St, token: String) {
-    let mut account = st.account;
-    let stored = token.clone();
-    let saved = tokio::task::spawn_blocking(move || save_token(&stored)).await;
-    if let Ok(Err(e)) = saved {
-        // Not fatal — the token still works for this session.
-        account.set(Account::Failed(format!("Signed in, but could not save: {e:#}")));
-    }
-
-    let probe = token.clone();
-    let login = tokio::task::spawn_blocking(move || viewer_login(&probe)).await;
-    match login {
-        Ok(Ok(login)) => {
+    account.set(Account::Checking);
+    match github::viewer_login(&token).await {
+        Ok(login) => {
+            auth::save_token(&token);
             let mut t = st.token;
-            t.set(Some(Token {
-                value: token,
-                source: TokenSource::Stored,
-            }));
-            account.set(Account::SignedIn {
-                login,
-                source: TokenSource::Stored,
-            });
+            t.set(Some(Token { value: token }));
+            account.set(Account::SignedIn { login });
         }
-        Ok(Err(e)) => account.set(Account::Failed(format!("{e:#}"))),
-        Err(e) => account.set(Account::Failed(e.to_string())),
+        Err(e) => account.set(Account::Failed(format!("{e:#}"))),
     }
 }
-
-// ------------------------------------------------------------- repo & PR list
 
 #[component]
-fn SignedIn(login: String, source: TokenSource) -> Element {
+fn SignedIn(login: String) -> Element {
     let st = use_context::<St>();
     let prs = st.prs.read().clone();
-    let revocable = source.revocable();
 
     rsx! {
         div { class: "ghsection ghaccount",
             span { class: "ghwho", "Signed in as " b { "{login}" } }
-            span { class: "ghsrc", "{source.label()}" }
             span { class: "spacer" }
-            if revocable {
-                button {
-                    class: "linkbtn",
-                    onclick: move |_| { spawn_forever(do_sign_out(st)); },
-                    "Sign out"
-                }
+            button {
+                class: "linkbtn",
+                onclick: move |_| do_sign_out(st),
+                "Sign out"
             }
         }
         RepoPicker {}
@@ -489,7 +340,7 @@ fn stars_label(stars: u64) -> String {
 ///
 /// Searching is what the box is for — a link is the fallback, not the price of
 /// entry. With nothing typed it offers the account's own repositories, since
-/// the pull requests you have been asked to look at are nearly always on one.
+/// the pull requests you are asked to review are nearly always on one.
 #[component]
 fn RepoPicker() -> Element {
     let st = use_context::<St>();
@@ -514,31 +365,23 @@ fn RepoPicker() -> Element {
             }
             // Debounce: the next keystroke drops this task where it stands, so
             // nothing reaches GitHub until the typing stops.
-            tokio::time::sleep(SEARCH_DEBOUNCE).await;
+            compat::sleep(SEARCH_DEBOUNCE).await;
             let q = query.clone();
-            let hits = tokio::task::spawn_blocking(move || {
-                if q.is_empty() {
-                    my_repos(&token, SUGGESTION_LIMIT)
-                } else {
-                    search_repos(&token, &q, SUGGESTION_LIMIT)
-                }
-            })
-            .await;
+            let hits = if q.is_empty() {
+                github::my_repos(&token, SUGGESTION_LIMIT).await.map_err(|e| format!("{e:#}"))
+            } else {
+                github::search_repos(&token, &q, SUGGESTION_LIMIT).await.map_err(|e| format!("{e:#}"))
+            };
             Some(match hits {
-                Ok(Ok(items)) => Suggestions {
+                Ok(items) => Suggestions {
                     query,
                     items,
                     error: None,
                 },
-                Ok(Err(e)) => Suggestions {
-                    query,
-                    items: Vec::new(),
-                    error: Some(format!("{e:#}")),
-                },
                 Err(e) => Suggestions {
                     query,
                     items: Vec::new(),
-                    error: Some(e.to_string()),
+                    error: Some(e),
                 },
             })
         }
@@ -749,10 +592,9 @@ fn PrRow(repo: RepoRef, pr: PrSummary) -> Element {
     }
 }
 
-/// Forget the stored token. Leaves `$GITHUB_TOKEN` and `gh` alone; the next
-/// startup will pick those up again.
-async fn do_sign_out(st: St) {
-    let _ = tokio::task::spawn_blocking(sign_out).await;
+/// Forget the stored token.
+fn do_sign_out(st: St) {
+    auth::sign_out();
     let mut t = st.token;
     t.set(None);
     let mut a = st.account;
@@ -783,20 +625,14 @@ async fn load_repo_prs(st: St, repo: RepoRef) {
     let token = st.api_token();
     let mut prs = st.prs;
     prs.set(PrList::Loading("Loading pull requests…".to_string()));
-    let target = repo.clone();
-    match tokio::task::spawn_blocking(move || list_prs(&token, &target)).await {
-        Ok(Ok(items)) => prs.set(PrList::Ready { repo, items }),
-        Ok(Err(e)) => prs.set(PrList::Failed(format!("{e:#}"))),
-        Err(e) => prs.set(PrList::Failed(e.to_string())),
+    match github::list_prs(&token, &repo).await {
+        Ok(items) => prs.set(PrList::Ready { repo, items }),
+        Err(e) => prs.set(PrList::Failed(format!("{e:#}"))),
     }
 }
 
-/// Open a repository with no pull request involved: its default branch, synced
-/// and checked out exactly as a pull request's head commit would be.
-///
-/// This is what makes a repository with nothing open reachable at all, and it
-/// is the same three steps as [`open_pr`] minus the diff: settle the source
-/// before the tree, because a local repository lists its own instantly.
+/// Open a repository with no pull request involved: its default branch, at the
+/// commit its tip points to.
 ///
 /// `⟳` runs this again on an open repository, which is how a browse picks up
 /// commits pushed since — the branch tip moves, and everything downstream of it
@@ -806,190 +642,74 @@ pub(super) async fn browse_repo(st: St, repo: RepoRef) {
     let mut prs = st.prs;
 
     prs.set(PrList::Loading("Reading the repository…".to_string()));
-    let target = repo.clone();
-    let tok = token.clone();
-    let head = match tokio::task::spawn_blocking(move || repo_head(&tok, &target)).await {
-        Ok(Ok(h)) => h,
-        Ok(Err(e)) => return prs.set(PrList::Failed(format!("{e:#}"))),
-        Err(e) => return prs.set(PrList::Failed(e.to_string())),
-    };
-
-    prs.set(PrList::Loading(
-        "Syncing the repository (first time may take a moment)…".to_string(),
-    ));
-    let target = repo.clone();
-    let branch = head.branch.clone();
-    let sha = head.sha.clone();
-    let own = st.root_path();
-    let tok = token.clone();
-    let local = tokio::task::spawn_blocking(move || {
-        mirror::prepare_branch(&target, &branch, &sha, &tok, Some(&own))
-    })
-    .await;
-
-    let source = match local {
-        Ok(Ok(repo_on_disk)) => PrSource::Local {
-            git_dir: repo_on_disk.git_dir,
-            borrowed: repo_on_disk.borrowed,
-        },
-        // The API path works, it is just slower per file.
-        _ => PrSource::Api,
+    let head = match github::repo_head(&token, &repo).await {
+        Ok(h) => h,
+        Err(e) => return prs.set(PrList::Failed(format!("{e:#}"))),
     };
 
     prs.set(PrList::Loading("Reading the file tree…".to_string()));
-    let target = repo.clone();
-    let sha = head.sha.clone();
-    let src = source.clone();
-    let tree = tokio::task::spawn_blocking(move || match &src {
-        PrSource::Local { git_dir, .. } => {
-            mirror::tree_paths(git_dir, &sha).map(|p| (p, false)).ok()
-        }
-        PrSource::Api => repo_tree(&token, &target, &sha).ok(),
-    })
-    .await;
-
     // A pull request with no readable tree still has its changed files to show.
     // A repository has nothing at all, so this is where it stops — with the
     // list still on screen, rather than on an explorer that looks empty.
-    let Ok(Some((paths, tree_truncated))) = tree else {
+    let Some(tree) = tree_at(&token, &repo, &head.sha).await else {
         return prs.set(PrList::Failed(format!(
             "Could not read the file list for {repo}."
         )));
     };
 
-    let checkout = match &source {
-        PrSource::Local { git_dir, .. } => {
-            prs.set(PrList::Loading("Checking out the repository…".to_string()));
-            let git_dir = git_dir.clone();
-            let target = repo.clone();
-            let sha = head.sha.clone();
-            match tokio::task::spawn_blocking(move || mirror::materialize(&git_dir, &target, &sha))
-                .await
-            {
-                Ok(Ok(dir)) => ScanRoot::Dir(dir),
-                Ok(Err(e)) => ScanRoot::Unavailable(format!(
-                    "Search is off: this repository could not be checked out — {e:#}"
-                )),
-                Err(e) => ScanRoot::Unavailable(format!(
-                    "Search is off: the checkout did not finish — {e}"
-                )),
-            }
-        }
-        PrSource::Api => ScanRoot::Unavailable(
-            "Search needs a local copy — this repository is read over the GitHub API".to_string(),
-        ),
-    };
-
     prs.set(PrList::Idle);
-    st.enter_repo(
-        RepoView {
-            repo,
-            branch: head.branch,
-            head_sha: head.sha,
-            tree: paths,
-            tree_truncated,
-        },
-        source,
-        checkout,
-    );
+    st.enter_repo(RepoView {
+        repo,
+        branch: head.branch,
+        head_sha: head.sha,
+        tree,
+    });
 }
 
-/// Open a PR: metadata from the API, then contents from a local clone if one
-/// can be had, falling back to the API.
+/// Which files a commit is made of.
 ///
-/// The source is settled *before* the file tree is loaded, because a local
-/// repository can list its own tree instantly — asking the API first would
-/// download up to 20 MB of JSON we are about to throw away.
+/// Off the disk when that commit has been read before — a commit's tree never
+/// changes, so a stored one is not stale, and skipping the request is what
+/// makes reopening a pull request instant rather than merely fast. It also
+/// keeps a reader who is out of API requests in business.
+async fn tree_at(token: &str, repo: &RepoRef, sha: &str) -> Option<github::Snapshot> {
+    if let Some(stored) = blobs::load(repo, sha).await {
+        return Some(stored);
+    }
+    github::repo_tree(token, repo, sha).await.ok()
+}
+
+/// Open a pull request: its metadata and changed files, then the repository
+/// tree at its head so the explorer shows the whole thing rather than only what
+/// changed.
 ///
 /// This is also what `⟳` runs on an open pull request: reloading one means
 /// exactly this work again, since a push moves the head commit and everything
-/// downstream — objects, tree, checkout, cached contents — hangs off it.
+/// downstream of it is keyed by that commit.
 pub(super) async fn open_pr(st: St, repo: RepoRef, number: u64) {
     let token = st.api_token();
     let mut prs = st.prs;
 
     prs.set(PrList::Loading("Loading pull request…".to_string()));
-    let target = repo.clone();
-    let tok = token.clone();
-    let mut detail = match tokio::task::spawn_blocking(move || load_pr(&tok, &target, number)).await
-    {
-        Ok(Ok(d)) => d,
-        Ok(Err(e)) => return prs.set(PrList::Failed(format!("{e:#}"))),
-        Err(e) => return prs.set(PrList::Failed(e.to_string())),
-    };
-
-    prs.set(PrList::Loading(
-        "Syncing the repository (first time may take a moment)…".to_string(),
-    ));
-    let target = repo.clone();
-    let head = detail.head_sha.clone();
-    let own = st.root_path();
-    let tok = token.clone();
-    let local = tokio::task::spawn_blocking(move || {
-        mirror::prepare(&target, number, &head, &tok, Some(&own))
-    })
-    .await;
-
-    let source = match local {
-        Ok(Ok(repo_on_disk)) => PrSource::Local {
-            git_dir: repo_on_disk.git_dir,
-            borrowed: repo_on_disk.borrowed,
-        },
-        // Falling back is not an error worth stopping for — the API path works,
-        // it is just slower per file.
-        _ => PrSource::Api,
+    let mut detail = match github::load_pr(&token, &repo, number).await {
+        Ok(d) => d,
+        Err(e) => return prs.set(PrList::Failed(format!("{e:#}"))),
     };
 
     prs.set(PrList::Loading("Reading the file tree…".to_string()));
-    let head = detail.head_sha.clone();
-    let target = repo.clone();
-    let src = source.clone();
-    let tree = tokio::task::spawn_blocking(move || match &src {
-        PrSource::Local { git_dir, .. } => {
-            mirror::tree_paths(git_dir, &head).map(|p| (p, false)).ok()
-        }
-        PrSource::Api => repo_tree(&token, &target, &head).ok(),
-    })
-    .await;
-
-    if let Ok(Some((paths, truncated))) = tree {
-        detail.tree = paths;
-        detail.tree_truncated = truncated;
+    // A tree that will not load costs the explorer its unchanged files, which
+    // is a smaller loss than refusing to open the review at all.
+    if let Some(tree) = tree_at(&token, &repo, &detail.head_sha).await {
+        detail.tree = tree;
+    }
+    // And the merge base's, which is what the left-hand side of every diff is
+    // read from. Only the changed files are wanted out of it, but knowing what
+    // they hash to is what lets them come off the disk: the base commit is
+    // usually a branch tip that has been read before.
+    if let Some(base) = tree_at(&token, &repo, &detail.base_sha).await {
+        detail.base_tree = base;
     }
 
-    // Check the head commit out as ordinary files, so search, Go to Definition
-    // and Find References work on a pull request exactly as they do on a local
-    // repository — they walk a directory, and this is one.
-    let checkout = match &source {
-        PrSource::Local { git_dir, .. } => {
-            prs.set(PrList::Loading(
-                "Checking out the pull request…".to_string(),
-            ));
-            let git_dir = git_dir.clone();
-            let target = repo.clone();
-            let head = detail.head_sha.clone();
-            match tokio::task::spawn_blocking(move || mirror::materialize(&git_dir, &target, &head))
-                .await
-            {
-                Ok(Ok(dir)) => ScanRoot::Dir(dir),
-                // The pull request is perfectly reviewable without a checkout,
-                // so this is not worth refusing to open it over — but it is
-                // worth saying, or search just looks broken.
-                Ok(Err(e)) => ScanRoot::Unavailable(format!(
-                    "Search is off: this pull request could not be checked out — {e:#}"
-                )),
-                Err(e) => ScanRoot::Unavailable(format!(
-                    "Search is off: the checkout did not finish — {e}"
-                )),
-            }
-        }
-        // Nothing on disk to check out of. The pull request still opens; the
-        // features that need a directory are the ones that go quiet.
-        PrSource::Api => ScanRoot::Unavailable(
-            "Search needs a local copy — this pull request is read over the GitHub API".to_string(),
-        ),
-    };
-
     prs.set(PrList::Idle);
-    st.enter_pr(detail, source, checkout);
+    st.enter_pr(detail);
 }

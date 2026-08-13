@@ -1,25 +1,24 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
-use std::time::Instant;
+
+// std's Instant panics on wasm32-unknown-unknown.
+use web_time::Instant;
 
 use dioxus::prelude::*;
 
-use crate::backend::auth::{Token, TokenSource};
-use crate::backend::branches::{self, CompareView};
-use crate::backend::github::{statuses_of, PrDetail, PrSummary, RepoRef, RepoView, Thread};
-use crate::backend::gitio::{discover_root, load_changes, Stage};
-use crate::backend::layout;
+use crate::backend::auth::Token;
+use crate::backend::clone::Progress;
+use crate::backend::github::{statuses_of, PrDetail, PrSummary, RepoRef, RepoView, Snapshot, Thread};
 use crate::backend::markdown;
-use crate::backend::search::{search_repo, text_query, word_query, Hit};
-use crate::backend::symbols::{build_index, find_definitions, Symbol};
-use crate::backend::tree::{build_tree, build_tree_from_paths, filter_changed, ChangeKind, FileNode};
-use crate::backend::FileContent;
+use crate::backend::search::Options;
+use crate::backend::tree::{build_tree_from_paths, filter_changed, ChangeKind, FileNode};
+use crate::backend::{blobs, layout, FileContent};
 
 use super::bottom::Bottom;
-use super::branches::BranchPanel;
 use super::conversation::ConvPane;
 use super::filetree::FileTreePane;
 use super::github::GhPanel;
+use super::ide::{Index, Panel};
 use super::panes::{self, Drag, DragMask, Edge};
 use super::topbar::TopBar;
 use super::viewer::Viewer;
@@ -35,112 +34,20 @@ pub enum ViewMode {
     Preview,
 }
 
-/// Which two sides a local file is diffed between — the choice `git add` makes
-/// possible, and the one `git diff`, `git diff --staged` and `git diff HEAD`
-/// are three commands for.
+/// What the explorer and viewer are showing.
 ///
-/// Only the working tree has this. A pull request's diff is fixed by the two
-/// commits it names, and so is a comparison's.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum DiffSide {
-    /// HEAD against the files on disk: everything since the last commit,
-    /// staged or not. What the app has always shown, and the default.
-    Worktree,
-    /// HEAD against the index: what a commit right now would contain.
-    Staged,
-    /// The index against the files on disk: what a commit right now would
-    /// leave behind.
-    Unstaged,
-}
-
-impl DiffSide {
-    pub fn label(&self) -> &'static str {
-        match self {
-            DiffSide::Worktree => "All",
-            DiffSide::Staged => "Staged",
-            DiffSide::Unstaged => "Unstaged",
-        }
-    }
-
-    pub fn why(&self) -> &'static str {
-        match self {
-            DiffSide::Worktree => {
-                "Everything since the last commit — HEAD against the files on disk (git diff HEAD)"
-            }
-            DiffSide::Staged => {
-                "What you have added — HEAD against the index (git diff --staged)"
-            }
-            DiffSide::Unstaged => {
-                "What you have not added yet — the index against the files on disk (git diff)"
-            }
-        }
-    }
-
-    /// Whether a file at `stage` has anything to show on this side.
-    pub fn exists_for(&self, stage: Stage) -> bool {
-        match self {
-            DiffSide::Worktree => true,
-            DiffSide::Staged => stage.is_staged(),
-            DiffSide::Unstaged => stage.is_unstaged(),
-        }
-    }
-
-    /// The side to actually show for a file at `stage`.
-    ///
-    /// Asking for the staged half of a file with nothing staged has one honest
-    /// answer — "no differences" — and it is a bad one: the explorer badges
-    /// that file as changed, and it is. So the half that exists is shown
-    /// instead, and the control moves to say so.
-    pub fn resolve(self, stage: Option<Stage>) -> DiffSide {
-        match stage {
-            Some(stage) if !self.exists_for(stage) => match self {
-                DiffSide::Staged => DiffSide::Unstaged,
-                _ => DiffSide::Staged,
-            },
-            _ => self,
-        }
-    }
-}
-
-#[derive(Clone, PartialEq)]
-pub enum BottomPanel {
-    Hidden,
-    /// Dispatched, not yet finished. Searching walks a whole directory off the
-    /// UI thread — on a pull request just checked out, that is a real
-    /// repository's worth of files, not a handful.
-    Working {
-        title: String,
-    },
-    Search {
-        query: String,
-        hits: Vec<Hit>,
-    },
-    Refs {
-        name: String,
-        hits: Vec<Hit>,
-    },
-    Defs {
-        name: String,
-        syms: Vec<Symbol>,
-        indexed: bool,
-    },
-}
-
-/// What the explorer and viewer are showing: the local working tree, a pull
-/// request fetched from GitHub, a GitHub repository browsed on its own, or two
-/// local branches held up against each other.
+/// Everything here comes from GitHub, which is what makes the two cases so
+/// nearly alike: a pull request is a repository with some files marked as
+/// changed, and browsing is the same thing with nothing marked.
 #[derive(Clone, PartialEq)]
 pub enum Workspace {
-    Local,
+    /// Nothing opened yet. The picker is up, because choosing something is the
+    /// only thing there is to do.
+    Empty,
     Pr(Box<PrDetail>),
     /// A repository with no pull request in view — because it has none open,
     /// or because reading the code is the point.
     Repo(Box<RepoView>),
-    /// Two revisions of the repository already on disk. Read out of the object
-    /// database rather than over the network, so it needs no cache and no
-    /// warming — but it changes what "changed" means, exactly as a pull
-    /// request does.
-    Compare(Box<CompareView>),
 }
 
 impl Workspace {
@@ -158,20 +65,33 @@ impl Workspace {
         }
     }
 
-    pub fn compare(&self) -> Option<&CompareView> {
+    pub fn is_open(&self) -> bool {
+        !matches!(self, Workspace::Empty)
+    }
+
+    /// Whether there is a file list to walk.
+    ///
+    /// What search and the symbol index both need, and what a pull request
+    /// whose tree GitHub would not serve does not have. Cheap on purpose —
+    /// [`trees`](Self::trees) answers the same question by cloning several
+    /// thousand entries, which is not something to do on every render of the
+    /// top bar.
+    pub fn has_tree(&self) -> bool {
         match self {
-            Workspace::Compare(view) => Some(view),
-            _ => None,
+            Workspace::Empty => false,
+            Workspace::Pr(pr) => !pr.tree.is_empty(),
+            Workspace::Repo(view) => !view.tree.is_empty(),
         }
     }
 
-    /// Anything read from GitHub rather than from disk. The two remote cases
-    /// share a file cache, a source and a scan root, so most of the app only
-    /// needs to know which side of this line it is on — and a comparison, whose
-    /// files are two git blobs away, is on the near side of it with the working
-    /// tree.
-    pub fn is_remote(&self) -> bool {
-        matches!(self, Workspace::Pr(_) | Workspace::Repo(_))
+    /// The repository at the commit on show, and the merge base under it —
+    /// which a repository browsed on its own does not have.
+    pub fn trees(&self) -> Option<(Snapshot, Snapshot)> {
+        match self {
+            Workspace::Empty => None,
+            Workspace::Pr(pr) => Some((pr.tree.clone(), pr.base_tree.clone())),
+            Workspace::Repo(view) => Some((view.tree.clone(), Snapshot::default())),
+        }
     }
 }
 
@@ -179,18 +99,11 @@ impl Workspace {
 /// separate signal so it is never part of anything rendered.
 #[derive(Clone, PartialEq)]
 pub enum Account {
-    /// Startup: looking for a usable token.
+    /// Startup: looking for a saved token.
     Checking,
     SignedOut,
-    /// Device flow in progress — the user is entering `user_code` on GitHub.
-    Connecting {
-        user_code: String,
-        verification_uri: String,
-        note: String,
-    },
     SignedIn {
         login: String,
-        source: TokenSource,
     },
     Failed(String),
 }
@@ -199,53 +112,9 @@ pub enum Account {
 #[derive(Clone, PartialEq)]
 pub enum PrList {
     Idle,
-    /// Carries what is happening — opening a PR can involve a clone.
     Loading(String),
     Ready { repo: RepoRef, items: Vec<PrSummary> },
     Failed(String),
-}
-
-/// Where search and the symbol index look — and, when they cannot look
-/// anywhere, why not.
-///
-/// The reason travels with the state rather than being dropped, because the
-/// only thing worse than a pull request that cannot be searched is one that
-/// cannot be searched without saying so.
-#[derive(Clone, PartialEq)]
-pub enum ScanRoot {
-    /// A directory to walk: the repository, or a pull request checked out.
-    Dir(PathBuf),
-    /// Nothing on disk, and what to tell the user about it.
-    Unavailable(String),
-}
-
-impl ScanRoot {
-    pub fn dir(&self) -> Option<&PathBuf> {
-        match self {
-            ScanRoot::Dir(p) => Some(p),
-            ScanRoot::Unavailable(_) => None,
-        }
-    }
-
-    pub fn why(&self) -> Option<&str> {
-        match self {
-            ScanRoot::Unavailable(reason) => Some(reason),
-            ScanRoot::Dir(_) => None,
-        }
-    }
-}
-
-/// Where the open pull request's file contents are read from.
-#[derive(Clone, PartialEq)]
-pub enum PrSource {
-    /// One HTTP request per file.
-    Api,
-    /// A git repository on disk — reads are local and effectively instant.
-    Local {
-        git_dir: PathBuf,
-        /// True when this is a clone the user already had.
-        borrowed: bool,
-    },
 }
 
 /// What the conversation pane has to show for the open pull request.
@@ -259,7 +128,25 @@ pub enum Conversation {
     Failed(String),
 }
 
-/// Both sides of one file in a pull request, fetched on demand.
+/// Somewhere the reader has been: a file, how it was being shown, and the line
+/// they were taken to if they were taken to one.
+///
+/// What Back and Forward are made of. Jumping to a definition three files away
+/// is only worth doing if getting back is one key, and getting back means the
+/// file *as it was* — a diff you were reading does not come back as source.
+#[derive(Clone, PartialEq)]
+pub struct Spot {
+    pub path: PathBuf,
+    pub mode: ViewMode,
+    pub line: Option<usize>,
+}
+
+/// How far back the trail is kept. Long enough to cover an afternoon of
+/// following definitions around; short enough not to be a memory leak with a
+/// nice name.
+const TRAIL: usize = 60;
+
+/// Both sides of one file, fetched on demand.
 #[derive(Clone, PartialEq)]
 pub enum PrFileState {
     Loading,
@@ -267,28 +154,32 @@ pub enum PrFileState {
     Failed(String),
 }
 
-/// All app state, shared through context. Every field is a Copy signal.
+/// All app state, shared through context. Every field is a Copy signal, and
+/// every one of them is owned by [`ScopeId::ROOT`] — see [`root`].
 #[derive(Clone, Copy)]
 pub struct St {
-    pub root: Signal<PathBuf>,
-    /// What search and the symbol index walk: the repository itself, or a pull
-    /// request's head commit checked out on disk. Never the user's own
-    /// repository while a pull request is open — that would answer a question
-    /// they did not ask.
-    pub scan_root: Signal<ScanRoot>,
+    /// Which files the open pull request changes, and how. Empty when browsing
+    /// a repository on its own — nothing there is changed.
     pub statuses: Signal<HashMap<PathBuf, ChangeKind>>,
-    /// Which side of `git add` each local change is on. Empty whenever what is
-    /// on screen is not the working tree — there is no index in a pull request.
-    pub stages: Signal<HashMap<PathBuf, Stage>>,
     pub open: Signal<Option<PathBuf>>,
     pub view_mode: Signal<ViewMode>,
-    /// Which two sides a local diff is taken between. Ignored everywhere else,
-    /// and kept across files so that a review of what is staged stays one.
-    pub diff_side: Signal<DiffSide>,
-    pub bottom: Signal<BottomPanel>,
-    pub selected: Signal<Option<String>>,
-    pub pending_scroll: Signal<Option<usize>>,
-    pub index: Signal<Option<Vec<Symbol>>>,
+    /// A request to put a line on screen: written by everything that jumps —
+    /// a comment on the diff, a search hit, a definition.
+    ///
+    /// Set, never cleared. Clearing it was a write to the signal its own
+    /// effect is subscribed to, which dioxus quite rightly calls a loop; and
+    /// clearing was only ever needed to tell "opened at a line" from "opened",
+    /// which is what `at_line` says now. So the effect fires on each write and
+    /// the value left behind means nothing.
+    pub scroll_to: Signal<Option<usize>>,
+    /// The line the open file was entered at, if it was entered at one — a
+    /// fact about where the reader is rather than a request to go anywhere.
+    ///
+    /// Two things read it: Back, which comes back to the definition you were
+    /// reading rather than to the top of the file it was in, and the viewer,
+    /// which only scrolls a newly opened file to the top when it was not
+    /// opened at a line in the first place.
+    pub at_line: Signal<Option<usize>>,
     /// Which directories of the explorer are open. Every directory has an entry
     /// from the moment it is first drawn, so what is open is a record of what
     /// was clicked rather than something re-derived from what has changed —
@@ -299,28 +190,63 @@ pub struct St {
     /// root open, and the way down to every change open with it.
     pub tree_seeded: Signal<bool>,
     /// The explorer's filter box: a substring of the path, narrowing the tree
-    /// to a flat list of matches. Nothing to do with `search_text`, which
-    /// searches inside files.
+    /// to a flat list of matches.
     pub tree_filter: Signal<String>,
     pub changes_only: Signal<bool>,
     pub refresh_tick: Signal<u32>,
+    /// Where the reader has been, and — after a Back — where they were before
+    /// they went back. Emptied whenever somewhere new is opened, which is what
+    /// every editor's Forward does.
+    pub trail: Signal<Vec<Spot>>,
+    pub ahead: Signal<Vec<Spot>>,
+
+    // --- the IDE ---
+    /// The identifier picked out of the code, if one has been. What Go to
+    /// Definition and Find References act on, and what the viewer highlights
+    /// every occurrence of.
+    pub selected: Signal<Option<String>>,
+    /// What the panel across the bottom of the code is showing.
+    pub panel: Signal<Panel>,
+    /// Every definition in the repository, once the background walk has read
+    /// them all.
+    pub index: Signal<Index>,
+    /// Moved on by anything that supersedes a walk in progress, so a slow
+    /// search cannot land on top of the one started after it.
+    pub scan_seq: Signal<u32>,
+    /// The search box, and its three toggles. Nothing to do with `tree_filter`,
+    /// which narrows the explorer by path — this one reads inside files.
     pub search_text: Signal<String>,
+    pub search_opts: Signal<Options>,
+    /// What was wrong with the pattern, when it is a regular expression and it
+    /// is wrong.
+    pub search_error: Signal<Option<String>>,
 
     // --- GitHub ---
     /// Never rendered; `account` is what the UI reads.
     pub token: Signal<Option<Token>>,
     pub account: Signal<Account>,
     pub gh_open: Signal<bool>,
-    /// Whether the branch panel — which branch this is, and which two to
-    /// compare — is up.
-    pub branch_open: Signal<bool>,
-    pub client_id_input: Signal<String>,
     pub repo_input: Signal<String>,
     pub prs: Signal<PrList>,
     pub workspace: Signal<Workspace>,
-    /// Per-file base/head content for the open PR.
+    /// Per-file base/head content for what is open — decoded, and only for
+    /// files somebody has actually looked at. The repository itself lives on
+    /// disk; this is the shelf by the desk, not the library.
     pub pr_files: Signal<HashMap<PathBuf, PrFileState>>,
-    pub pr_source: Signal<PrSource>,
+    /// What is in `pr_files`, oldest first, so the shelf can be kept to a size.
+    pub warm_order: Signal<VecDeque<PathBuf>>,
+    /// How the background clone of what is open is getting on. `None` before
+    /// one has started, or where there is no filesystem to clone into.
+    pub cloning: Signal<Option<Progress>>,
+    /// Moved on whenever the local store changes underneath what the panel is
+    /// saying about it — which today means somebody cleared it.
+    ///
+    /// It lives here, at the root, rather than in the panel that reads it.
+    /// Clearing a store means deleting every file in it, which takes long
+    /// enough that the panel can be closed while it runs — and a signal owned
+    /// by a closed panel is one that has been dropped by the time the work
+    /// finishes reporting back to it.
+    pub store_gen: Signal<u32>,
     /// The open PR's comments. Folded away rather than unmounted, so the pane
     /// comes back instantly and without a second trip to GitHub.
     pub conv: Signal<Conversation>,
@@ -328,12 +254,12 @@ pub struct St {
 
     // --- layout ---
     /// Pane sizes in CSS pixels, published to the stylesheet as custom
-    /// properties. Read here at the very top of the tree and nowhere else, so
+    /// properties. Read at the very top of the tree and nowhere else, so
     /// dragging a divider re-renders one small template.
     pub side_w: Signal<f64>,
     pub conv_w: Signal<f64>,
     pub bottom_h: Signal<f64>,
-    /// The area the three panes share, as last measured. `(0, 0)` until the
+    /// The area the two panes share, as last measured. `(0, 0)` until the
     /// first report from the resize observer.
     pub main_size: Signal<(f64, f64)>,
     /// The divider in hand, while one is.
@@ -343,10 +269,6 @@ pub struct St {
 }
 
 impl St {
-    pub fn root_path(&self) -> PathBuf {
-        self.root.peek().clone()
-    }
-
     pub fn token_value(&self) -> Option<String> {
         self.token.peek().as_ref().map(|t| t.value.clone())
     }
@@ -358,65 +280,63 @@ impl St {
         self.token_value().unwrap_or_default()
     }
 
-    pub fn refresh(&self) {
-        // What came from GitHub is a fixed snapshot; reloading git status would
-        // replace its file list with the local working tree's.
-        let comparing = match &*self.workspace.peek() {
-            Workspace::Pr(_) | Workspace::Repo(_) => return,
-            Workspace::Compare(view) => Some((view.base.clone(), view.head.clone())),
-            Workspace::Local => None,
-        };
-        // A comparison is of two branches, either of which may have moved since
-        // it was made — so reloading one means making it again. Off the UI
-        // thread: it walks two trees, which on a large repository is not free.
-        if let Some((base, head)) = comparing {
-            let st = *self;
-            let root = self.root_path();
-            spawn_forever(async move {
-                let done =
-                    tokio::task::spawn_blocking(move || branches::compare(&root, &base, &head))
-                        .await;
-                // A failure here means a branch was deleted out from under an
-                // open comparison. The one on screen is still readable, so it
-                // stays: `⟳` is not a request to be thrown out of it.
-                if let Ok(Ok(view)) = done {
-                    st.enter_compare(view);
-                }
-            });
-            return;
-        }
-        let root = self.root_path();
-        let changes = load_changes(&root);
-        let mut statuses = self.statuses;
-        statuses.set(changes.kinds);
-        let mut stages = self.stages;
-        stages.set(changes.stages);
+    fn bump_tick(&self) {
         let mut tick = self.refresh_tick;
         let v = *tick.peek();
         tick.set(v + 1);
     }
 
-    /// Clear everything tied to whatever was open: the file, the symbol
-    /// selection, panels, the tree's expansion state, and the symbol index.
+    /// Say that the local store is not what it was.
+    pub fn store_changed(&self) {
+        let mut seen = self.store_gen;
+        let v = *seen.peek();
+        seen.set(v + 1);
+    }
+
+    /// Which workspace this is, counted rather than named.
+    ///
+    /// Opening or closing anything moves it on, so a background task that
+    /// started under the last one can tell that it is working for nobody —
+    /// including on a reload, where the pull request is the same one and the
+    /// clone in flight is still the wrong one to be finishing.
+    pub fn generation(&self) -> u32 {
+        *self.refresh_tick.peek()
+    }
+
+    /// Clear everything tied to whatever was open: the file, the scroll, the
+    /// trail through it, and the tree's expansion state.
     fn clear_view(&self) {
         let mut open = self.open;
         open.set(None);
-        let mut sel = self.selected;
-        sel.set(None);
-        let mut ps = self.pending_scroll;
+        let mut ps = self.scroll_to;
         ps.set(None);
-        let mut bottom = self.bottom;
-        bottom.set(BottomPanel::Hidden);
         self.reset_tree_folds();
         // Narrowing the explorer was about the files that were in it. Left
         // behind, it hides most of whatever is being opened instead.
         let mut tree_filter = self.tree_filter;
         tree_filter.set(String::new());
-        // The results are gone, so the term that produced them has to go too:
-        // left behind it reads as a search still in effect, and it covers the
-        // placeholder that explains when a pull request cannot be searched.
-        let mut search_text = self.search_text;
-        search_text.set(String::new());
+        self.clear_ide();
+        let mut trail = self.trail;
+        trail.set(Vec::new());
+        let mut ahead = self.ahead;
+        ahead.set(Vec::new());
+    }
+
+    /// Put down the results of reading the last thing.
+    ///
+    /// Every one of these is about files that are no longer on screen: hits in
+    /// them, definitions of them, an identifier picked out of one. The search
+    /// text itself stays — searching two pull requests for the same thing is a
+    /// reasonable morning.
+    fn clear_ide(&self) {
+        let mut panel = self.panel;
+        panel.set(Panel::Hidden);
+        let mut sel = self.selected;
+        sel.set(None);
+        let mut index = self.index;
+        index.set(Index::Off);
+        let mut err = self.search_error;
+        err.set(None);
     }
 
     /// Forget which directories were open, so the next tree drawn gets the
@@ -431,76 +351,15 @@ impl St {
         seeded.set(false);
     }
 
-    /// Point search and the symbol index at another directory, dropping the
-    /// index built for the last one.
-    ///
-    /// A no-op when the directory is unchanged: reloading a pull request whose
-    /// head has not moved lands on the same checkout, and should not throw away
-    /// a perfectly good index to rebuild it identically.
-    fn set_scan_root(&self, next: ScanRoot) {
-        if *self.scan_root.peek() == next {
-            return;
-        }
-        let mut scan = self.scan_root;
-        scan.set(next);
-        // Dropped so the top bar shows "indexing…" while the new one builds.
-        let mut index = self.index;
-        index.set(None);
-    }
-
-    /// Point the app at another repository, clearing everything tied to the old
-    /// one. `path` may be any directory inside the repo; a non-repo directory is
-    /// browsable too, just without statuses or diffs.
-    pub fn open_repo(&self, path: PathBuf) {
-        let root = discover_root(&path).unwrap_or(path);
-        if root == *self.root.peek() && *self.workspace.peek() == Workspace::Local {
-            self.refresh();
-            return;
-        }
-        let mut r = self.root;
-        r.set(root.clone());
-
-        self.reset_to_worktree();
-        self.clear_view();
-
-        self.refresh();
-        self.open_local_readme();
-    }
-
-    /// Land on the working tree's own front page, when there is one and nothing
-    /// else is being read. The same thing the app starts on, so coming back to
-    /// the working tree lands where opening it would have.
-    fn open_local_readme(&self) {
-        if self.open.peek().is_some() {
-            return;
-        }
-        if let Some(readme) = local_readme(&self.root_path()) {
-            self.open_file(readme);
-        }
-    }
-
-    fn reset_to_worktree(&self) {
-        let mut ws = self.workspace;
-        ws.set(Workspace::Local);
-        let mut cache = self.pr_files;
-        cache.set(HashMap::new());
-        // Back to walking the repository on disk.
-        self.set_scan_root(ScanRoot::Dir(self.root_path()));
-    }
-
-    /// Show a pull request instead of the working tree. `statuses` becomes the
-    /// PR's change list, so the tree, badges and viewer need no special casing.
-    ///
-    /// `checkout` is the PR's head commit as files on disk, when one could be
-    /// made; it takes the place of the working tree for search and the symbol
-    /// index, so those work on a pull request exactly as they do locally.
-    pub fn enter_pr(&self, pr: PrDetail, source: PrSource, checkout: ScanRoot) {
+    /// Show a pull request. `statuses` becomes the PR's change list, so the
+    /// tree, badges and viewer need no special casing.
+    pub fn enter_pr(&self, pr: PrDetail) {
         let reload = self
             .workspace
             .peek()
             .pr()
             .is_some_and(|open| open.repo == pr.repo && open.number == pr.number);
-        self.enter_remote(Workspace::Pr(Box::new(pr)), reload, source, checkout);
+        self.enter(Workspace::Pr(Box::new(pr)), reload);
     }
 
     /// Show a repository on its own — no pull request, so no changed files and
@@ -510,14 +369,14 @@ impl St {
     /// no pull request in it is being opened to be read, and the front page is
     /// what it is written to be read from — an empty pane with a button in it
     /// is not the answer to "show me this repository".
-    pub fn enter_repo(&self, view: RepoView, source: PrSource, checkout: ScanRoot) {
+    pub fn enter_repo(&self, view: RepoView) {
         let reload = self
             .workspace
             .peek()
             .repo()
             .is_some_and(|open| open.repo == view.repo);
-        let readme = markdown::readme_of(view.tree.iter().map(|p| p.as_path()));
-        self.enter_remote(Workspace::Repo(Box::new(view)), reload, source, checkout);
+        let readme = markdown::readme_of(view.tree.paths());
+        self.enter(Workspace::Repo(Box::new(view)), reload);
         // Not on a reload: that keeps whatever was being read, and coming back
         // to the README is a click on the tree away.
         if !reload && let Some(readme) = readme {
@@ -525,90 +384,60 @@ impl St {
         }
     }
 
-    /// Show two revisions of the repository on disk against each other. The
-    /// changed files become the tree's badges and the viewer's diffs, exactly
-    /// as a pull request's do.
-    pub fn enter_compare(&self, view: CompareView) {
-        let reload = self
-            .workspace
-            .peek()
-            .compare()
-            .is_some_and(|open| open.base == view.base && open.head == view.head);
-        if !reload {
-            self.clear_view();
-            // Nothing on screen came from GitHub any more.
-            let mut cache = self.pr_files;
-            cache.set(HashMap::new());
-            self.set_scan_root(ScanRoot::Dir(self.root_path()));
-        }
-        let mut statuses = self.statuses;
-        statuses.set(view.statuses());
-        // Two commits, so nothing here is on either side of `git add`.
-        let mut stages = self.stages;
-        stages.set(HashMap::new());
-        let mut w = self.workspace;
-        w.set(Workspace::Compare(Box::new(view)));
-        let mut panel = self.branch_open;
-        panel.set(false);
-        let mut tick = self.refresh_tick;
-        let v = *tick.peek();
-        tick.set(v + 1);
-    }
-
-    /// Swap in something fetched from GitHub, whichever kind it is.
+    /// Swap in something fetched from GitHub.
     ///
     /// `reload` means the same thing is already open, so the file being read
     /// and the tree as it was expanded are kept — resetting the view out from
     /// under someone who asked for fresh data is not what they asked for. Only
     /// what describes the old commit is dropped.
-    fn enter_remote(&self, ws: Workspace, reload: bool, source: PrSource, checkout: ScanRoot) {
-        if reload {
-            let mut sel = self.selected;
-            sel.set(None);
-            let mut bottom = self.bottom;
-            bottom.set(BottomPanel::Hidden);
-        } else {
+    fn enter(&self, ws: Workspace, reload: bool) {
+        if !reload {
             self.clear_view();
+        } else {
+            // The same pull request at a different commit. What was read about
+            // the last one — the index above all — is not about this one.
+            self.clear_ide();
         }
         // Contents are keyed by path, not commit, so they have to go either
         // way: this is where a reload picks up what was pushed.
-        let mut cache = self.pr_files;
-        cache.set(HashMap::new());
+        self.forget_contents();
+        let mut cloning = self.cloning;
+        cloning.set(None);
         // Dropped here rather than when the new one lands, so the pane never
         // shows the last pull request's comments under this one's title.
         let mut conv = self.conv;
         conv.set(Conversation::Loading);
-        let mut src = self.pr_source;
-        src.set(source);
-        self.set_scan_root(checkout);
         let mut statuses = self.statuses;
         // A repository browsed on its own has nothing changed in it.
         statuses.set(ws.pr().map(|pr| statuses_of(&pr.files)).unwrap_or_default());
-        // Nothing fetched from GitHub has an index behind it.
-        let mut stages = self.stages;
-        stages.set(HashMap::new());
         let mut w = self.workspace;
         w.set(ws);
         let mut gh = self.gh_open;
         gh.set(false);
-        let mut tick = self.refresh_tick;
-        let v = *tick.peek();
-        tick.set(v + 1);
+        self.bump_tick();
     }
 
-    /// Back to the local working tree, from whatever was standing in front of
-    /// it: a pull request, a repository being browsed, or a comparison.
-    pub fn back_to_worktree(&self) {
-        self.reset_to_worktree();
+    /// Close whatever is open, back to nothing — which puts the picker up,
+    /// since that is the only thing left to do.
+    pub fn close_workspace(&self) {
+        let mut w = self.workspace;
+        w.set(Workspace::Empty);
+        self.forget_contents();
+        let mut cloning = self.cloning;
+        cloning.set(None);
+        let mut statuses = self.statuses;
+        statuses.set(HashMap::new());
         self.clear_view();
-        self.refresh();
-        self.open_local_readme();
+        let mut gh = self.gh_open;
+        gh.set(true);
+        self.bump_tick();
     }
 
     /// Open a file from the tree: changed files land in split-diff view, and
     /// prose lands rendered — markdown is written to be read, and the source of
     /// it is one button away.
     pub fn open_file(&self, rel: PathBuf) {
+        self.mark(&rel);
         let changed = self.statuses.peek().get(&rel).is_some();
         let mut vm = self.view_mode;
         vm.set(match () {
@@ -616,10 +445,10 @@ impl St {
             _ if markdown::is_markdown(&rel) => ViewMode::Preview,
             _ => ViewMode::Source,
         });
-        let mut sel = self.selected;
-        sel.set(None);
         let mut open = self.open;
         open.set(Some(rel));
+        let mut at = self.at_line;
+        at.set(None);
     }
 
     /// Whether a repo-relative path is one of the files on show. What a link in
@@ -627,234 +456,183 @@ impl St {
     /// left alone rather than opening an error where the document was.
     pub fn has_file(&self, rel: &Path) -> bool {
         match &*self.workspace.peek() {
-            Workspace::Local => self.root_path().join(rel).is_file(),
+            Workspace::Empty => false,
             // A pull request whose tree could not be read still knows the files
             // it changes.
             Workspace::Pr(pr) => {
-                pr.tree.iter().any(|p| p == rel) || pr.files.iter().any(|f| f.path == rel)
+                pr.tree.entry(rel).is_some() || pr.files.iter().any(|f| f.path == rel)
             }
-            Workspace::Repo(view) => view.tree.iter().any(|p| p == rel),
-            Workspace::Compare(view) => view.tree.iter().any(|p| p == rel),
+            Workspace::Repo(view) => view.tree.entry(rel).is_some(),
         }
     }
 
-    /// Jump to a specific line (search result, definition, reference).
+    /// Drop every decoded file held in memory.
+    ///
+    /// Only the decoded copies: what was cloned stays on disk, so the files
+    /// dropped here come back off the filesystem rather than off the network.
+    fn forget_contents(&self) {
+        let mut cache = self.pr_files;
+        cache.set(HashMap::new());
+        let mut order = self.warm_order;
+        order.set(VecDeque::new());
+    }
+
+    /// Jump to a specific line — what a comment on the diff, a search hit and a
+    /// definition all link to.
     pub fn open_at(&self, rel: PathBuf, line: usize) {
+        self.mark(&rel);
         let mut vm = self.view_mode;
         vm.set(ViewMode::Source);
-        let mut sel = self.selected;
-        sel.set(None);
         let mut open = self.open;
         open.set(Some(rel));
-        let mut ps = self.pending_scroll;
+        let mut ps = self.scroll_to;
         ps.set(Some(line));
+        let mut at = self.at_line;
+        at.set(Some(line));
     }
 
-    pub fn do_search(&self) {
-        // No scan root means a pull request with no files on disk — nothing to
-        // walk. The top bar disables the box in that case.
-        let Some(root) = self.scan_root.peek().dir().cloned() else {
+    // ------------------------------------------------------------ the trail
+
+    /// Where the reader is standing, as somewhere to come back to.
+    fn here(&self) -> Option<Spot> {
+        Some(Spot {
+            path: self.open.peek().clone()?,
+            mode: *self.view_mode.peek(),
+            line: *self.at_line.peek(),
+        })
+    }
+
+    /// Note where we were, on the way to somewhere else.
+    ///
+    /// Only when the file changes. A jump within the file you are already
+    /// reading leaves no mark, because a Back that lands on the same file at
+    /// the top of it looks like a button that did nothing.
+    fn mark(&self, going_to: &Path) {
+        let Some(here) = self.here().filter(|h| h.path != going_to) else {
             return;
         };
-        let q = self.search_text.peek().clone();
-        let Some(re) = text_query(&q) else { return };
-        let title = format!("SEARCH  “{q}”");
-        self.run_scan(title, move || search_repo(&root, &re), move |hits| {
-            BottomPanel::Search { query: q, hits }
-        });
-    }
-
-    /// Walk the tree off the UI thread, showing the panel as busy meanwhile.
-    ///
-    /// The title doubles as the claim on the panel: a result is only applied
-    /// while the panel is still waiting for *this* scan, so a slow search
-    /// cannot land on top of the faster one that replaced it.
-    fn run_scan(
-        &self,
-        title: String,
-        scan: impl FnOnce() -> Vec<Hit> + Send + 'static,
-        done: impl FnOnce(Vec<Hit>) -> BottomPanel + 'static,
-    ) {
-        let st = *self;
-        let mut bottom = self.bottom;
-        bottom.set(BottomPanel::Working {
-            title: title.clone(),
-        });
-        spawn_forever(async move {
-            let hits = tokio::task::spawn_blocking(scan).await.unwrap_or_default();
-            let mut bottom = st.bottom;
-            let still_ours = matches!(
-                &*bottom.peek(),
-                BottomPanel::Working { title: t } if *t == title
-            );
-            if still_ours {
-                bottom.set(done(hits));
+        let mut trail = self.trail;
+        {
+            let mut trail = trail.write();
+            trail.push(here);
+            if trail.len() > TRAIL {
+                trail.remove(0);
             }
-        });
-    }
-
-    pub fn goto_def(&self, name: &str) {
-        let (syms, indexed) = {
-            let idx = self.index.peek();
-            match idx.as_ref() {
-                Some(i) => (find_definitions(i, name), true),
-                None => (Vec::new(), false),
-            }
-        };
-        if syms.len() == 1 {
-            let s = &syms[0];
-            self.open_at(s.path.clone(), s.line);
-        } else {
-            let mut b = self.bottom;
-            b.set(BottomPanel::Defs {
-                name: name.to_string(),
-                syms,
-                indexed,
-            });
+        }
+        // Going somewhere new is what ends the branch you had gone back along.
+        let mut ahead = self.ahead;
+        if !ahead.peek().is_empty() {
+            ahead.set(Vec::new());
         }
     }
 
-    pub fn find_refs(&self, name: &str) {
-        let Some(root) = self.scan_root.peek().dir().cloned() else {
-            return;
-        };
-        let Some(re) = word_query(name) else { return };
-        let name = name.to_string();
-        let title = format!("REFERENCES  {name}");
-        self.run_scan(title, move || search_repo(&root, &re), move |hits| {
-            BottomPanel::Refs { name, hits }
-        });
+    pub fn can_go_back(&self) -> bool {
+        !self.trail.read().is_empty()
+    }
+
+    pub fn can_go_forward(&self) -> bool {
+        !self.ahead.read().is_empty()
+    }
+
+    pub fn go_back(&self) {
+        let mut trail = self.trail;
+        let Some(spot) = trail.write().pop() else { return };
+        if let Some(here) = self.here() {
+            let mut ahead = self.ahead;
+            ahead.write().push(here);
+        }
+        self.land(spot);
+    }
+
+    pub fn go_forward(&self) {
+        let mut ahead = self.ahead;
+        let Some(spot) = ahead.write().pop() else { return };
+        if let Some(here) = self.here() {
+            let mut trail = self.trail;
+            trail.write().push(here);
+        }
+        self.land(spot);
+    }
+
+    /// Show a spot as it was — and without marking the trail, since moving
+    /// along it is not the same as leaving it.
+    fn land(&self, spot: Spot) {
+        let mut vm = self.view_mode;
+        vm.set(spot.mode);
+        let mut open = self.open;
+        open.set(Some(spot.path));
+        let mut ps = self.scroll_to;
+        ps.set(spot.line);
+        let mut at = self.at_line;
+        at.set(spot.line);
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn a_file_falls_back_to_the_half_it_actually_has() {
-        // Asked for what is staged, in a file where nothing is.
-        assert_eq!(
-            DiffSide::Staged.resolve(Some(Stage::Unstaged)),
-            DiffSide::Unstaged
-        );
-        assert_eq!(
-            DiffSide::Unstaged.resolve(Some(Stage::Staged)),
-            DiffSide::Staged
-        );
-        // A file with both keeps whatever was asked for, and so does the view
-        // of everything since the last commit.
-        assert_eq!(DiffSide::Staged.resolve(Some(Stage::Both)), DiffSide::Staged);
-        assert_eq!(
-            DiffSide::Unstaged.resolve(Some(Stage::Both)),
-            DiffSide::Unstaged
-        );
-        assert_eq!(
-            DiffSide::Worktree.resolve(Some(Stage::Staged)),
-            DiffSide::Worktree
-        );
-        // Nothing staged either way — a pull request — is left alone.
-        assert_eq!(DiffSide::Staged.resolve(None), DiffSide::Staged);
-    }
-}
-
-/// The README of a directory on disk. One listing of the top level, which is
-/// what a repository's front page can be found in and nowhere else.
-fn local_readme(root: &Path) -> Option<PathBuf> {
-    let names: Vec<PathBuf> = std::fs::read_dir(root)
-        .ok()?
-        .flatten()
-        .filter(|e| e.file_type().is_ok_and(|t| t.is_file()))
-        .map(|e| PathBuf::from(e.file_name()))
-        .collect();
-    markdown::readme_of(names.iter().map(|p| p.as_path()))
+/// Hold a piece of state in the root scope rather than in `App`.
+///
+/// `App` is not the root scope. Dioxus wraps whatever is launched in an error
+/// boundary and a suspense boundary, so the component below is `ScopeId(3)`,
+/// three deep — while `spawn_forever`, which is how every fetch here outlives
+/// the row or panel that started it, runs its tasks in `ScopeId::ROOT`.
+///
+/// A signal owned by `App` and written from one of those tasks is therefore
+/// being used *outside* the scope that owns it, which dioxus-signals warns
+/// about on every single write — and warns about for a reason: a task that
+/// outlives its scope is a task holding a dropped value. Creating the state
+/// here puts it in the same scope as the tasks that write it, which is the
+/// lifetime it actually has.
+fn root<T: 'static>(value: T) -> Signal<T> {
+    Signal::new_in_scope(value, ScopeId::ROOT)
 }
 
 #[component]
 pub fn App() -> Element {
     let st = use_context_provider(|| {
-        let positional: Vec<String> = std::env::args()
-            .skip(1)
-            .filter(|a| !a.starts_with("--"))
-            .collect();
-        let arg = positional
-            .first()
-            .map(PathBuf::from)
-            .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
-        let root = discover_root(&arg).unwrap_or(arg);
-        let changes = load_changes(&root);
-        let statuses = changes.kinds;
-
-        // Optional second positional arg: open this file (repo-relative) on
-        // launch. With none, the repository's own front page — the same thing
-        // opening one from GitHub lands on.
-        let open = positional
-            .get(1)
-            .map(PathBuf::from)
-            .or_else(|| local_readme(&root));
-        let mode_flag = std::env::args().find_map(|a| {
-            a.strip_prefix("--mode=").map(|m| match m {
-                "inline" => ViewMode::Inline,
-                "split" => ViewMode::Split,
-                "preview" => ViewMode::Preview,
-                _ => ViewMode::Source,
-            })
-        });
-        let view_mode = mode_flag.unwrap_or_else(|| match open.as_ref() {
-            Some(p) if statuses.contains_key(p) => ViewMode::Split,
-            Some(p) if markdown::is_markdown(p) => ViewMode::Preview,
-            _ => ViewMode::Source,
-        });
-
-        // Pre-fill the PR picker from the clone's own remote when there is one.
-        let repo_hint = crate::backend::github::repo_from_local(&root)
-            .map(|r| r.to_string())
-            .unwrap_or_default();
-
         // The panes come back the width they were left, which is the whole
         // point of being able to drag them.
         let saved = layout::load();
-
         St {
-            root: Signal::new(root.clone()),
-            scan_root: Signal::new(ScanRoot::Dir(root)),
-            statuses: Signal::new(statuses),
-            stages: Signal::new(changes.stages),
-            open: Signal::new(open),
-            view_mode: Signal::new(view_mode),
-            diff_side: Signal::new(DiffSide::Worktree),
-            bottom: Signal::new(BottomPanel::Hidden),
-            selected: Signal::new(None),
-            pending_scroll: Signal::new(None),
-            index: Signal::new(None),
-            expanded: Signal::new(HashMap::new()),
-            tree_seeded: Signal::new(false),
-            tree_filter: Signal::new(String::new()),
-            changes_only: Signal::new(false),
-            refresh_tick: Signal::new(0),
-            search_text: Signal::new(String::new()),
+            statuses: root(HashMap::new()),
+            open: root(None),
+            view_mode: root(ViewMode::Source),
+            scroll_to: root(None),
+            at_line: root(None),
+            expanded: root(HashMap::new()),
+            tree_seeded: root(false),
+            tree_filter: root(String::new()),
+            changes_only: root(false),
+            refresh_tick: root(0),
+            trail: root(Vec::new()),
+            ahead: root(Vec::new()),
 
-            token: Signal::new(None),
-            account: Signal::new(Account::Checking),
-            gh_open: Signal::new(false),
-            branch_open: Signal::new(false),
-            client_id_input: Signal::new(
-                crate::backend::auth::client_id().unwrap_or_default(),
-            ),
-            repo_input: Signal::new(repo_hint),
-            prs: Signal::new(PrList::Idle),
-            workspace: Signal::new(Workspace::Local),
-            pr_files: Signal::new(HashMap::new()),
-            pr_source: Signal::new(PrSource::Api),
-            conv: Signal::new(Conversation::Loading),
-            conv_open: Signal::new(true),
+            selected: root(None),
+            panel: root(Panel::Hidden),
+            index: root(Index::Off),
+            scan_seq: root(0),
+            search_text: root(String::new()),
+            search_opts: root(Options::default()),
+            search_error: root(None),
 
-            side_w: Signal::new(saved.side_w),
-            conv_w: Signal::new(saved.conv_w),
-            bottom_h: Signal::new(saved.bottom_h),
-            main_size: Signal::new((0.0, 0.0)),
-            drag: Signal::new(None),
-            last_grab: Signal::new(None),
+            token: root(None),
+            account: root(Account::Checking),
+            // Nothing is open at launch, so the picker is where to start.
+            gh_open: root(true),
+            repo_input: root(String::new()),
+            prs: root(PrList::Idle),
+            workspace: root(Workspace::Empty),
+            pr_files: root(HashMap::new()),
+            warm_order: root(VecDeque::new()),
+            cloning: root(None),
+            store_gen: root(0),
+            conv: root(Conversation::Loading),
+            conv_open: root(true),
+
+            side_w: root(saved.side_w),
+            conv_w: root(saved.conv_w),
+            bottom_h: root(saved.bottom_h),
+            main_size: root((0.0, 0.0)),
+            drag: root(None),
+            last_grab: root(None),
         }
     });
 
@@ -862,22 +640,17 @@ pub fn App() -> Element {
         st.refresh_tick.read();
         let statuses = st.statuses.read().clone();
         let root = match &*st.workspace.read() {
+            Workspace::Empty => return None,
             Workspace::Pr(pr) => build_tree_from_paths(
                 &format!("{} #{}", pr.repo, pr.number),
-                pr.tree.iter().map(|p| p.as_path()),
+                pr.tree.paths(),
                 &statuses,
             ),
             Workspace::Repo(view) => build_tree_from_paths(
                 &format!("{} @ {}", view.repo, view.branch),
-                view.tree.iter().map(|p| p.as_path()),
+                view.tree.paths(),
                 &statuses,
             ),
-            Workspace::Compare(view) => build_tree_from_paths(
-                &view.label(),
-                view.tree.iter().map(|p| p.as_path()),
-                &statuses,
-            ),
-            Workspace::Local => build_tree(&st.root.read(), &statuses),
         };
         if *st.changes_only.read() {
             filter_changed(&root)
@@ -887,54 +660,75 @@ pub fn App() -> Element {
     });
     use_context_provider(|| tree);
 
-    // Resolve a token once at startup: a stored sign-in, else GITHUB_TOKEN,
-    // else the gh CLI. Verifying it costs one API call and tells us the login.
+    // Pick up a saved token once at startup. Verifying it costs one API call
+    // and tells us the login.
     use_future(move || async move {
-        let found = tokio::task::spawn_blocking(crate::backend::auth::find_token)
-            .await
-            .ok()
-            .flatten();
-        let Some(tok) = found else {
+        let Some(tok) = crate::backend::auth::find_token() else {
             let mut acct = st.account;
             acct.set(Account::SignedOut);
             return;
         };
-        let value = tok.value.clone();
-        let source = tok.source;
-        let login = tokio::task::spawn_blocking(move || {
-            crate::backend::github::viewer_login(&value)
-        })
-        .await
-        .ok()
-        .and_then(|r| r.ok());
+        let login = crate::backend::github::viewer_login(&tok.value).await.ok();
 
         let mut acct = st.account;
         match login {
             Some(login) => {
                 let mut t = st.token;
                 t.set(Some(tok));
-                acct.set(Account::SignedIn { login, source });
+                acct.set(Account::SignedIn { login });
             }
             // A stale token is the same as none, but say so rather than
             // silently showing a signed-out chip.
-            None => acct.set(Account::Failed(format!(
-                "The {} token was rejected by GitHub.",
-                source.label()
-            ))),
+            None => acct.set(Account::Failed(
+                "The saved token was rejected by GitHub.".to_string(),
+            )),
         }
     });
 
-    // Warm the cache for a pull request's changed files as soon as it opens,
-    // so clicking through the review does not wait on the network.
+    // Open the local filesystem and read its index once, before anything is
+    // opened — every later decision about what to fetch is a question it
+    // answers, and it has to be able to answer without waiting.
+    use_future(|| async move {
+        blobs::open().await;
+    });
+
+    // Pull the whole repository down as soon as something opens, so clicking
+    // through it never touches the network again. Most of it is usually here
+    // already — the store is keyed by content, and a repository read last week
+    // has not changed much since.
     use_effect(move || {
-        let job = st
+        let opened = {
+            let held = st.workspace.read();
+            held.trees().map(|(head, base)| {
+                let changed = held.pr().map(super::prcache::changed_jobs).unwrap_or_default();
+                (head, base, changed)
+            })
+        };
+        let Some((head, base, changed)) = opened else {
+            return;
+        };
+        spawn_forever(super::prcache::clone_repo(st, head, base, changed));
+    });
+
+    // Read every definition in whatever has opened, so that clicking one
+    // identifier and asking where it comes from is a lookup rather than a
+    // wait. It goes second: the walk it does is over the files the clone
+    // above is still fetching, and it holds off until that has finished.
+    use_effect(move || {
+        let files = st
             .workspace
             .read()
-            .pr()
-            .map(|pr| (pr.number, super::prcache::changed_jobs(pr)));
-        let Some((number, jobs)) = job else { return };
-        spawn_forever(super::prcache::prefetch(st, number, jobs, st.api_token()));
+            .trees()
+            .map(|(head, _)| head.files)
+            .unwrap_or_default();
+        spawn_forever(super::ide::build_index(st, files));
     });
+
+    // The keyboard, for as long as the app is up. It has to be installed on
+    // the window rather than on an element here — for most of this app's life
+    // the focus is on the document body, which is above everything a handler
+    // in this tree could be attached to.
+    use_future(move || super::ide::keys(st));
 
     // Pull the conversation as soon as a pull request opens — three requests,
     // next to the tree and every changed file, and the pane is the first thing
@@ -948,24 +742,6 @@ pub fn App() -> Element {
             .map(|pr| (pr.repo.clone(), pr.number));
         let Some((repo, number)) = target else { return };
         spawn_forever(super::conversation::load(st, repo, number));
-    });
-
-    // Build the symbol index off the UI thread, for whatever is being browsed
-    // — the local repository, or a pull request checked out on disk. Reading
-    // `scan_root` here is what re-triggers it; an in-flight build for the
-    // previous one is cancelled.
-    let _ = use_resource(move || {
-        let root = st.scan_root.read().dir().cloned();
-        async move {
-            // Nothing on disk to index. `index` stays None, and the top bar
-            // hides the readout rather than counting symbols that are not there.
-            let Some(root) = root else { return };
-            let idx = tokio::task::spawn_blocking(move || build_index(&root))
-                .await
-                .unwrap_or_default();
-            let mut sig = st.index;
-            sig.set(Some(idx));
-        }
     });
 
     // Unfolding the conversation claims 380px the explorer may currently be
@@ -1017,10 +793,8 @@ pub fn App() -> Element {
             if *st.gh_open.read() {
                 GhPanel {}
             }
-            if *st.branch_open.read() {
-                BranchPanel {}
-            }
             DragMask {}
         }
     }
 }
+

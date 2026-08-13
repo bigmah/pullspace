@@ -1,104 +1,42 @@
-//! The pull request file cache: the one place that decides when a file's two
-//! sides get fetched, so clicking through a review never waits on the network.
+//! The file cache: the one place that decides when a file's two sides are
+//! read, so clicking through a review never waits on the network.
 //!
-//! Three callers funnel through [`ensure_file`] — the background warm-up, the
+//! There are two layers under this. The repository itself is on disk, in the
+//! browser's own filesystem — [`clone`](crate::backend::clone) puts it there in
+//! one go when a pull request opens, and it survives the tab being closed.
+//! What lives here is the decoded form of the handful of files somebody has
+//! actually looked at, since decoding forty thousand files into strings is not
+//! something to do to a browser tab.
+//!
+//! Three callers funnel through [`ensure_file`] — the clone's stragglers, the
 //! tree's hover handler, and the viewer opening a file — and it is cheap to
 //! call repeatedly, so none of them need to know about the others.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use dioxus::prelude::*;
 
-use crate::backend::github::{file_at, find_file, PrDetail, RepoRef, RepoView};
-use crate::backend::mirror;
-use crate::backend::tree::ChangeKind;
-use crate::backend::FileContent;
+use crate::backend::github::{FetchJob, PrDetail, Snapshot};
+use crate::backend::{blobs, clone};
 
-use super::app::{PrFileState, PrSource, St};
+use super::app::{PrFileState, St};
 
-/// How many files to pull at once while warming. GitHub throttles bursts of
-/// concurrent requests, so this stays deliberately modest.
-const PREFETCH_CONCURRENCY: usize = 6;
+/// How many files to keep decoded in memory. Enough that going back and forth
+/// across a review costs nothing; few enough that a browsed repository cannot
+/// quietly become a hundred megabytes of strings. Past it, the least recently
+/// read are dropped — and come back off the disk, not the network.
+const MEMORY_FILES: usize = 128;
 
-/// Everything needed to fetch one file, lifted out of app state so the fetch
-/// does not borrow a signal across an await.
-#[derive(Clone, PartialEq)]
-pub struct FetchJob {
-    repo: RepoRef,
-    base_sha: String,
-    head_sha: String,
-    pub path: PathBuf,
-    /// Differs from `path` for renames.
-    base_path: PathBuf,
-    /// `None` for a file the PR does not touch — browsable, but not a diff.
-    status: Option<ChangeKind>,
-}
+/// How many files the memory-only fallback reads at once. GitHub throttles
+/// bursts of concurrent requests, so this stays deliberately modest.
+const WARM_CONCURRENCY: usize = 6;
 
-impl FetchJob {
-    /// For any path in the PR's repository, changed or not.
-    pub fn new(pr: &PrDetail, rel: &Path) -> Self {
-        // Unchanged files are in the repo tree but not the PR's file list.
-        let f = find_file(&pr.files, rel);
-        FetchJob {
-            repo: pr.repo.clone(),
-            base_sha: pr.base_sha.clone(),
-            head_sha: pr.head_sha.clone(),
-            path: rel.to_path_buf(),
-            base_path: f.map_or_else(|| rel.to_path_buf(), |f| f.base_path().clone()),
-            status: f.map(|f| f.status),
-        }
-    }
-
-    /// For a path in a repository being browsed on its own. Nothing is changed
-    /// here, so there is only ever one side to read.
-    pub fn browsing(view: &RepoView, rel: &Path) -> Self {
-        FetchJob {
-            repo: view.repo.clone(),
-            base_sha: String::new(),
-            head_sha: view.head_sha.clone(),
-            path: rel.to_path_buf(),
-            base_path: rel.to_path_buf(),
-            status: None,
-        }
-    }
-}
-
-/// Both sides of one file. Blocking — callers run it off the UI thread.
-///
-/// A local source reads straight out of the object database, which is roughly
-/// two orders of magnitude faster than the per-file HTTP request the API path
-/// needs.
-fn fetch_pair(
-    token: &str,
-    source: &PrSource,
-    job: &FetchJob,
-) -> anyhow::Result<(FileContent, FileContent)> {
-    let read = |sha: &str, path: &Path| match source {
-        PrSource::Local { git_dir, .. } => mirror::blob_at(git_dir, sha, path),
-        PrSource::Api => file_at(token, &job.repo, sha, path),
-    };
-    // An added file has no base side, a deleted one has no head side, and an
-    // untouched file is never diffed — so in each case skip a read that would
-    // be wasted or 404 anyway.
-    let base = match job.status {
-        None | Some(ChangeKind::Added) => FileContent::Absent,
-        Some(_) => read(&job.base_sha, &job.base_path)?,
-    };
-    let head = if job.status == Some(ChangeKind::Deleted) {
-        FileContent::Absent
-    } else {
-        read(&job.head_sha, &job.path)?
-    };
-    Ok((base, head))
-}
-
-type Fetched = Result<anyhow::Result<(FileContent, FileContent)>, tokio::task::JoinError>;
-
-fn settle(result: Fetched) -> PrFileState {
+fn settle(
+    result: anyhow::Result<(crate::backend::FileContent, crate::backend::FileContent)>,
+) -> PrFileState {
     match result {
-        Ok(Ok((base, head))) => PrFileState::Ready { base, head },
-        Ok(Err(e)) => PrFileState::Failed(format!("{e:#}")),
-        Err(e) => PrFileState::Failed(format!("Fetch failed: {e}")),
+        Ok((base, head)) => PrFileState::Ready { base, head },
+        Err(e) => PrFileState::Failed(format!("{e:#}")),
     }
 }
 
@@ -111,106 +49,157 @@ fn claimed(st: &St, path: &Path) -> bool {
     )
 }
 
-/// Start fetching a file unless it is already cached or on its way.
+/// Put a file's content in memory, and drop the oldest if the shelf is full.
+///
+/// Never the file being read: it is the one thing on screen, and re-reading it
+/// to draw it would flicker the viewer back to `Loading`.
+fn remember(st: &St, path: &Path, state: PrFileState) {
+    let mut cache = st.pr_files;
+    let mut order = st.warm_order;
+    cache.write().insert(path.to_path_buf(), state);
+
+    let mut order = order.write();
+    order.push_back(path.to_path_buf());
+    while order.len() > MEMORY_FILES {
+        let Some(oldest) = order.pop_front() else { break };
+        // Its own entry, superseded by a later read of the same file.
+        if order.contains(&oldest) || st.open.peek().as_deref() == Some(oldest.as_path()) {
+            continue;
+        }
+        cache.write().remove(&oldest);
+    }
+}
+
+/// Start reading a file unless it is already in hand or on its way.
 ///
 /// Dioxus writes signals only from the UI thread, so the check and the claim
 /// below cannot interleave with another caller — `Loading` therefore always
-/// means genuinely in flight, and no file is ever fetched twice.
+/// means genuinely in flight, and no file is ever read twice at once.
 pub fn ensure_file(st: St, job: FetchJob) {
     if claimed(&st, &job.path) {
         return;
     }
     let mut cache = st.pr_files;
     let token = st.api_token();
-    let source = st.pr_source.peek().clone();
     cache.write().insert(job.path.clone(), PrFileState::Loading);
 
-    // Root scope: a fetch has to outlive the tree row or viewer that triggered
+    // Root scope: a read has to outlive the tree row or viewer that triggered
     // it, or unmounting would strand the entry on `Loading` forever.
     spawn_forever(async move {
         let path = job.path.clone();
-        let state =
-            settle(tokio::task::spawn_blocking(move || fetch_pair(&token, &source, &job)).await);
-        let mut cache = st.pr_files;
-        cache.write().insert(path, state);
+        let state = settle(clone::read_pair(&token, &job).await);
+        remember(&st, &path, state);
     });
 }
 
-/// [`ensure_file`] for callers that only have a path. A no-op on the local
-/// working tree, whose files are read straight off disk.
+/// Everything needed to read one path of whatever is open.
+fn job_for(st: &St, rel: &Path) -> Option<FetchJob> {
+    let ws = st.workspace.peek();
+    match (ws.pr(), ws.repo()) {
+        (Some(pr), _) => Some(FetchJob::new(pr, rel)),
+        (_, Some(view)) => Some(FetchJob::browsing(view, rel)),
+        _ => None,
+    }
+}
+
+/// [`ensure_file`] for callers that only have a path.
 pub fn ensure_path(st: St, rel: &Path) {
     // Before building a job, not after: the job below clones the pull request's
     // identifiers and scans its file list to find this path, and the common case
-    // — a file already cached or on its way — needs none of that. `ensure_file`
+    // — a file already in hand or on its way — needs none of that. `ensure_file`
     // makes the same check for callers who arrive holding a job already.
     if claimed(&st, rel) {
         return;
     }
-    let job = {
-        let ws = st.workspace.peek();
-        match (ws.pr(), ws.repo()) {
-            (Some(pr), _) => FetchJob::new(pr, rel),
-            (_, Some(view)) => FetchJob::browsing(view, rel),
-            _ => return,
-        }
-    };
+    let Some(job) = job_for(&st, rel) else { return };
     ensure_file(st, job);
 }
 
-/// One job per file the PR changes, for [`prefetch`].
+/// Warm the file the pointer has come to rest on — but only one that would
+/// otherwise have to be fetched.
+///
+/// A file already in the local store opens in about a millisecond, so reading
+/// it early saves nothing and is far from free: every row the pointer settles
+/// on would be a filesystem read, a whole file decoded into a string, and a
+/// write to the cache that makes the viewer re-examine what it has drawn.
+/// Doing that for every row somebody moves across is how browsing a repository
+/// turns into watching one.
+pub fn ensure_hover(st: St, rel: &Path) {
+    if claimed(&st, rel) {
+        return;
+    }
+    let Some(job) = job_for(&st, rel) else { return };
+    if clone::is_local(&job) {
+        return;
+    }
+    ensure_file(st, job);
+}
+
+/// One job per file the PR changes — what the clone fetches before it fetches
+/// anything else, since it is what the review is about.
 pub fn changed_jobs(pr: &PrDetail) -> Vec<FetchJob> {
     pr.files.iter().map(|f| FetchJob::new(pr, &f.path)).collect()
 }
 
-/// Warm every file the PR changes, a few at a time, so clicking through a
-/// review is instant.
+/// The fallback for a browser with nowhere to keep anything: read the pull
+/// request's own files, a few at a time, and hold them in memory.
 ///
-/// Only the changed files: a repository can hold 60k others, and fetching
-/// those up front would exhaust the API rate limit for no benefit. They are
-/// covered by hover prefetching instead.
-pub async fn prefetch(st: St, pr_number: u64, jobs: Vec<FetchJob>, token: String) {
-    let mut cache = st.pr_files;
-    let source = st.pr_source.peek().clone();
-
-    for chunk in jobs.chunks(PREFETCH_CONCURRENCY) {
-        // Stop as soon as the user leaves this pull request.
-        if st.workspace.peek().pr().map(|p| p.number) != Some(pr_number) {
+/// Only those. Without a store there is nothing to gain from the rest of the
+/// repository and a whole repository's worth of strings to lose by it.
+async fn warm(st: St, changed: Vec<FetchJob>, token: String) {
+    let mine = st.generation();
+    for chunk in changed.chunks(WARM_CONCURRENCY) {
+        if st.generation() != mine {
             return;
         }
-
-        // Claim the whole chunk first, then await it — `spawn_blocking` starts
-        // running on call, so the chunk is genuinely in flight together.
+        // Claim the whole chunk first, then run it together — `join_all` polls
+        // every future at once, so the chunk is genuinely in flight together.
         let mut started = Vec::new();
         for job in chunk {
             if claimed(&st, &job.path) {
                 continue;
             }
+            let mut cache = st.pr_files;
             cache.write().insert(job.path.clone(), PrFileState::Loading);
             let token = token.clone();
-            let source = source.clone();
             let job = job.clone();
-            let path = job.path.clone();
-            started.push((
-                path,
-                tokio::task::spawn_blocking(move || fetch_pair(&token, &source, &job)),
-            ));
+            started.push(async move { (job.path.clone(), clone::read_pair(&token, &job).await) });
         }
-        for (path, handle) in started {
-            // Await first, *then* take the write guard. Inlining these would
-            // hold a borrow of the signal across the await, and the viewer
-            // reading the cache mid-fetch would panic the task.
-            let state = settle(handle.await);
-            cache.write().insert(path, state);
+        // Collect first, *then* write per result. Writing the signal inside the
+        // joined futures would hold a borrow across an await, and the viewer
+        // reading the cache mid-fetch would panic.
+        for (path, result) in futures_util::future::join_all(started).await {
+            remember(&st, &path, settle(result));
         }
     }
 }
 
-/// How many of the PR's changed files are cached, for the progress readout.
-/// Reads reactively so the top bar ticks upward on its own.
-pub fn warmed(st: &St, pr: &PrDetail) -> usize {
-    let cache = st.pr_files.read();
-    pr.files
-        .iter()
-        .filter(|f| matches!(cache.get(&f.path), Some(PrFileState::Ready { .. })))
-        .count()
+/// Clone what is open into the browser's filesystem, keeping the top bar's
+/// readout up to date, and stopping the moment something else is opened.
+pub async fn clone_repo(st: St, head: Snapshot, base: Snapshot, changed: Vec<FetchJob>) {
+    let mut status = st.cloning;
+    let token = st.api_token();
+    // No filesystem to clone into — a private window, or a browser too old for
+    // it. Warm what the review is actually about, into memory, which is what
+    // this did before there was anywhere to put a repository.
+    if !blobs::open().await {
+        return warm(st, changed, token).await;
+    }
+    // Whatever is opened next retires this one — including the same pull
+    // request opened again by `⟳`, which wants the clone that follows its new
+    // head commit and not the one still finishing the old.
+    let mine = st.generation();
+    clone::hydrate(
+        token,
+        head,
+        base,
+        changed,
+        move |at| {
+            if st.generation() == mine {
+                status.set(Some(at));
+            }
+        },
+        move || st.generation() == mine,
+    )
+    .await;
 }

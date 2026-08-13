@@ -1,4 +1,4 @@
-//! Draggable dividers between the explorer, the code, the search panel and the
+//! Draggable dividers between the explorer, the code, the results panel and the
 //! conversation.
 //!
 //! The sizes are published as CSS custom properties on the app's root element
@@ -11,7 +11,10 @@
 //! alone, so the divider stays exactly under the cursor however far it travels
 //! and whatever it passes over on the way.
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
+
+// std's Instant panics on wasm32-unknown-unknown; web-time is std on native.
+use web_time::Instant;
 
 use dioxus::html::input_data::MouseButton;
 use dioxus::prelude::*;
@@ -27,7 +30,7 @@ pub enum Edge {
     Sidebar,
     /// The conversation pane's left-hand edge.
     Conv,
-    /// The search panel's top edge.
+    /// The results panel's top edge — the one that moves vertically.
     Bottom,
 }
 
@@ -36,7 +39,8 @@ pub enum Edge {
 #[derive(Clone, Copy, PartialEq)]
 pub struct Drag {
     edge: Edge,
-    /// Where along the axis the press landed.
+    /// Where along the divider's own axis the press landed — `x` for the two
+    /// vertical dividers, `y` for the horizontal one.
     origin: f64,
     /// What the pane measured at that moment, already inside its limits.
     start: f64,
@@ -46,17 +50,18 @@ const MIN_SIDE: f64 = 170.0;
 const MAX_SIDE: f64 = 720.0;
 const MIN_CONV: f64 = 250.0;
 const MAX_CONV: f64 = 780.0;
+/// The results panel, folded as small as it is worth being. Matches
+/// `.bottom`'s `min-height`.
 const MIN_BOTTOM: f64 = 92.0;
 /// What a drag always leaves for the code itself — the point of the window is
 /// the file in the middle of it.
-const MIN_CENTER: f64 = 300.0;
-/// Likewise vertically: the search panel can take most of the column, but never
-/// all of it.
 ///
 /// The stylesheet states these limits a second time, as `min-width` and
 /// `max-width` on the panes — that copy is what catches a window resized
 /// smaller than the layout it was left in. Change one and change the other.
-const MIN_VIEWER: f64 = 160.0;
+const MIN_CENTER: f64 = 300.0;
+/// And what a drag always leaves for the file above the results panel.
+const MIN_ABOVE: f64 = 160.0;
 /// The conversation pane folded down to its rail. Matches `.convrail` in the
 /// stylesheet.
 const RAIL_W: f64 = 34.0;
@@ -70,13 +75,14 @@ const DOUBLE: Duration = Duration::from_millis(400);
 const SLOP: f64 = 1.0;
 
 impl Edge {
+    /// Whether this divider moves up and down rather than side to side.
     fn vertical(self) -> bool {
         matches!(self, Edge::Bottom)
     }
 
-    /// Which way the pane grows as the pointer moves along the axis. The
-    /// explorer opens to the right of its divider; the other two are behind
-    /// theirs, and grow backwards.
+    /// Which way the pane grows as the pointer moves. The explorer opens to
+    /// the right of its divider; the conversation is behind its own, and grows
+    /// backwards — as does the results panel, which grows upwards.
     fn sign(self) -> f64 {
         match self {
             Edge::Sidebar => 1.0,
@@ -105,7 +111,7 @@ impl Edge {
         match self {
             Edge::Sidebar => "explorer",
             Edge::Conv => "conversation",
-            Edge::Bottom => "panel",
+            Edge::Bottom => "results panel",
         }
     }
 }
@@ -139,7 +145,7 @@ fn bounds(edge: Edge, st: &St) -> (f64, f64) {
             (MIN_CONV, if w > 0.0 { room.min(MAX_CONV) } else { MAX_CONV })
         }
         Edge::Bottom => {
-            let room = h - MIN_VIEWER;
+            let room = h - MIN_ABOVE;
             (MIN_BOTTOM, if h > 0.0 { room } else { 640.0 })
         }
     };
@@ -285,15 +291,13 @@ pub fn refit(st: &St) {
     }
 }
 
-/// Write the sizes out, off the UI thread. Once per drag, so the cost of
-/// remembering a layout is a few dozen bytes when the mouse comes up.
+/// Write the sizes out, wherever the service layer keeps them. Once per drag,
+/// so the cost of remembering a layout is a few dozen bytes when the mouse
+/// comes up.
 fn remember(st: St) {
-    let saving = Layout {
+    layout::save(Layout {
         side_w: *st.side_w.peek(),
         conv_w: *st.conv_w.peek(),
         bottom_h: *st.bottom_h.peek(),
-    };
-    spawn_forever(async move {
-        let _ = tokio::task::spawn_blocking(move || layout::save(saving)).await;
     });
 }

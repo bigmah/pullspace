@@ -1040,6 +1040,20 @@ button { font-family: inherit; user-select: none; }
   border-radius: 4px;
 }
 
+/* The browser build renders the page for real, in a sandboxed frame. It fills
+   the pane rather than sizing to the content: a frame cannot be measured from
+   the outside once it has an opaque origin, so there is no height to fit to. */
+.previewframe {
+  display: block;
+  width: calc(100% - 24px);
+  height: calc(100vh - 200px);
+  min-height: 320px;
+  margin: 0 12px 12px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: #fff;
+}
+
 /* ---------- conversation pane ---------- */
 
 .convpane {
@@ -1890,3 +1904,98 @@ button { font-family: inherit; user-select: none; }
     background: var(--accent-soft) !important;
   }
 }
+
+/* ---------- search box ---------- */
+
+/* The box takes the place of the top bar's spacer rather than sitting beside
+   one: it grows into whatever the crumbs on the left have not used, up to a
+   width past which a search field is just a long empty rectangle. */
+.searchgrp {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex: 1 1 300px;
+  max-width: 560px;
+  min-width: 150px;
+  margin-left: auto;
+}
+
+.searchgrp .searchbox { flex: 1 1 auto; max-width: none; min-width: 80px; margin-left: 0; }
+
+/* A pattern that will not compile. Said in the border and in the tooltip —
+   never as a dialog, since the next keystroke is usually the fix. */
+.searchbox.bad { border-color: var(--deleted); }
+.searchbox.bad:focus { border-color: var(--deleted); box-shadow: 0 0 0 3px var(--del-bg); }
+
+/* Aa · ab · .*  — the three toggles, in the two states every editor draws
+   them in. */
+.sopt {
+  flex: none;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--r-sm);
+  color: var(--fg-faint);
+  cursor: pointer;
+  font-family: var(--mono);
+  font-size: 11px;
+  line-height: 1;
+  transition: background-color var(--quick) var(--ease), color var(--quick) var(--ease),
+    border-color var(--quick) var(--ease);
+}
+
+.sopt:hover { color: var(--fg); background: var(--bg-3); }
+.sopt.on { color: var(--accent); background: var(--accent-soft); border-color: var(--accent-line); }
+
+/* ---------- results panel ---------- */
+
+/* Sits beside the panel's title: how far along a walk is, or what it could
+   not read. Quieter than the title, which is the thing being looked for. */
+.panel-note {
+  color: var(--fg-faint);
+  font-family: var(--mono);
+  font-size: 10.5px;
+  white-space: nowrap;
+  flex: none;
+}
+
+/* What matched, inside the line it matched on. */
+.hitmark {
+  color: var(--fg);
+  background: var(--accent-soft);
+  border-radius: 2px;
+  box-shadow: inset 0 0 0 1px var(--accent-line);
+}
+
+/* ---------- peek ---------- */
+
+.peek { display: flex; flex-direction: column; }
+/* The peek is a fragment of a file, not a file: it ends where it ends, and
+   the viewer's half-screen of breathing room underneath would be a hole. */
+.peek .code { padding: 4px 0; }
+.peek .cl:hover { background: transparent; }
+
+/* The line the definition is actually on, among the lines around it. */
+.peekdef { background: var(--accent-soft); box-shadow: inset 2px 0 0 var(--accent); }
+
+.peekfoot {
+  display: flex;
+  padding: 6px 12px 10px;
+}
+
+/* ---------- occurrences ---------- */
+
+/* Every other use of the selected identifier, in the file being read. Marked
+   by outline rather than by fill: these land on top of diff colouring and on
+   top of syntax colouring, and neither can be allowed to disappear under it. */
+.occ {
+  border-radius: 2px;
+  box-shadow: inset 0 0 0 1px var(--accent-line);
+  background: rgba(92, 156, 245, 0.1);
+}
+
+/* Back and Forward spend most of their lives with nowhere to go, so they need
+   a state that says so — the same 30% every other dead control in here wears. */
+.iconbtn:disabled { opacity: 0.3; cursor: default; }

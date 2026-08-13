@@ -3,26 +3,76 @@ name = "pullspace"
 version = "0.1.0"
 edition = "2024"
 
+# One build, one target:
+#   dx build --platform web --release   → a static page: an index.html, a .wasm
+#                                         and a .js, and nothing else.
+#
+# pullspace reviews pull requests on GitHub. It reads them over the REST API,
+# from the browser tab it is open in — api.github.com answers cross-origin
+# requests, so there is no server on either side of that. Nothing here touches
+# a machine: no git, no filesystem, no native code.
+#
+# `cargo test` still runs natively. The gloo/web-sys crates compile for the host
+# even though their calls only work in a browser, and everything with tests —
+# diffing, highlighting, markdown, the tree model, URL parsing — is pure.
+
 [dependencies]
 anyhow = "1.0.104"
-anyrender = "0.11"
-anyrender_vello_cpu = "0.14"
-blitz-dom = "=0.3.0-beta.1"
-blitz-html = "=0.3.0-beta.1"
-blitz-paint = "=0.3.0-beta.1"
-blitz-traits = "=0.3.0-beta.1"
-dioxus = { version = "0.6", features = ["desktop"] }
-dirs = "6.0.0"
-git2 = "0.21.0"
-ignore = "0.4.33"
-open = "5.4.1"
-png = "0.17"
+dioxus = { version = "0.6", features = ["web"] }
+futures-util = { version = "0.3", default-features = false }
+# The browser's fetch, its timers, and its local storage.
+gloo-net = { version = "0.7", default-features = false, features = ["http"] }
+gloo-timers = { version = "0.3", features = ["futures"] }
+js-sys = "0.3"
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+# Window/Storage is localStorage — the token and the pane sizes. Everything
+# from Navigator down is the Origin Private File System, which is where the
+# repository itself is kept: see `backend::opfs`.
+web-sys = { version = "0.3", features = [
+    "Window",
+    "Storage",
+    "Navigator",
+    "StorageManager",
+    "Blob",
+    "File",
+    "FileSystemDirectoryHandle",
+    "FileSystemFileHandle",
+    "FileSystemGetDirectoryOptions",
+    "FileSystemGetFileOptions",
+    "FileSystemHandle",
+    "FileSystemRemoveOptions",
+    "FileSystemWritableFileStream",
+] }
 pulldown-cmark = { version = "0.13.4", default-features = false }
-regex = "1.13.1"
-rfd = "0.17.2"
+# Search, and the definition patterns the symbol index is built out of. Nearly
+# free in the bundle: syntect's fancy-regex already compiles regex-automata and
+# regex-syntax in, and this crate is mostly a front door onto those two.
+regex = "1.13"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
-similar = { version = "3.1.2", features = ["inline", "unicode"] }
+# `wasm32_web_time` is not optional here, whatever its name suggests. The
+# word-level emphasis in `inline` gives its own diff a 500ms deadline, and it
+# reads the clock to do it — which on wasm32-unknown-unknown is
+# `std::time::Instant::now()`, and panics. A panic in a browser is not an error
+# anyone can catch: the app stops, mid-render, and the tab has to be reloaded.
+# The feature swaps in `web_time::Instant`, which is `performance.now()` in a
+# page and plain std everywhere else.
+similar = { version = "3.1.2", features = ["inline", "unicode", "wasm32_web_time"] }
+# default-fancy is the pure-Rust build (fancy-regex, no onig C code), which is
+# what lets the highlighter run inside the wasm bundle.
 syntect = { version = "5.3.0", default-features = false, features = ["default-fancy"] }
-tokio = { version = "1.53.1", features = ["rt", "time"] }
-ureq = { version = "3.4.0", features = ["json"] }
+# std::time::Instant panics on wasm32-unknown-unknown.
+web-time = "1"
+
+[profile]
+
+[profile.wasm-dev]
+inherits = "dev"
+opt-level = 1
+
+[profile.server-dev]
+inherits = "dev"
+
+[profile.android-dev]
+inherits = "dev"

@@ -1,21 +1,23 @@
 pub mod auth;
-pub mod branches;
+pub mod blobs;
+pub mod clone;
 pub mod difftool;
 pub mod github;
-pub mod gitio;
 pub mod highlight;
-pub mod htmlview;
+pub mod http;
 pub mod layout;
 pub mod markdown;
-pub mod mirror;
+pub mod opfs;
+pub mod scan;
 pub mod search;
+pub mod store;
 pub mod symbols;
 pub mod tree;
 
-/// One side of a diff, wherever it came from: the working tree, a git blob, or
-/// a GitHub blob. `Absent` covers both "not in this commit" and "deleted on
-/// disk", which the viewer treats the same way — an empty side.
-#[derive(Clone, PartialEq)]
+/// One side of a diff. `Absent` covers "not in this commit" — the base side of
+/// an added file, the head side of a deleted one — which the viewer treats as
+/// an empty side either way.
+#[derive(Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum FileContent {
     Text(String),
     Binary,

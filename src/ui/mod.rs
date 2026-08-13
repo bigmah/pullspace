@@ -1,9 +1,10 @@
 mod app;
 mod bottom;
-mod branches;
+mod compat;
 mod conversation;
 mod filetree;
 mod github;
+mod ide;
 mod markdown;
 mod panes;
 mod prcache;

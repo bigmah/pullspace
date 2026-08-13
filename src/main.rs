@@ -1,23 +1,12 @@
-#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
-
 mod backend;
 mod ui;
 
-use dioxus::desktop::{Config, LogicalSize, WindowBuilder};
-
+/// pullspace, as a page.
+///
+/// There is nothing behind this. `dx build --platform web` leaves an
+/// index.html, a .wasm and a .js in one directory; any static host will serve
+/// them, and the app talks to api.github.com from the tab it is open in. That
+/// is the whole deployment.
 fn main() {
-    let window = WindowBuilder::new()
-        .with_title("pullspace")
-        .with_inner_size(LogicalSize::new(1440.0, 920.0));
-    dioxus::LaunchBuilder::desktop()
-        .with_cfg(
-            Config::new()
-                .with_window(window)
-                // Dioxus disables the webview's context menu in release builds.
-                // In an app that exists to show you code — and hands you a
-                // sign-in code to type elsewhere — right-click copy and paste
-                // are worth more than a tidier menu.
-                .with_disable_context_menu(false),
-        )
-        .launch(ui::App);
+    dioxus::launch(ui::App);
 }

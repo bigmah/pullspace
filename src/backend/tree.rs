@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
 pub enum ChangeKind {
     Added,
     Modified,
@@ -120,33 +120,6 @@ impl DirTmp {
             changed,
         }
     }
-}
-
-/// Walk the working tree (respecting .gitignore) and merge in any paths known
-/// only from git status (e.g. deleted files that no longer exist on disk).
-pub fn build_tree(root: &Path, statuses: &HashMap<PathBuf, ChangeKind>) -> FileNode {
-    let mut tmp = DirTmp::default();
-    let walker = ignore::WalkBuilder::new(root)
-        .hidden(true)
-        .git_ignore(true)
-        .git_exclude(true)
-        .follow_links(false)
-        .build();
-    for entry in walker.flatten() {
-        if entry.file_type().is_some_and(|t| t.is_file()) {
-            if let Ok(rel) = entry.path().strip_prefix(root) {
-                tmp.insert(rel);
-            }
-        }
-    }
-    for rel in statuses.keys() {
-        tmp.insert(rel);
-    }
-    let name = root
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "repo".to_string());
-    tmp.build(name, PathBuf::new(), statuses)
 }
 
 /// Build a tree from an explicit path list. Used for a pull request, where

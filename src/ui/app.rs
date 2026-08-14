@@ -11,7 +11,7 @@ use crate::backend::auth::Token;
 use crate::backend::clone::Progress;
 use crate::backend::difftool::Expansion;
 use crate::backend::github::{
-    PrDetail, PrSummary, RepoRef, RepoView, Snapshot, Thread, statuses_of,
+    Commits, PrDetail, PrState, PrSummary, RepoRef, RepoView, Snapshot, Thread, statuses_of,
 };
 use crate::backend::highlight;
 use crate::backend::markdown;
@@ -80,6 +80,22 @@ impl Workspace {
         !matches!(self, Workspace::Empty)
     }
 
+    /// Which repository this is, whichever of the two it is — what the pull
+    /// request list beside it is a list for.
+    pub fn repo_ref(&self) -> Option<&RepoRef> {
+        match self {
+            Workspace::Empty => None,
+            Workspace::Pr(pr) => Some(&pr.repo),
+            Workspace::Repo(view) => Some(&view.repo),
+        }
+    }
+
+    /// The open pull request's number, when one is open — what the switcher
+    /// marks as the one you are already reading.
+    pub fn pr_number(&self) -> Option<u64> {
+        self.pr().map(|pr| pr.number)
+    }
+
     /// Whether there is a file list to walk.
     ///
     /// What search and the symbol index both need, and what a pull request
@@ -130,15 +146,56 @@ pub enum Account {
     Failed(String),
 }
 
-/// Pull request list for the repo currently typed into the picker.
+/// The pull requests of one repository: which of them were asked for, and how
+/// the asking went.
+///
+/// Kept for as long as that repository is open rather than cleared once
+/// something has been picked out of it — it is what the switcher in the top bar
+/// switches between, and re-fetching it to open the menu would make a list you
+/// glance at cost a request.
 #[derive(Clone, PartialEq)]
-pub enum PrList {
+pub struct PrList {
+    pub repo: RepoRef,
+    pub state: PrState,
+    pub got: Got,
+}
+
+/// How a list of pull requests is getting on.
+#[derive(Clone, PartialEq)]
+pub enum Got {
+    Loading,
+    Ready(Vec<PrSummary>),
+    Failed(String),
+}
+
+impl PrList {
+    /// The pull requests themselves, empty until they are here.
+    pub fn items(&self) -> &[PrSummary] {
+        match &self.got {
+            Got::Ready(items) => items,
+            _ => &[],
+        }
+    }
+
+    /// Whether this is the answer to a question already being asked, so that
+    /// opening a pull request from a list does not go and fetch that same list
+    /// again underneath it.
+    pub fn covers(&self, repo: &RepoRef, state: PrState) -> bool {
+        self.repo == *repo && self.state == state
+    }
+}
+
+/// What the app is fetching from GitHub, for the one line that says so.
+///
+/// Separate from [`PrList`] because the two outlive each other in both
+/// directions: a pull request opens while its repository's list stays on the
+/// shelf, and a list is fetched in the background of a review that is already
+/// on screen.
+#[derive(Clone, PartialEq, Default)]
+pub enum Fetch {
+    #[default]
     Idle,
-    Loading(String),
-    Ready {
-        repo: RepoRef,
-        items: Vec<PrSummary>,
-    },
+    Working(String),
     Failed(String),
 }
 
@@ -151,6 +208,26 @@ pub enum Conversation {
     Loading,
     Ready(Box<Thread>),
     Failed(String),
+}
+
+/// The open pull request's commits — what its branch is made of.
+///
+/// Idle until somebody asks, unlike the conversation: the commits are one more
+/// request, and a review that never opens the tab should not spend it.
+#[derive(Clone, PartialEq)]
+pub enum CommitList {
+    Idle,
+    Loading,
+    Ready(Box<Commits>),
+    Failed(String),
+}
+
+/// Which half of the conversation pane is on show.
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
+pub enum ConvTab {
+    #[default]
+    Talk,
+    Commits,
 }
 
 /// Somewhere the reader has been: a file, how it was being shown, and the line
@@ -274,7 +351,15 @@ pub struct St {
     pub account: Signal<Account>,
     pub gh_open: Signal<bool>,
     pub repo_input: Signal<String>,
-    pub prs: Signal<PrList>,
+    /// The pull requests of whatever repository is open — `None` before any
+    /// repository has been named. Both the picker and the top bar's switcher
+    /// read this one list.
+    pub prs: Signal<Option<PrList>>,
+    /// Which of them to ask for: open, closed, or the lot.
+    pub pr_state: Signal<PrState>,
+    /// What is being fetched from GitHub, if anything, and what went wrong the
+    /// last time something was.
+    pub fetch: Signal<Fetch>,
     pub workspace: Signal<Workspace>,
     /// Per-file base/head content for what is open — decoded, and only for
     /// files somebody has actually looked at. The repository itself lives on
@@ -298,6 +383,9 @@ pub struct St {
     /// comes back instantly and without a second trip to GitHub.
     pub conv: Signal<Conversation>,
     pub conv_open: Signal<bool>,
+    /// And its commits, which the same pane shows in place of them.
+    pub commits: Signal<CommitList>,
+    pub conv_tab: Signal<ConvTab>,
 
     /// A file — and perhaps a line of it — named by a link that arrived before
     /// there was anything open to find it in. Set on the way to a fetch and
@@ -497,6 +585,12 @@ impl St {
         // shows the last pull request's comments under this one's title.
         let mut conv = self.conv;
         conv.set(Conversation::Loading);
+        // The commits go back to being unasked-for, which is what has the pane
+        // fetch this pull request's the moment it is looked at — and, on a
+        // reload, what picks up whatever was just pushed. Before the workspace
+        // is written, since that write is what the fetch hangs off.
+        let mut commits = self.commits;
+        commits.set(CommitList::Idle);
         let mut statuses = self.statuses;
         // A repository browsed on its own has nothing changed in it.
         statuses.set(ws.pr().map(|pr| statuses_of(&pr.files)).unwrap_or_default());
@@ -586,6 +680,8 @@ impl St {
     pub fn close_workspace(&self) {
         let mut w = self.workspace;
         w.set(Workspace::Empty);
+        let mut commits = self.commits;
+        commits.set(CommitList::Idle);
         self.forget_contents();
         let mut cloning = self.cloning;
         cloning.set(None);
@@ -972,7 +1068,9 @@ pub fn App() -> Element {
             // Nothing is open at launch, so the picker is where to start.
             gh_open: root(true),
             repo_input: root(String::new()),
-            prs: root(PrList::Idle),
+            prs: root(None),
+            pr_state: root(PrState::default()),
+            fetch: root(Fetch::Idle),
             workspace: root(Workspace::Empty),
             pr_files: root(HashMap::new()),
             warm_order: root(VecDeque::new()),
@@ -980,6 +1078,8 @@ pub fn App() -> Element {
             store_gen: root(0),
             conv: root(Conversation::Loading),
             conv_open: root(true),
+            commits: root(CommitList::Idle),
+            conv_tab: root(ConvTab::default()),
 
             pending: root(None),
 
@@ -1154,6 +1254,53 @@ pub fn App() -> Element {
             .map(|pr| (pr.repo.clone(), pr.number));
         let Some((repo, number)) = target else { return };
         spawn_forever(super::conversation::load(st, repo, number));
+    });
+
+    // The pull requests of whatever repository is open, kept alongside it —
+    // which is what makes the switcher in the top bar a list to swap through
+    // rather than a button that goes and fetches one. It follows the repository
+    // and the open/closed/all toggle, and nothing else: opening a second pull
+    // request on the same repository is a list already in hand.
+    use_effect(move || {
+        let state = *st.pr_state.read();
+        // Whatever is open — or, with nothing open, whatever the picker last
+        // named, so that flipping open/closed/all in front of a list refetches
+        // that list rather than waiting for something to be opened.
+        let repo = st
+            .workspace
+            .read()
+            .repo_ref()
+            .cloned()
+            .or_else(|| st.prs.peek().as_ref().map(|l| l.repo.clone()));
+        let Some(repo) = repo else { return };
+        if st
+            .prs
+            .peek()
+            .as_ref()
+            .is_some_and(|l| l.covers(&repo, state))
+        {
+            return;
+        }
+        spawn_forever(super::github::load_repo_prs(st, repo));
+    });
+
+    // And the open pull request's commits, once somebody looks at the tab they
+    // are under. One request, spent on being asked for rather than on every
+    // review that never opens it.
+    use_effect(move || {
+        let asked = *st.conv_tab.read() == ConvTab::Commits;
+        let target = st
+            .workspace
+            .read()
+            .pr()
+            .map(|pr| (pr.repo.clone(), pr.number));
+        let Some((repo, number)) = target.filter(|_| asked) else {
+            return;
+        };
+        if !matches!(*st.commits.peek(), CommitList::Idle) {
+            return;
+        }
+        spawn_forever(super::conversation::load_commits(st, repo, number));
     });
 
     // Unfolding the conversation claims 380px the explorer may currently be

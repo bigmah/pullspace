@@ -3,10 +3,11 @@ use std::time::Duration;
 use dioxus::prelude::*;
 
 use crate::backend::auth::open_browser;
+use crate::backend::github::RepoRef;
 
-use super::app::{Account, PrList, St, Workspace};
+use super::app::{Account, Fetch, St, Workspace};
 use super::compat;
-use super::github::{browse_repo, open_pr};
+use super::github::{PrListBody, PrStates, browse_repo, open_pr};
 use super::ide;
 
 /// Bytes, in the units anybody would say them in.
@@ -62,10 +63,10 @@ pub fn TopBar() -> Element {
     let repo_target = workspace.repo().map(|v| v.repo.clone());
     let ws_open = workspace.is_open();
 
-    let (reload_note, reload_error) = match &*st.prs.read() {
-        PrList::Loading(note) => (Some(note.clone()), None),
-        PrList::Failed(e) => (None, Some(e.clone())),
-        _ => (None, None),
+    let (reload_note, reload_error) = match &*st.fetch.read() {
+        Fetch::Working(note) => (Some(note.clone()), None),
+        Fetch::Failed(e) => (None, Some(e.clone())),
+        Fetch::Idle => (None, None),
     };
     let reloading = reload_note.is_some();
     let refresh_title = match &*workspace {
@@ -161,11 +162,10 @@ pub fn TopBar() -> Element {
             span { class: "brand", "pullspace" }
             span { class: "{ws_cls}", title: "{ws_why}", "{ws_label}" }
             if let Some((prnum, title, url)) = pr {
-                span {
-                    class: "prcrumb",
-                    title: "{prnum} — {title}",
-                    span { class: "prnum", "{prnum}" }
-                    span { class: "prcrumbtitle", "{title}" }
+                PrSwitch {
+                    lead: prnum.clone(),
+                    trail: title.clone(),
+                    why: "{prnum} — {title}\nSwitch to another pull request on this repository",
                 }
                 if let Some((label, why)) = warn {
                     span { class: "prwarn", title: "{why}", "{label}" }
@@ -190,11 +190,10 @@ pub fn TopBar() -> Element {
                     "close PR"
                 }
             } else if let Some((repo, branch, url)) = browsing {
-                span {
-                    class: "prcrumb",
-                    title: "{repo} at {branch} — no pull request, just the code",
-                    span { class: "prnum", "{repo}" }
-                    span { class: "prcrumbtitle", "@ {branch}" }
+                PrSwitch {
+                    lead: repo.clone(),
+                    trail: "@ {branch}",
+                    why: "{repo} at {branch} — no pull request, just the code\nOpen one of this repository's pull requests",
                 }
                 if let Some((label, why)) = warn {
                     span { class: "prwarn", title: "{why}", "{label}" }
@@ -245,6 +244,112 @@ pub fn TopBar() -> Element {
                 reloading,
                 refresh_title,
                 refresh_cls,
+            }
+        }
+    }
+}
+
+/// The crumb that says what is open — and, behind it, everything else that
+/// could be.
+///
+/// A review is rarely one pull request. The list of them is already here, kept
+/// alongside whatever is open (see the effect in [`App`](super::app::App)), so
+/// swapping is a click on the thing you are already looking at rather than a
+/// trip back through the picker. The repository itself is at the foot of the
+/// list, which is the way out of a pull request and into the code around it.
+#[component]
+fn PrSwitch(lead: String, trail: String, why: String) -> Element {
+    let st = use_context::<St>();
+    let mut open = use_signal(|| false);
+
+    let current = st.workspace.read().pr_number();
+    let repo = st.workspace.read().repo_ref().cloned();
+    // Whose pull requests these are. Usually the repository that is open, but
+    // the picker can have moved on to another one without opening it — and a
+    // list that says whose it is cannot be read as the wrong repository's.
+    let listed = st.prs.read().as_ref().map(|l| l.repo.to_string());
+
+    // A swap that has landed is a menu that has done what it was opened for.
+    // On the workspace rather than on the click, so the menu stays up — with
+    // the row still under the pointer — for as long as the loading takes.
+    use_effect(move || {
+        let _ = st.workspace.read();
+        open.set(false);
+    });
+
+    rsx! {
+        div {
+            class: "prswitch",
+            // Escape, wherever the focus is inside here — which after the click
+            // that opened the menu is the crumb, above the menu rather than in
+            // it, so the handler goes on the pair of them.
+            onkeydown: move |e| {
+                if e.key() == Key::Escape && *open.peek() {
+                    e.stop_propagation();
+                    open.set(false);
+                }
+            },
+            button {
+                class: "prcrumb prcrumbbtn",
+                title: "{why}",
+                onclick: move |_| {
+                    let showing = *open.peek();
+                    open.set(!showing);
+                },
+                span { class: "prnum", "{lead}" }
+                span { class: "prcrumbtitle", "{trail}" }
+                span { class: "prchev", "▾" }
+            }
+            if *open.read() {
+                // Everything else on the page, for as long as the menu is up:
+                // a click anywhere out here puts it away, which is the one
+                // thing every menu does.
+                div {
+                    class: "menuback",
+                    onclick: move |_| open.set(false),
+                }
+                div { class: "prmenu",
+                    div { class: "prmenuhdr",
+                        if let Some(listed) = listed {
+                            span { class: "ghlabel", "{listed}" }
+                        }
+                        span { class: "spacer" }
+                        PrStates {}
+                    }
+                    div { class: "prmenubody", PrListBody { current } }
+                    if let Some(repo) = repo {
+                        BrowseFoot { repo, current: current.is_none() }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// The way out of a pull request and into the repository it is against — the
+/// row at the foot of the switcher, and the one that is already ticked when the
+/// repository is what is open.
+#[component]
+fn BrowseFoot(repo: RepoRef, current: bool) -> Element {
+    let st = use_context::<St>();
+    let class = if current {
+        "prmenufoot on"
+    } else {
+        "prmenufoot"
+    };
+    rsx! {
+        div {
+            class: "{class}",
+            title: if current { "Already open" } else { "Read {repo} at its default branch, with no pull request" },
+            // Root scope: loading replaces the bar this row hangs off.
+            onclick: move |_| {
+                if !current {
+                    spawn_forever(browse_repo(st, repo.clone()));
+                }
+            },
+            span { class: "prmenufoot-label", "the repository itself" }
+            if current {
+                span { class: "prhere", "reading" }
             }
         }
     }

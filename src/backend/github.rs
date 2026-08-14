@@ -33,6 +33,13 @@ const MAX_FILE_PAGES: u32 = 30;
 /// 100 comments per page, per kind. A thread past this is one nobody is
 /// reading to the end of anyway, and the pane says when it was cut short.
 const MAX_COMMENT_PAGES: u32 = 5;
+/// GitHub answers at most 250 commits on a pull request, so three pages is
+/// every one there is to have from this endpoint.
+const MAX_COMMIT_PAGES: u32 = 3;
+/// How many pull requests one listing holds. GitHub's own maximum per page,
+/// asked for in one request — a second page of a list nobody scrolls to the
+/// bottom of is not worth the wait or the budget.
+pub const PR_PAGE: usize = 100;
 
 /// Percent-encode one path segment into `out`. Avoids a dependency for the
 /// handful of characters that actually show up in repo paths.
@@ -612,6 +619,10 @@ struct RawPr {
     #[serde(default)]
     draft: bool,
     state: String,
+    /// Set only on a pull request that was closed by being merged, which is the
+    /// one thing `state` does not say.
+    #[serde(default)]
+    merged_at: Option<String>,
     updated_at: String,
     html_url: String,
     head: RawRef,
@@ -624,9 +635,55 @@ pub struct PrSummary {
     pub title: String,
     pub author: String,
     pub draft: bool,
+    /// `open` or `closed`, as GitHub says it.
+    pub state: String,
+    /// Closed by landing rather than by being turned down. GitHub calls both
+    /// `closed`, and they are not the same news.
+    pub merged: bool,
     pub updated_at: String,
     pub head_ref: String,
     pub base_ref: String,
+}
+
+impl PrSummary {
+    pub fn is_open(&self) -> bool {
+        self.state == "open"
+    }
+}
+
+/// Which of a repository's pull requests to ask for.
+///
+/// GitHub's own three, in GitHub's own words — a list that offers anything else
+/// is a list somebody has to work out the meaning of.
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
+pub enum PrState {
+    #[default]
+    Open,
+    /// Turned down or landed: GitHub calls both of those closed.
+    Closed,
+    All,
+}
+
+impl PrState {
+    /// The three, in the order they are offered.
+    pub const EVERY: [PrState; 3] = [PrState::Open, PrState::Closed, PrState::All];
+
+    /// What GitHub calls it, which is also what the button says.
+    pub fn label(self) -> &'static str {
+        match self {
+            PrState::Open => "open",
+            PrState::Closed => "closed",
+            PrState::All => "all",
+        }
+    }
+
+    pub fn why(self) -> &'static str {
+        match self {
+            PrState::Open => "Pull requests still open",
+            PrState::Closed => "Pull requests that have been merged or turned down",
+            PrState::All => "Every pull request, open or closed",
+        }
+    }
 }
 
 fn author_of(user: &Option<User>) -> String {
@@ -635,26 +692,34 @@ fn author_of(user: &Option<User>) -> String {
         .unwrap_or_else(|| "ghost".to_string())
 }
 
-/// Open pull requests, most recently updated first.
-pub async fn list_prs(token: &str, repo: &RepoRef) -> Result<Vec<PrSummary>> {
+/// A repository's pull requests, most recently updated first.
+///
+/// One page, which is [`PR_PAGE`] of them — enough that "the pull requests on
+/// this repository" is answered in full for very nearly every repository, and
+/// the caller is told which are the ones it is not.
+pub async fn list_prs(token: &str, repo: &RepoRef, state: PrState) -> Result<Vec<PrSummary>> {
     let url = format!(
-        "{API}/repos/{}/{}/pulls?state=open&sort=updated&direction=desc&per_page=50",
+        "{API}/repos/{}/{}/pulls?state={}&sort=updated&direction=desc&per_page={PR_PAGE}",
         encode_segment(&repo.owner),
         encode_segment(&repo.name),
+        state.label(),
     );
     let raw: Vec<RawPr> = get_json(token, &url).await?;
-    Ok(raw
-        .into_iter()
-        .map(|p| PrSummary {
-            number: p.number,
-            title: p.title,
-            author: author_of(&p.user),
-            draft: p.draft,
-            updated_at: p.updated_at,
-            head_ref: p.head.name,
-            base_ref: p.base.name,
-        })
-        .collect())
+    Ok(raw.into_iter().map(summary_of).collect())
+}
+
+fn summary_of(p: RawPr) -> PrSummary {
+    PrSummary {
+        number: p.number,
+        title: p.title,
+        author: author_of(&p.user),
+        draft: p.draft,
+        merged: p.merged_at.is_some(),
+        state: p.state,
+        updated_at: p.updated_at,
+        head_ref: p.head.name,
+        base_ref: p.base.name,
+    }
 }
 
 #[derive(Deserialize)]
@@ -1056,14 +1121,16 @@ fn comment_of(raw: RawComment, kind: CommentKind) -> Comment {
     }
 }
 
-/// Read a list endpoint page by page. The bool is true when there was more
-/// than [`MAX_COMMENT_PAGES`] worth.
+/// Read a list endpoint page by page. The bool is true when there was more than
+/// `pages` worth — which every caller has to say something about, since a list
+/// silently cut off is a list read as complete.
 async fn get_paged<T: serde::de::DeserializeOwned>(
     token: &str,
     base: &str,
+    pages: u32,
 ) -> Result<(Vec<T>, bool)> {
     let mut out = Vec::new();
-    for page in 1..=MAX_COMMENT_PAGES {
+    for page in 1..=pages {
         let url = format!("{base}?per_page=100&page={page}");
         let raw: Vec<T> = get_json(token, &url).await?;
         let full_page = raw.len() == 100;
@@ -1106,6 +1173,7 @@ pub async fn pr_comments(token: &str, repo: &RepoRef, number: u64) -> Result<Thr
     let (discussion, more): (Vec<RawComment>, bool) = get_paged(
         token,
         &format!("{API}/repos/{owner}/{name}/issues/{number}/comments"),
+        MAX_COMMENT_PAGES,
     )
     .await
     .with_context(|| format!("reading the discussion on #{number}"))?;
@@ -1119,6 +1187,7 @@ pub async fn pr_comments(token: &str, repo: &RepoRef, number: u64) -> Result<Thr
     let (inline, more): (Vec<RawComment>, bool) = get_paged(
         token,
         &format!("{API}/repos/{owner}/{name}/pulls/{number}/comments"),
+        MAX_COMMENT_PAGES,
     )
     .await
     .with_context(|| format!("reading the line comments on #{number}"))?;
@@ -1132,6 +1201,7 @@ pub async fn pr_comments(token: &str, repo: &RepoRef, number: u64) -> Result<Thr
     let (reviews, more): (Vec<RawComment>, bool) = get_paged(
         token,
         &format!("{API}/repos/{owner}/{name}/pulls/{number}/reviews"),
+        MAX_COMMENT_PAGES,
     )
     .await
     .with_context(|| format!("reading the reviews of #{number}"))?;
@@ -1149,6 +1219,131 @@ pub async fn pr_comments(token: &str, repo: &RepoRef, number: u64) -> Result<Thr
 
     Ok(Thread {
         comments,
+        truncated,
+    })
+}
+
+// ----------------------------------------------------------------- commits
+
+/// One commit of a pull request, as the list of them reads.
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+pub struct CommitSummary {
+    pub sha: String,
+    /// The whole message. Its first line is the subject and the rest is the
+    /// body — split by [`subject`](Self::subject) and [`body`](Self::body)
+    /// rather than at the seam, so nothing anybody wrote is thrown away.
+    pub message: String,
+    /// The GitHub account that wrote it, or — for a commit whose author has no
+    /// account here — the name git has for them.
+    pub author: String,
+    /// ISO 8601, as git recorded it.
+    pub date: String,
+    pub html_url: String,
+}
+
+impl CommitSummary {
+    /// The seven characters everybody actually says a commit by.
+    pub fn short(&self) -> &str {
+        let end = self
+            .sha
+            .char_indices()
+            .nth(7)
+            .map_or(self.sha.len(), |(i, _)| i);
+        &self.sha[..end]
+    }
+
+    /// The first line, which is what a list of commits is a list of.
+    pub fn subject(&self) -> &str {
+        self.message.lines().next().unwrap_or_default().trim_end()
+    }
+
+    /// Everything after it, empty for the one-line message most commits are.
+    pub fn body(&self) -> &str {
+        match self.message.split_once('\n') {
+            Some((_, rest)) => rest.trim(),
+            None => "",
+        }
+    }
+}
+
+/// The commits of one pull request, oldest first — the order they were written
+/// in, which is the order they are read in.
+#[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
+pub struct Commits {
+    pub items: Vec<CommitSummary>,
+    /// GitHub stops at 250 commits on this endpoint, and this says when it did.
+    pub truncated: bool,
+}
+
+#[derive(Deserialize)]
+struct RawPrCommit {
+    #[serde(default)]
+    sha: String,
+    #[serde(default)]
+    commit: RawCommitBody,
+    /// The GitHub account, when the email on the commit belongs to one.
+    #[serde(default)]
+    author: Option<User>,
+    #[serde(default)]
+    html_url: String,
+}
+
+#[derive(Deserialize, Default)]
+struct RawCommitBody {
+    #[serde(default)]
+    message: String,
+    #[serde(default)]
+    author: Option<RawSignature>,
+}
+
+/// Git's own idea of who wrote something and when — a name and a date typed
+/// into a commit, with no account behind either.
+#[derive(Deserialize)]
+struct RawSignature {
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    date: String,
+}
+
+fn commit_of(raw: RawPrCommit) -> CommitSummary {
+    let signature = raw.commit.author;
+    let named = signature
+        .as_ref()
+        .map(|a| a.name.clone())
+        .unwrap_or_default();
+    // The account first: it is the name the rest of the pull request is written
+    // under. The git author is the fallback for a commit written from an email
+    // address GitHub does not know.
+    let author = raw
+        .author
+        .map(|u| u.login)
+        .filter(|login| !login.is_empty())
+        .or(Some(named))
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| "unknown".to_string());
+    CommitSummary {
+        sha: raw.sha,
+        message: raw.commit.message,
+        author,
+        date: signature.map(|a| a.date).unwrap_or_default(),
+        html_url: raw.html_url,
+    }
+}
+
+/// Every commit on a pull request — what the branch is made of, rather than
+/// what it adds up to.
+pub async fn pr_commits(token: &str, repo: &RepoRef, number: u64) -> Result<Commits> {
+    let base = format!(
+        "{API}/repos/{}/{}/pulls/{number}/commits",
+        encode_segment(&repo.owner),
+        encode_segment(&repo.name),
+    );
+    let (raw, truncated): (Vec<RawPrCommit>, bool) = get_paged(token, &base, MAX_COMMIT_PAGES)
+        .await
+        .with_context(|| format!("reading the commits on #{number}"))?;
+    Ok(Commits {
+        items: raw.into_iter().map(commit_of).collect(),
         truncated,
     })
 }
@@ -1424,6 +1619,105 @@ mod tests {
             after.blob_key(Path::new("src/b.rs")),
             "byte-identical, so it stays read"
         );
+    }
+
+    /// A commit as the endpoint sends it, with only the fields read here.
+    fn raw_commit(sha: &str, message: &str, login: Option<&str>, name: &str) -> RawPrCommit {
+        RawPrCommit {
+            sha: sha.to_string(),
+            commit: RawCommitBody {
+                message: message.to_string(),
+                author: Some(RawSignature {
+                    name: name.to_string(),
+                    date: "2026-08-13T09:00:00Z".to_string(),
+                }),
+            },
+            author: login.map(|login| User {
+                login: login.to_string(),
+            }),
+            html_url: String::new(),
+        }
+    }
+
+    #[test]
+    fn a_commit_message_is_a_subject_and_what_follows_it() {
+        let one = commit_of(raw_commit(
+            "a".repeat(40).as_str(),
+            "fix the thing",
+            None,
+            "Ada",
+        ));
+        assert_eq!(one.short(), "aaaaaaa", "seven characters, not eight");
+        assert_eq!(one.subject(), "fix the thing");
+        assert_eq!(one.body(), "", "a one-line message has nothing under it");
+
+        let full = commit_of(raw_commit(
+            "0123456789abcdef",
+            "fix the thing\n\nBecause it was broken.\n\nCloses #12\n",
+            None,
+            "Ada",
+        ));
+        assert_eq!(full.short(), "0123456");
+        assert_eq!(full.subject(), "fix the thing");
+        assert_eq!(full.body(), "Because it was broken.\n\nCloses #12");
+    }
+
+    /// A sha shorter than the seven characters everybody quotes — which is not
+    /// something GitHub sends, and is not something to panic over either.
+    #[test]
+    fn a_short_sha_is_as_short_as_it_is() {
+        let stub = commit_of(raw_commit("abc", "x", None, ""));
+        assert_eq!(stub.short(), "abc");
+    }
+
+    #[test]
+    fn a_commit_is_attributed_to_the_account_first_and_the_signature_after() {
+        let with_account = commit_of(raw_commit("s", "m", Some("ada"), "Ada Lovelace"));
+        assert_eq!(
+            with_account.author, "ada",
+            "the login is what the PR is under"
+        );
+
+        let no_account = commit_of(raw_commit("s", "m", None, "Ada Lovelace"));
+        assert_eq!(
+            no_account.author, "Ada Lovelace",
+            "an email GitHub does not know still has a name on it"
+        );
+
+        let anonymous = commit_of(raw_commit("s", "m", None, ""));
+        assert_eq!(anonymous.author, "unknown", "rather than an empty column");
+    }
+
+    #[test]
+    fn merged_and_closed_are_not_the_same_news() {
+        let raw = |state: &str, merged: bool| RawPr {
+            number: 1,
+            title: "t".to_string(),
+            body: None,
+            user: None,
+            draft: false,
+            state: state.to_string(),
+            merged_at: merged.then(|| "2026-08-13T09:00:00Z".to_string()),
+            updated_at: String::new(),
+            html_url: String::new(),
+            head: RawRef {
+                name: "feature".to_string(),
+                sha: String::new(),
+            },
+            base: RawRef {
+                name: "main".to_string(),
+                sha: String::new(),
+            },
+        };
+        let open = summary_of(raw("open", false));
+        assert!(open.is_open() && !open.merged);
+        // Both of these are `closed` to GitHub, and the badge on them differs.
+        let landed = summary_of(raw("closed", true));
+        assert!(!landed.is_open() && landed.merged);
+        let dropped = summary_of(raw("closed", false));
+        assert!(!dropped.is_open() && !dropped.merged);
+        // And nobody's account is still somebody.
+        assert_eq!(open.author, "ghost");
     }
 
     #[test]

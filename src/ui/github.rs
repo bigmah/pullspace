@@ -15,10 +15,11 @@ use dioxus::prelude::*;
 use crate::backend::auth::{self, Token, open_browser};
 use crate::backend::blobs;
 use crate::backend::github::{
-    self, OwnerHit, PrSummary, RepoHit, RepoRef, RepoView, parse_owner, parse_target,
+    self, OwnerHit, PR_PAGE, PrState, PrSummary, RepoHit, RepoRef, RepoView, parse_owner,
+    parse_target,
 };
 
-use super::app::{Account, PrList, St};
+use super::app::{Account, Fetch, Got, PrList, St};
 use super::compat;
 use super::topbar::size_label;
 
@@ -333,43 +334,150 @@ fn SignedIn(login: String) -> Element {
     }
 }
 
-/// The open pull requests of whatever repository the picker last loaded.
+/// The pull requests of whatever repository is open, or was last named in the
+/// picker.
 ///
 /// Signed in or not: a public repository lists its pull requests to anyone, and
 /// this pane is the same one either way.
 #[component]
 fn PrSection() -> Element {
     let st = use_context::<St>();
-    let prs = st.prs.read().clone();
+    let held = st.prs.read().clone();
+    // What is on screen already, so the row for it is marked rather than
+    // offered as somewhere to go.
+    let current = st.workspace.read().pr_number();
+    let fetching = st.fetch.read().clone();
+
+    let Some(list) = held else {
+        return rsx! {
+            div { class: "ghsection prsection",
+                if let Fetch::Failed(e) = fetching {
+                    div { class: "gherror", "{e}" }
+                }
+                div { class: "ghnote", "Pick a repository to list its pull requests." }
+            }
+        };
+    };
+    let repo = list.repo.clone();
+    let count = list.items().len();
+    let word = state_word(list.state);
+    let ready = matches!(list.got, Got::Ready(_));
 
     rsx! {
         div { class: "ghsection prsection",
-            match prs {
-                PrList::Idle => rsx! {
-                    div { class: "ghnote", "Pick a repository to list its open pull requests." }
-                },
-                PrList::Loading(note) => rsx! { div { class: "ghnote", "{note}" } },
-                PrList::Failed(e) => rsx! { div { class: "gherror", "{e}" } },
-                PrList::Ready { repo, items } if items.is_empty() => rsx! {
-                    div { class: "ghnote", "No open pull requests in {repo}." }
-                    BrowseRow { repo, no_prs: true }
-                },
-                PrList::Ready { repo, items } => rsx! {
-                    div { class: "ghlabel", "{items.len()} open in {repo}" }
-                    div { class: "prlist",
-                        for pr in items {
-                            // The clone looks removable — clippy says so — but
-                            // the key reads `pr` and whether that read lands
-                            // before or after the move into props is the rsx
-                            // macro's business, not ours. Seen to fail on
-                            // another machine; keep the clone.
-                            PrRow { key: "{pr.number}", repo: repo.clone(), pr: pr.clone() }
-                        }
-                    }
-                    BrowseRow { repo, no_prs: false }
-                },
+            // A failed load is reported here rather than nowhere: the panel is
+            // where the thing that failed was asked for.
+            if let Fetch::Failed(e) = fetching {
+                div { class: "gherror", "{e}" }
+            }
+            div { class: "ghrow",
+                if ready && count > 0 {
+                    div { class: "ghlabel", "{count} {word}in {repo}" }
+                } else {
+                    div { class: "ghlabel", "Pull requests in {repo}" }
+                }
+                span { class: "spacer" }
+                PrStates {}
+            }
+            PrListBody { current }
+            BrowseRow { repo, no_prs: ready && count == 0 }
+        }
+    }
+}
+
+/// Open · closed · all — which of a repository's pull requests the list is a
+/// list of.
+///
+/// One toggle, read by the picker and by the top bar's switcher alike, because
+/// there is one list and both of them are looking at it.
+#[component]
+pub(super) fn PrStates() -> Element {
+    let st = use_context::<St>();
+    let mut pr_state = st.pr_state;
+    let now = *pr_state.read();
+
+    rsx! {
+        div { class: "prstates",
+            for state in PrState::EVERY {
+                button {
+                    key: "{state.label()}",
+                    class: if state == now { "pstate on" } else { "pstate" },
+                    title: "{state.why()}",
+                    onclick: move |_| pr_state.set(state),
+                    "{state.label()}"
+                }
             }
         }
+    }
+}
+
+/// The adjective in "3 open pull requests" — with the space it needs, since the
+/// list of everything has no adjective at all.
+fn state_word(state: PrState) -> &'static str {
+    match state {
+        PrState::Open => "open ",
+        PrState::Closed => "closed ",
+        PrState::All => "",
+    }
+}
+
+/// A repository's pull requests, however the fetching of them went.
+///
+/// The same rows in the panel and in the top bar's switcher, reading the same
+/// signal — so swapping through pull requests and picking one out of the picker
+/// are two ways at one list rather than two lists.
+#[component]
+pub(super) fn PrListBody(current: Option<u64>) -> Element {
+    let st = use_context::<St>();
+    let held = st.prs.read().clone();
+    let Some(list) = held else {
+        return rsx! {};
+    };
+    let repo = list.repo.clone();
+    let word = state_word(list.state);
+
+    match &list.got {
+        Got::Loading => rsx! {
+            div { class: "ghnote", "Loading pull requests…" }
+        },
+        Got::Failed(e) => rsx! {
+            div { class: "gherror", "{e}" }
+            button {
+                class: "linkbtn",
+                // Root scope: the note this button is in is replaced by the
+                // load it starts.
+                onclick: move |_| {
+                    spawn_forever(load_repo_prs(st, repo.clone()));
+                },
+                "Try again"
+            }
+        },
+        Got::Ready(items) if items.is_empty() => rsx! {
+            div { class: "ghnote", "No {word}pull requests in {repo}." }
+        },
+        Got::Ready(items) => rsx! {
+            div { class: "prlist",
+                for pr in items.iter() {
+                    // The clone looks removable — clippy says so — but the key
+                    // reads `pr` and whether that read lands before or after
+                    // the move into props is the rsx macro's business, not
+                    // ours. Seen to fail on another machine; keep the clone.
+                    PrRow {
+                        key: "{pr.number}",
+                        repo: repo.clone(),
+                        pr: pr.clone(),
+                        current: current == Some(pr.number),
+                    }
+                }
+            }
+            // A page full is a page that may have had more behind it, and a
+            // list quietly cut off reads as the whole of what there is.
+            if items.len() >= PR_PAGE {
+                div { class: "ghnote",
+                    "The {PR_PAGE} most recently updated. Older ones are on github.com."
+                }
+            }
+        },
     }
 }
 
@@ -992,23 +1100,47 @@ fn BrowseRow(repo: RepoRef, no_prs: bool) -> Element {
 }
 
 #[component]
-fn PrRow(repo: RepoRef, pr: PrSummary) -> Element {
+fn PrRow(repo: RepoRef, pr: PrSummary, current: bool) -> Element {
     let st = use_context::<St>();
     let number = pr.number;
     let target = repo;
+    let class = if current { "pritem on" } else { "pritem" };
+    // The date alone. Which afternoon somebody last pushed to a branch is what
+    // picks a pull request out of a list; the time of day is not.
+    let day: String = pr.updated_at.chars().take(10).collect();
     rsx! {
         div {
-            class: "pritem",
-            // Root scope: switching the list to `Loading` unmounts this row.
-            onclick: move |_| { spawn_forever(open_pr(st, target.clone(), number)); },
+            class: "{class}",
+            title: if current { "Already open" } else { "Open #{number}" },
+            // Root scope: opening one replaces the list this row is drawn in.
+            onclick: move |_| {
+                // Clicking the pull request you are reading is not a reload —
+                // `⟳` is, and it is two inches away.
+                if !current {
+                    spawn_forever(open_pr(st, target.clone(), number));
+                }
+            },
             div { class: "prtop",
                 span { class: "prnum", "#{pr.number}" }
                 span { class: "prtitle", "{pr.title}" }
+                if current {
+                    span { class: "prhere", "reading" }
+                }
                 if pr.draft {
                     span { class: "prdraft", "draft" }
                 }
+                if pr.merged {
+                    span { class: "prdraft merged", "merged" }
+                } else if !pr.is_open() {
+                    span { class: "prdraft closed", "closed" }
+                }
             }
-            div { class: "prmeta", "{pr.author} · {pr.head_ref} → {pr.base_ref}" }
+            div { class: "prmeta",
+                "{pr.author} · {pr.head_ref} → {pr.base_ref}"
+                if !day.is_empty() {
+                    " · {day}"
+                }
+            }
         }
     }
 }
@@ -1020,16 +1152,17 @@ fn do_sign_out(st: St) {
     t.set(None);
     let mut a = st.account;
     a.set(Account::SignedOut);
+    // What that account could see is not what the next caller can.
     let mut p = st.prs;
-    p.set(PrList::Idle);
+    p.set(None);
 }
 
 /// Load whatever the user typed: a repo lists its PRs, a PR link opens it.
 async fn open_target(st: St) {
     let raw = st.repo_input.peek().clone();
-    let mut prs = st.prs;
     let Some((repo, number)) = parse_target(&raw) else {
-        prs.set(PrList::Failed(
+        let mut fetch = st.fetch;
+        fetch.set(Fetch::Failed(
             "That is not a repository — pick one from the list, or paste a GitHub link."
                 .to_string(),
         ));
@@ -1041,14 +1174,31 @@ async fn open_target(st: St) {
     load_repo_prs(st, repo).await;
 }
 
-/// Show a repository's open pull requests.
-async fn load_repo_prs(st: St, repo: RepoRef) {
+/// Show a repository's pull requests, in whichever state is toggled on.
+///
+/// It is the picker's answer to a repository being chosen, and it is also what
+/// runs by itself whenever something opens — see the effect in
+/// [`App`](super::app::App) — so that the switcher in the top bar always has a
+/// list to switch through.
+pub(super) async fn load_repo_prs(st: St, repo: RepoRef) {
     let token = st.api_token();
+    let state = *st.pr_state.peek();
     let mut prs = st.prs;
-    prs.set(PrList::Loading("Loading pull requests…".to_string()));
-    match github::list_prs(&token, &repo).await {
-        Ok(items) => prs.set(PrList::Ready { repo, items }),
-        Err(e) => prs.set(PrList::Failed(format!("{e:#}"))),
+    prs.set(Some(PrList {
+        repo: repo.clone(),
+        state,
+        got: Got::Loading,
+    }));
+
+    let got = match github::list_prs(&token, &repo, state).await {
+        Ok(items) => Got::Ready(items),
+        Err(e) => Got::Failed(format!("{e:#}")),
+    };
+    // A repository opened, or the toggle flipped, while this was in flight: the
+    // answer is to a question nobody is asking any more.
+    let wanted = prs.peek().as_ref().is_some_and(|l| l.covers(&repo, state));
+    if wanted {
+        prs.set(Some(PrList { repo, state, got }));
     }
 }
 
@@ -1060,25 +1210,25 @@ async fn load_repo_prs(st: St, repo: RepoRef) {
 /// is keyed by commit.
 pub(super) async fn browse_repo(st: St, repo: RepoRef) {
     let token = st.api_token();
-    let mut prs = st.prs;
+    let mut fetch = st.fetch;
 
-    prs.set(PrList::Loading("Reading the repository…".to_string()));
+    fetch.set(Fetch::Working("Reading the repository…".to_string()));
     let head = match github::repo_head(&token, &repo).await {
         Ok(h) => h,
-        Err(e) => return prs.set(PrList::Failed(format!("{e:#}"))),
+        Err(e) => return fetch.set(Fetch::Failed(format!("{e:#}"))),
     };
 
-    prs.set(PrList::Loading("Reading the file tree…".to_string()));
+    fetch.set(Fetch::Working("Reading the file tree…".to_string()));
     // A pull request with no readable tree still has its changed files to show.
     // A repository has nothing at all, so this is where it stops — with the
     // list still on screen, rather than on an explorer that looks empty.
     let Some(tree) = tree_at(&token, &repo, &head.sha).await else {
-        return prs.set(PrList::Failed(format!(
+        return fetch.set(Fetch::Failed(format!(
             "Could not read the file list for {repo}."
         )));
     };
 
-    prs.set(PrList::Idle);
+    fetch.set(Fetch::Idle);
     st.enter_repo(RepoView {
         repo,
         branch: head.branch,
@@ -1109,15 +1259,15 @@ async fn tree_at(token: &str, repo: &RepoRef, sha: &str) -> Option<github::Snaps
 /// downstream of it is keyed by that commit.
 pub(super) async fn open_pr(st: St, repo: RepoRef, number: u64) {
     let token = st.api_token();
-    let mut prs = st.prs;
+    let mut fetch = st.fetch;
 
-    prs.set(PrList::Loading("Loading pull request…".to_string()));
+    fetch.set(Fetch::Working("Loading pull request…".to_string()));
     let mut detail = match github::load_pr(&token, &repo, number).await {
         Ok(d) => d,
-        Err(e) => return prs.set(PrList::Failed(format!("{e:#}"))),
+        Err(e) => return fetch.set(Fetch::Failed(format!("{e:#}"))),
     };
 
-    prs.set(PrList::Loading("Reading the file tree…".to_string()));
+    fetch.set(Fetch::Working("Reading the file tree…".to_string()));
     // A tree that will not load costs the explorer its unchanged files, which
     // is a smaller loss than refusing to open the review at all.
     if let Some(tree) = tree_at(&token, &repo, &detail.head_sha).await {
@@ -1131,7 +1281,7 @@ pub(super) async fn open_pr(st: St, repo: RepoRef, number: u64) {
         detail.base_tree = base;
     }
 
-    prs.set(PrList::Idle);
+    fetch.set(Fetch::Idle);
     st.enter_pr(detail);
 }
 

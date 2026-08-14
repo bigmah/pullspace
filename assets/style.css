@@ -43,7 +43,11 @@
   --guide: #2b2e38;
   /* What sits on the accent: a button's label against its fill. */
   --on-accent: #0f1116;
-  --mono: "SF Mono", "Menlo", "Cascadia Code", "JetBrains Mono", monospace;
+  /* The default until the saved preferences arrive, which is one render: the
+     browser's own coding face, and the platform's under it for the browsers
+     that do not know the keyword. The appearance panel replaces this — see
+     `backend::prefs` for the four it offers. */
+  --mono: ui-monospace, Menlo, Consolas, "DejaVu Sans Mono", monospace;
   --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "Inter", sans-serif;
   /* The code panes, and what the appearance panel moves. Everything that draws
      a line of a file reads these two rather than setting a size of its own. */

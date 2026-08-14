@@ -88,11 +88,15 @@ pub fn PrefsPanel() -> Element {
                     div { class: "prefrow",
                         span { class: "preflabel", "Code font" }
                         div { class: "modegroup",
-                            for m in [Mono::System, Mono::JetBrains, Mono::Fira, Mono::Plex] {
+                            // The faces this machine already has — a page
+                            // cannot install a font, so these are named for
+                            // the platform the app was opened on, and there
+                            // are as many as it has worth offering.
+                            for m in Mono::all() {
                                 button {
                                     key: "{m:?}",
                                     class: seg(m == now.mono),
-                                    title: "Falls back to the system's own monospace if this font is not installed",
+                                    title: "{m.title()}",
                                     onclick: move |_| st.set_prefs(Prefs { mono: m, ..now }),
                                     "{m.label()}"
                                 }

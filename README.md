@@ -247,7 +247,7 @@ that moves as you press them:
 |---|---|
 | Theme | Dark, Midnight (the same thing on an OLED panel), or Light |
 | Accent | blue, violet, green, amber, rose — links, selections, highlights |
-| Code font | the system's own, JetBrains Mono, Fira Code or IBM Plex Mono |
+| Code font | the system's own, and the other faces your machine already has |
 | Size | 10–18px, for the code panes |
 | Line spacing | tight, normal, loose |
 | Tab width | 2, 4 or 8 characters |
@@ -376,8 +376,9 @@ patterns, URL parsing — is pure.
   therefore two clicks away — `Inline` or `Split` keeps the line lit.
 - Appearance is per browser, like everything else here: a theme is `localStorage`
   on this origin, not an account setting, and a fresh browser starts on Dark.
-  A code font that is not installed falls back to the system's own monospace —
-  a page cannot install one, and none is bundled.
+  The code fonts on offer are the ones your operating system already ships, and
+  are named for it — a page cannot install a font, and none is bundled, so
+  offering one you do not have would be a button that changes nothing.
 - Viewed marks are per browser, like everything else here. They are yours, not
   the pull request's — nothing is written back to GitHub, so the boxes you tick
   are invisible to it and to everybody else on the review.

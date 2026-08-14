@@ -39,21 +39,81 @@ pub enum Accent {
     Rose,
 }
 
-/// The face the code is set in.
+/// Which machine the page is on, because the faces it can be set in are the
+/// ones already on it.
 ///
-/// Named families with the old default behind each of them: this is a page, and
-/// a page cannot install a font. Picking one that is not on the machine costs
-/// nothing and changes nothing — the browser walks the list to something that
-/// is there.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum Mono {
-    #[default]
-    System,
-    JetBrains,
-    Fira,
-    Plex,
+/// Read off the user agent, which is a blunt instrument and the right one here:
+/// the only question is which of three font tables to offer, and every browser
+/// still names its operating system in that string even after the rest of it
+/// was frozen.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Platform {
+    Mac,
+    Windows,
+    /// Linux, and anything else: a table of the families a desktop is likely to
+    /// have, with the browser's own monospace under them.
+    Other,
 }
+
+impl Platform {
+    fn detect() -> Self {
+        // `cargo test` builds for the host, where there is no window to ask:
+        // web-sys reaches for a wasm import and panics on the way in. Off the
+        // page the machine the binary was built for is the honest answer.
+        #[cfg(target_arch = "wasm32")]
+        {
+            let ua = web_sys::window()
+                .and_then(|w| w.navigator().user_agent().ok())
+                .unwrap_or_default();
+            Platform::from_user_agent(&ua)
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            // Spelled the way a user agent spells it, so that both paths end in
+            // the same matcher rather than in two answers to one question.
+            let host = if cfg!(target_os = "macos") {
+                "Macintosh"
+            } else if cfg!(target_os = "windows") {
+                "Windows"
+            } else {
+                "X11"
+            };
+            Platform::from_user_agent(host)
+        }
+    }
+
+    fn from_user_agent(ua: &str) -> Self {
+        // "Macintosh" and "iPhone"/"iPad" both mean the Apple font set; iOS
+        // Safari reports the latter two.
+        if ua.contains("Mac") || ua.contains("iPhone") || ua.contains("iPad") {
+            Platform::Mac
+        } else if ua.contains("Windows") {
+            Platform::Windows
+        } else {
+            Platform::Other
+        }
+    }
+}
+
+/// The one detection, kept. `css()` runs on every render of the app and this
+/// answer cannot change inside a tab.
+fn platform() -> Platform {
+    static PLATFORM: std::sync::OnceLock<Platform> = std::sync::OnceLock::new();
+    *PLATFORM.get_or_init(Platform::detect)
+}
+
+/// The face the code is set in: a slot in the machine's own table.
+///
+/// A slot rather than a family, because which family it is depends on where the
+/// page is open — and because a page cannot install a font. Naming a family
+/// that is not on the machine changes nothing at all: the browser walks
+/// straight past it to the next one, which is how this setting came to have
+/// four buttons that all drew the same face. The tables below hold the faces
+/// each platform ships with, and under slot zero whatever the browser sets code
+/// in by itself. They are not the same length, because the platforms are not
+/// equally well supplied.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct Mono(u8);
 
 /// How far apart the lines of a file are set.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
@@ -164,27 +224,179 @@ impl Accent {
     }
 }
 
+/// A face as the panel needs it: what to put on the button, what to say when
+/// the pointer rests on it, and what to ask the browser for.
+struct Face {
+    /// Short enough for a row of four — the family in full goes in `title`.
+    label: &'static str,
+    title: &'static str,
+    /// Ends in `monospace` every time, so a machine missing the family still
+    /// draws code in something fixed-width.
+    stack: &'static str,
+}
+
+/// The slot every table starts with: the face the browser sets code in by
+/// itself, which is also the one the app has been drawing in all along. The
+/// ones named after it are chosen to be faces the browser would *not* have
+/// picked, so that every button means a different face.
+///
+/// `ui-monospace` is the whole entry — the families behind it are for an engine
+/// that does not know the keyword, and they are there because bare `monospace`
+/// in WebKit is Courier, which is not a face to review code in. This is
+/// character for character the `--mono` that `style.css` starts on, so the
+/// first paint and this slot ask for exactly the same thing; the test below
+/// keeps them that way.
+const SYSTEM: Face = Face {
+    label: "System",
+    title: "Whatever this browser sets code in",
+    stack: "ui-monospace, Menlo, Consolas, \"DejaVu Sans Mono\", monospace",
+};
+
+/// A Mac, which has the most to offer and so gets the longest table. Measured
+/// in both engines rather than assumed, because they disagree: `ui-monospace`
+/// is SF Mono in WebKit and Menlo in Chrome, and `"SF Mono"` by name resolves in
+/// neither — it is installed under a hidden one. Either way `System` is already
+/// the best of the coding faces here, so the rest are the remaining ones macOS
+/// ships that are unmistakably not it, and five are five in both.
+const MAC: &[Face] = &[
+    SYSTEM,
+    Face {
+        label: "Monaco",
+        title: "Monaco",
+        stack: "Monaco, monospace",
+    },
+    Face {
+        label: "Andale",
+        title: "Andale Mono",
+        stack: "\"Andale Mono\", monospace",
+    },
+    Face {
+        label: "PT Mono",
+        title: "PT Mono",
+        stack: "\"PT Mono\", monospace",
+    },
+    // Last because it is the odd one: a typewriter face rather than a screen
+    // one, and the only entry here somebody has to want on purpose.
+    Face {
+        label: "Courier",
+        title: "Courier New",
+        stack: "\"Courier New\", monospace",
+    },
+];
+
+/// Windows, where the browser's own monospace is Consolas — so Consolas is what
+/// `System` is, and these are the three beside it. Cascadia arrives with
+/// Windows 11 and with the Terminal before it, which makes it the one here that
+/// can be missing; Lucida Console and Courier New have shipped with every
+/// version this app runs on. There is no fifth: this is every monospace face
+/// Windows installs.
+const WINDOWS: &[Face] = &[
+    SYSTEM,
+    Face {
+        label: "Cascadia",
+        title: "Cascadia Mono",
+        stack: "\"Cascadia Mono\", \"Cascadia Code\", monospace",
+    },
+    Face {
+        label: "Lucida",
+        title: "Lucida Console",
+        stack: "\"Lucida Console\", monospace",
+    },
+    Face {
+        label: "Courier",
+        title: "Courier New",
+        stack: "\"Courier New\", monospace",
+    },
+];
+
+/// Linux, and whatever else. Nothing is guaranteed on a desktop somebody
+/// assembled, so these are the three families a distribution is most likely to
+/// have pulled in. One of them is probably also what the browser picks for
+/// `System`, and there is no way to know which from in here — unlike the two
+/// tables above, this one is the best guess rather than a measurement.
+const OTHER: &[Face] = &[
+    SYSTEM,
+    Face {
+        label: "DejaVu",
+        title: "DejaVu Sans Mono",
+        stack: "\"DejaVu Sans Mono\", monospace",
+    },
+    Face {
+        label: "Liberation",
+        title: "Liberation Mono",
+        stack: "\"Liberation Mono\", monospace",
+    },
+    Face {
+        label: "Noto",
+        title: "Noto Sans Mono",
+        stack: "\"Noto Sans Mono\", monospace",
+    },
+];
+
+/// The tables are not the same length, because the platforms do not have the
+/// same number of faces to give: macOS has five worth offering and Windows
+/// installs four monospace families in total.
+fn table(on: Platform) -> &'static [Face] {
+    match on {
+        Platform::Mac => MAC,
+        Platform::Windows => WINDOWS,
+        Platform::Other => OTHER,
+    }
+}
+
 impl Mono {
+    /// The slots this machine offers, in the order the panel draws them. The
+    /// only way to make one, so a slot outside the table is not something that
+    /// can be chosen — only something that can arrive from storage, which
+    /// [`Mono::deserialize`] turns back into the default.
+    pub fn all() -> impl Iterator<Item = Mono> {
+        (0..table(platform()).len() as u8).map(Mono)
+    }
+
+    fn face(self, on: Platform) -> &'static Face {
+        let t = table(on);
+        // A slot saved on a machine with more faces than this one has. The
+        // first is always there and is always a monospace.
+        t.get(self.0 as usize).unwrap_or(&t[0])
+    }
+
+    /// What this machine calls the face — "Cascadia" on Windows, "Monaco" on a
+    /// Mac — so that a button never offers a font that is not there.
     pub fn label(self) -> &'static str {
-        match self {
-            Mono::System => "System",
-            Mono::JetBrains => "JetBrains Mono",
-            Mono::Fira => "Fira Code",
-            Mono::Plex => "IBM Plex Mono",
-        }
+        self.face(platform()).label
+    }
+
+    /// The family in full, for the button's tooltip. The labels are short
+    /// because the row they sit in is 318px wide.
+    pub fn title(self) -> &'static str {
+        self.face(platform()).title
     }
 
     fn stack(self) -> &'static str {
-        // Every one of them ends where the default begins, so a family that is
-        // not installed lands back on the system's own monospace.
-        match self {
-            Mono::System => {
-                "\"SF Mono\", \"Menlo\", \"Cascadia Code\", \"JetBrains Mono\", monospace"
-            }
-            Mono::JetBrains => "\"JetBrains Mono\", \"SF Mono\", \"Menlo\", monospace",
-            Mono::Fira => "\"Fira Code\", \"SF Mono\", \"Menlo\", monospace",
-            Mono::Plex => "\"IBM Plex Mono\", \"SF Mono\", \"Menlo\", monospace",
-        }
+        self.face(platform()).stack
+    }
+}
+
+impl Serialize for Mono {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_u8(self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for Mono {
+    /// Anything that is not a slot this machine offers is the default rather
+    /// than an error. The faces have changed once already, and what was saved
+    /// then — a font's name, from a set that no longer exists — has to cost the
+    /// font and nothing else: refusing the record outright would take the
+    /// theme, the size and the spacing saved beside it too. A slot from a
+    /// machine with a longer table goes the same way, and for the same reason
+    /// it has to: a choice with no button to light is worse than the default.
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let slot = serde_json::Value::deserialize(d)?
+            .as_u64()
+            .and_then(|n| usize::try_from(n).ok())
+            .unwrap_or(usize::MAX);
+        Ok(Mono::all().nth(slot).unwrap_or_default())
     }
 }
 
@@ -431,7 +643,7 @@ mod tests {
         let mine = Prefs {
             theme: Theme::Light,
             accent: Accent::Rose,
-            mono: Mono::Fira,
+            mono: Mono(2),
             code_px: 14,
             spacing: Spacing::Loose,
             tab: 4,
@@ -488,6 +700,154 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// The bug this table exists to fix: four buttons that all drew the same
+    /// face, because three of them named families a page cannot install and the
+    /// browser walked past every one of them. Every slot has to ask for a
+    /// different family, and has to be named after the family it asks for —
+    /// otherwise a button offers a font that is not on the machine, which is
+    /// the same nothing wearing a different label.
+    #[test]
+    fn every_platform_offers_different_faces_under_their_own_names() {
+        for on in [Platform::Mac, Platform::Windows, Platform::Other] {
+            let faces = table(on);
+            assert!(faces.len() >= 4, "{on:?} offers only {}", faces.len());
+            for (i, face) in faces.iter().enumerate() {
+                assert!(
+                    face.stack.ends_with("monospace"),
+                    "{:?} {} does not end in the generic",
+                    on,
+                    face.label
+                );
+                // The family asked for first is the one named on the button and
+                // in its tooltip. The system slot is the exception: it has no
+                // family, it has whatever the browser reaches for.
+                if i > 0 {
+                    let first = face
+                        .stack
+                        .split(',')
+                        .next()
+                        .unwrap()
+                        .trim()
+                        .replace('"', "");
+                    assert_eq!(first, face.title, "{on:?}");
+                    assert!(face.title.starts_with(face.label), "{on:?} {}", face.label);
+                }
+                for other in &faces[i + 1..] {
+                    assert_ne!(face.label, other.label, "{on:?}");
+                    assert_ne!(face.stack, other.stack, "{on:?}");
+                }
+            }
+        }
+    }
+
+    /// The stylesheet's own `--mono` is the `System` slot, spelled the same
+    /// way. A page is drawn once before the saved preferences are read, and if
+    /// these two drifted apart that first paint would be in a different face
+    /// from the one the panel says is on.
+    #[test]
+    fn the_stylesheet_starts_on_the_face_the_system_slot_asks_for() {
+        let css = include_str!("../../assets/style.css");
+        assert!(
+            css.contains(&format!("--mono: {};", SYSTEM.stack)),
+            "style.css does not start on {}",
+            SYSTEM.stack
+        );
+    }
+
+    /// Why the labels are short. The row they sit in is 318px across — a 460px
+    /// panel, less its padding, less the 96px label column and the gap after it
+    /// — and `.modegroup` neither wraps nor scrolls, so a longer set of names
+    /// runs out of the panel. The estimate here is deliberately pessimistic:
+    /// 32px of button around each label and 4.9px a character at 11px in the
+    /// app's own sans. Drawn for real in both engines, the five on a Mac come to
+    /// 305.6px against the 318 and the set this replaced came to 332.1px, which
+    /// did overflow — so this budget rejects a row a little before the panel
+    /// does.
+    #[test]
+    fn the_row_of_names_fits_the_panel() {
+        for on in [Platform::Mac, Platform::Windows, Platform::Other] {
+            let faces = table(on);
+            let chars: usize = faces.iter().map(|f| f.label.chars().count()).sum();
+            let width = 32.0 * faces.len() as f32 + 4.9 * chars as f32;
+            assert!(width <= 318.0, "{on:?} needs {width:.0}px of 318");
+        }
+    }
+
+    #[test]
+    fn the_machine_is_read_off_the_user_agent() {
+        let cases = [
+            (
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15",
+                Platform::Mac,
+            ),
+            (
+                "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X)",
+                Platform::Mac,
+            ),
+            (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                Platform::Windows,
+            ),
+            (
+                "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36",
+                Platform::Other,
+            ),
+            // A browser that will not say, which is a table rather than a
+            // crash.
+            ("", Platform::Other),
+        ];
+        for (ua, want) in cases {
+            assert_eq!(Platform::from_user_agent(ua), want, "{ua}");
+        }
+    }
+
+    /// A name saved from the set of fonts this used to offer is a font that is
+    /// gone, and nothing else. The theme and the size were saved in the same
+    /// record and are still good.
+    #[test]
+    fn a_font_that_is_no_longer_offered_costs_only_the_font() {
+        for saved in ["\"fira\"", "9", "null"] {
+            let raw = format!(r#"{{"theme":"light","mono":{saved},"code_px":15}}"#);
+            let back: Prefs = serde_json::from_str(&raw).unwrap();
+            assert_eq!(back.mono, Mono::default(), "{raw}");
+            assert_eq!(back.theme, Theme::Light, "{raw}");
+            assert_eq!(back.code_px, 15, "{raw}");
+        }
+    }
+
+    #[test]
+    fn the_chosen_face_is_the_one_the_stylesheet_asks_for() {
+        for m in Mono::all() {
+            let css = Prefs {
+                mono: m,
+                ..Prefs::default()
+            }
+            .css();
+            assert!(css.contains(&format!("--mono:{};", m.stack())), "{css}");
+        }
+        // And picking one is a change, not a relabelling of the same face.
+        for m in Mono::all().skip(1) {
+            assert_ne!(m.stack(), Mono::default().stack(), "{}", m.label());
+        }
+    }
+
+    /// A slot saved where there were more faces to choose from — a Mac, which
+    /// has five — opened somewhere with four. It has to land somewhere real,
+    /// and the only honest somewhere is the default.
+    #[test]
+    fn a_slot_this_machine_does_not_have_falls_back() {
+        let over = table(platform()).len();
+        let raw = format!(r#"{{"mono":{over}}}"#);
+        let back: Prefs = serde_json::from_str(&raw).unwrap();
+        assert_eq!(back.mono, Mono::default());
+        // And one that does exist survives, so the fallback is not just always
+        // firing.
+        let last = over - 1;
+        let raw = format!(r#"{{"mono":{last}}}"#);
+        let back: Prefs = serde_json::from_str(&raw).unwrap();
+        assert_eq!(back.mono, Mono(last as u8));
     }
 
     #[test]

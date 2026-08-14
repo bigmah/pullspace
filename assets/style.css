@@ -1473,10 +1473,23 @@ button { font-family: inherit; user-select: none; }
 
 /* ---------- conversation pane: commits ---------- */
 
-/* The subject line is the row; a message with a body under it opens on a
-   click, and says so with the chevron rather than with a second control. */
-.convcommit.more { cursor: pointer; }
-.convcommit.more:hover { background: var(--bg-2); }
+/* Every commit here is a way into its own diff, so the whole row is the
+   control — the chevron beside it only unfolds what the message says. */
+.convcommit {
+  cursor: pointer;
+  box-shadow: inset 2px 0 0 transparent;
+  transition: background-color 80ms var(--ease), box-shadow 80ms var(--ease);
+}
+
+.convcommit:hover { background: var(--bg-2); }
+
+/* The commit whose diff is in the panes. It stays in the list — where it falls
+   is half of what the list is saying — but it is not somewhere to go. */
+.convcommit.on {
+  background: var(--bg-2);
+  box-shadow: inset 2px 0 0 var(--accent);
+  cursor: default;
+}
 
 .convsha {
   font-family: var(--mono);
@@ -1485,7 +1498,7 @@ button { font-family: inherit; user-select: none; }
   flex: none;
 }
 
-.convmore { color: var(--fg-faint); font-size: 10px; }
+.convmore { font-size: 10px; line-height: 1; }
 
 /* A commit message is not markdown and is not laid out by anybody's renderer:
    it is text somebody wrapped by hand, and the wrapping is part of it. */

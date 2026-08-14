@@ -15,8 +15,8 @@ use dioxus::prelude::*;
 use crate::backend::auth::{self, Token, open_browser};
 use crate::backend::blobs;
 use crate::backend::github::{
-    self, OwnerHit, PR_PAGE, PrState, PrSummary, RepoHit, RepoRef, RepoView, parse_owner,
-    parse_target,
+    self, OwnerHit, PR_PAGE, PrHeader, PrState, PrSummary, RepoHit, RepoRef, RepoView,
+    parse_commit_target, parse_owner, parse_target,
 };
 
 use super::app::{Account, Fetch, Got, PrList, St};
@@ -856,12 +856,12 @@ fn RepoPicker(autofocus: bool) -> Element {
 
     rsx! {
         div { class: "ghsection",
-            div { class: "ghlabel", "Repository, owner or pull request" }
+            div { class: "ghlabel", "Repository, owner, pull request or commit" }
             div { class: "ghrow",
                 input {
                     class: "ghinput",
                     r#type: "text",
-                    placeholder: "search repos, orgs and users · owner/repo · or a link to a pull request",
+                    placeholder: "search repos, orgs and users · owner/repo · or a link to a pull request or commit",
                     spellcheck: "false",
                     autocomplete: "off",
                     value: "{typed}",
@@ -962,7 +962,7 @@ fn RepoPicker(autofocus: bool) -> Element {
                 } else if typed.trim().chars().count() < MIN_QUERY {
                     div { class: "ghnote",
                         "Type a repository, organisation or user name to search GitHub, \
-                         or paste a link to a pull request."
+                         or paste a link to a pull request or a commit."
                     }
                 } else {
                     div { class: "ghnote", "Nothing on GitHub matches “{typed}”." }
@@ -1157,9 +1157,15 @@ fn do_sign_out(st: St) {
     p.set(None);
 }
 
-/// Load whatever the user typed: a repo lists its PRs, a PR link opens it.
+/// Load whatever the user typed: a repo lists its PRs, a PR link opens it, and
+/// a link to a commit opens that commit's diff.
 async fn open_target(st: St) {
     let raw = st.repo_input.peek().clone();
+    // Before the repository: `owner/repo/commit/<sha>` names a repository as
+    // well, and answering with that one would drop the half that was pasted.
+    if let Some((repo, sha)) = parse_commit_target(&raw) {
+        return open_commit(st, repo, sha, None).await;
+    }
     let Some((repo, number)) = parse_target(&raw) else {
         let mut fetch = st.fetch;
         fetch.set(Fetch::Failed(
@@ -1235,6 +1241,46 @@ pub(super) async fn browse_repo(st: St, repo: RepoRef) {
         head_sha: head.sha,
         tree,
     });
+}
+
+/// Open one commit: what it changed, diffed against the commit before it, with
+/// the repository around it as of that commit.
+///
+/// The same three steps a pull request takes — metadata, then the tree at each
+/// side — because from the explorer down it is the same thing: two commits and
+/// a list of what differs between them.
+///
+/// `pr` is the pull request it was opened out of, when it was opened out of
+/// one. It travels no further than the conversation pane, which goes on showing
+/// that pull request's description and discussion while one of its commits is
+/// being read.
+pub(super) async fn open_commit(st: St, repo: RepoRef, sha: String, pr: Option<PrHeader>) {
+    let token = st.api_token();
+    let mut fetch = st.fetch;
+
+    fetch.set(Fetch::Working("Loading commit…".to_string()));
+    let mut view = match github::load_commit(&token, &repo, &sha).await {
+        Ok(v) => v,
+        Err(e) => return fetch.set(Fetch::Failed(format!("{e:#}"))),
+    };
+    view.pr = pr;
+
+    fetch.set(Fetch::Working("Reading the file tree…".to_string()));
+    // As for a pull request: a tree that will not load costs the explorer its
+    // unchanged files, which is a smaller loss than refusing to open the diff.
+    if let Some(tree) = tree_at(&token, &repo, &view.commit.sha).await {
+        view.tree = tree;
+    }
+    // The parent's, which every left-hand side is read from. A root commit has
+    // no parent and no left-hand side to read.
+    if !view.parent_sha.is_empty()
+        && let Some(base) = tree_at(&token, &repo, &view.parent_sha).await
+    {
+        view.base_tree = base;
+    }
+
+    fetch.set(Fetch::Idle);
+    st.enter_commit(view);
 }
 
 /// Which files a commit is made of.

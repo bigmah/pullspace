@@ -12,7 +12,7 @@ use std::path::Path;
 use dioxus::prelude::*;
 
 use crate::backend::auth::open_browser;
-use crate::backend::github::{self, Comment, CommentKind, CommitSummary, RepoRef};
+use crate::backend::github::{self, Comment, CommentKind, CommitSummary, PrHeader, RepoRef};
 use crate::backend::markdown;
 
 use super::app::{CommitList, ConvTab, Conversation, St};
@@ -101,19 +101,19 @@ pub fn ConvPane() -> Element {
     // `PrDetail` carries two tree snapshots, which is not something to clone
     // on every fold and unfold of the pane.
     let held = st.workspace.read();
-    let Some(pr) = held.pr() else {
+    // The pull request that is open — or the one a commit was opened out of,
+    // since the conversation and the commits are facts about the pull request
+    // and not about whichever of its commits is on screen.
+    let Some(desc) = held.header() else {
         return rsx! {};
     };
-    let desc = Desc {
-        author: pr.author.clone(),
-        number: pr.number,
-        draft: pr.draft,
-        title: pr.title.clone(),
-        body: pr.body.trim().to_string(),
-        html_url: pr.html_url.clone(),
+    let Some(repo) = held.repo_ref().cloned() else {
+        return rsx! {};
     };
-    let repo = pr.repo.clone();
-    let number = pr.number;
+    let number = desc.number;
+    // Which commit is being read, when one is — the row for it is marked rather
+    // than offered as somewhere to go.
+    let at_commit = held.commit().map(|v| v.commit.sha.clone());
     drop(held);
     let mut open = st.conv_open;
     let mut tab = st.conv_tab;
@@ -239,7 +239,9 @@ pub fn ConvPane() -> Element {
                         Description { desc }
                         {talk}
                     },
-                    ConvTab::Commits => rsx! { CommitsBody {} },
+                    ConvTab::Commits => rsx! {
+                        CommitsBody { repo: repo.clone(), pr: desc.clone(), at: at_commit.clone() }
+                    },
                 }
             }
         }
@@ -272,9 +274,9 @@ fn PaneTab(
 }
 
 /// What the pull request is made of: its commits, oldest first, the way they
-/// were written.
+/// were written — and each one a way into its own diff.
 #[component]
-fn CommitsBody() -> Element {
+fn CommitsBody(repo: RepoRef, pr: PrHeader, at: Option<String>) -> Element {
     let st = use_context::<St>();
     let held = st.commits.read();
 
@@ -292,7 +294,13 @@ fn CommitsBody() -> Element {
         },
         CommitList::Ready(commits) => rsx! {
             for c in commits.items.iter() {
-                CommitRow { key: "{c.sha}", c: c.clone() }
+                CommitRow {
+                    key: "{c.sha}",
+                    c: c.clone(),
+                    repo: repo.clone(),
+                    pr: pr.clone(),
+                    current: at.as_deref() == Some(c.sha.as_str()),
+                }
             }
             if commits.truncated {
                 div { class: "panel-empty",
@@ -303,11 +311,17 @@ fn CommitsBody() -> Element {
     }
 }
 
+/// One commit: what it is called, and — on a click — what it changed.
+///
+/// Opening one puts its own diff in the panes, against the commit before it,
+/// while this list stays where it is: reading a branch commit by commit is
+/// clicking down the list, and the row you are on is marked as you go.
 #[component]
-fn CommitRow(c: CommitSummary) -> Element {
-    // A message with more than a subject line to it opens on a click. Most have
-    // nothing under the fold, and a row that unfolds to nothing is a row that
-    // should not have looked as though it would.
+fn CommitRow(c: CommitSummary, repo: RepoRef, pr: PrHeader, current: bool) -> Element {
+    let st = use_context::<St>();
+    // A message with more than a subject line to it has the rest behind the
+    // chevron. Most have nothing under the fold, and a control that unfolds
+    // nothing is one that should not have been there.
     let mut unfolded = use_signal(|| false);
     let body = c.body().to_string();
     let more = !body.is_empty();
@@ -315,8 +329,9 @@ fn CommitRow(c: CommitSummary) -> Element {
     let day = day_of(&c.date);
     let url = c.html_url.clone();
     let has_link = !url.is_empty();
-    let class = if more {
-        "convitem convcommit more"
+    let sha = c.sha.clone();
+    let class = if current {
+        "convitem convcommit on"
     } else {
         "convitem convcommit"
     };
@@ -324,10 +339,14 @@ fn CommitRow(c: CommitSummary) -> Element {
     rsx! {
         div {
             class: "{class}",
+            title: if current { "Already open" } else { "Open this commit's diff" },
+            // Root scope: opening one replaces the panes this row is beside,
+            // and the load outlives the render that started it.
             onclick: move |_| {
-                if more {
-                    let now = *unfolded.peek();
-                    unfolded.set(!now);
+                if !current {
+                    spawn_forever(
+                        super::github::open_commit(st, repo.clone(), sha.clone(), Some(pr.clone())),
+                    );
                 }
             },
             div { class: "convmeta",
@@ -340,14 +359,30 @@ fn CommitRow(c: CommitSummary) -> Element {
                 if !day.is_empty() {
                     span { class: "convdate", "{day}" }
                 }
+                // No pill saying which one this is: the accent edge and the
+                // lit row say it, as they do for the open file in the
+                // explorer — and this pane is narrow enough that a pill here
+                // costs the author's name.
                 span { class: "spacer" }
+                if more {
+                    button {
+                        class: "iconbtn sm",
+                        title: if showing { "Hide the rest of the message" } else { "Show the rest of the message" },
+                        onclick: move |e| {
+                            // The row under this button opens the commit; this
+                            // one only unfolds what it says.
+                            e.stop_propagation();
+                            let now = *unfolded.peek();
+                            unfolded.set(!now);
+                        },
+                        span { class: "convmore", if showing { "⌃" } else { "⌄" } }
+                    }
+                }
                 if has_link {
                     button {
                         class: "iconbtn sm",
                         title: "Open this commit on github.com",
                         onclick: move |e| {
-                            // The row underneath this button folds; the button
-                            // does not fold anything.
                             e.stop_propagation();
                             open_browser(&url);
                         },
@@ -355,31 +390,12 @@ fn CommitRow(c: CommitSummary) -> Element {
                     }
                 }
             }
-            div { class: "convtitle",
-                "{c.subject()}"
-                if more {
-                    span { class: "convmore", if showing { " ⌃" } else { " ⌄" } }
-                }
-            }
+            div { class: "convtitle", "{c.subject()}" }
             if showing {
                 div { class: "convcommitbody", "{body}" }
             }
         }
     }
-}
-
-/// What the description card needs of a pull request, and nothing else —
-/// small enough that the prop comparison a re-render starts with is a few
-/// string compares rather than a walk of two tree snapshots.
-#[derive(Clone, PartialEq)]
-struct Desc {
-    author: String,
-    number: u64,
-    draft: bool,
-    title: String,
-    /// Already trimmed.
-    body: String,
-    html_url: String,
 }
 
 /// A body, drawn — and the note that says what drawing it had to leave out.
@@ -412,7 +428,7 @@ fn HtmlNote() -> Element {
 }
 
 #[component]
-fn Description(desc: Desc) -> Element {
+fn Description(desc: PrHeader) -> Element {
     let url = desc.html_url.clone();
     rsx! {
         div { class: "convitem convdesc",
@@ -431,10 +447,12 @@ fn Description(desc: Desc) -> Element {
                 }
             }
             div { class: "convtitle", "{desc.title}" }
-            if desc.body.is_empty() {
+            // Trailing blank lines are common in a template-filled description
+            // and would be drawn as empty space at the foot of the card.
+            if desc.body.trim().is_empty() {
                 div { class: "convnone", "No description." }
             } else {
-                Body { text: desc.body.clone() }
+                Body { text: desc.body.trim().to_string() }
             }
         }
     }

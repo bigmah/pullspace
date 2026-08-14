@@ -28,8 +28,10 @@ list in the order they were written. Bodies are drawn as the markdown they are
 uses — through the renderer described under [Markdown](#markdown), so nothing
 anybody wrote on the pull request is ever handed to this page as markup. Beside
 it, **COMMITS** is the other half of the same pane: every commit on the branch,
-oldest first, each one its subject line, its author and its short SHA — and a
-click on any whose message has more to it than a subject.
+oldest first, each one its subject line, its author and its short SHA. Clicking
+one puts *that commit's* diff in the two panes — what it changed, against the
+commit before it — while the list stays where it is, so a branch can be read the
+way it was written, one commit at a time.
 
 A panel across the bottom of the code holds the answer to "where else is this?"
 — search hits, references, definitions — and closes again once it has been read.
@@ -182,6 +184,30 @@ another swaps to it without a trip back through the picker; the list is already
 in hand, so opening the menu costs nothing. It is the same list the panel shows
 and the same open/closed/all toggle, because there is one list and two ways at
 it.
+
+### One commit of it
+
+A pull request is not always one thing to read. The **COMMITS** tab lists what
+its branch is made of, and clicking a commit opens that commit on its own: the
+files it changed, diffed against its parent, with the whole repository around
+them as of that commit — the same explorer, the same diffs, the same search and
+Go to Definition. The top bar says `commit` where it said `pull request`, and
+the row you are on is marked in the list, so the next commit is the next click.
+
+The pull request stays beside it the whole time. Its description, its discussion
+and its list of commits are facts about the pull request rather than about
+whichever commit is on screen, so none of them are re-fetched on the way in or
+thrown away — and the switcher in the top bar still has the pull request itself
+in it, one click away, whenever you want the branch as a whole again.
+
+A commit has an address like everything else — `#/owner/repo/commit/<sha>`, the
+way github.com writes it — so one can be linked to, reloaded into, and reached
+by pasting a commit URL into the picker. Opened that way there is no pull
+request to show beside it, and the pane says nothing about one.
+
+Two things a commit view will not show, because GitHub does not answer with
+them: the changed files of a **merge commit**, and anything past the **300th**
+file of a very large one. Both say so in the top bar rather than looking empty.
 
 ## The local copy
 

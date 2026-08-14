@@ -622,6 +622,17 @@ fn Welcome() -> Element {
             format!("{} @ {}", view.repo, view.branch),
             "No README here — pick a file on the left.".to_string(),
         )),
+        Workspace::Commit(view) => Some((
+            format!("{} {}", view.repo, view.commit.short()),
+            match view.files.len() {
+                0 if view.merge => {
+                    "A merge commit — GitHub lists no changed files for one.".to_string()
+                }
+                0 => "Nothing changed in this commit.".to_string(),
+                1 => "1 file changed — pick it on the left.".to_string(),
+                n => format!("{n} files changed — pick one on the left."),
+            },
+        )),
         _ => None,
     };
     if let Some((title, hint)) = showing {

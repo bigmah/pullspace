@@ -5,6 +5,7 @@ mod conversation;
 mod filetree;
 mod github;
 mod ide;
+mod landing;
 mod markdown;
 mod nav;
 mod page;

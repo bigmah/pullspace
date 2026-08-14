@@ -52,6 +52,9 @@ fn title(ws: &Workspace) -> String {
         Workspace::Empty => "pullspace".to_string(),
         Workspace::Pr(pr) => format!("{} #{} · pullspace", pr.repo, pr.number),
         Workspace::Repo(view) => format!("{} · pullspace", view.repo),
+        Workspace::Commit(view) => {
+            format!("{} {} · pullspace", view.repo, view.commit.short())
+        }
     }
 }
 

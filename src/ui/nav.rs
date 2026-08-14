@@ -19,7 +19,7 @@ use crate::backend::route::{self, Route, Target};
 
 use super::app::{Account, St};
 use super::compat;
-use super::github::{browse_repo, open_pr};
+use super::github::{browse_repo, open_commit, open_pr};
 
 /// How often to look in on the saved token while it is being checked. Short
 /// enough not to be felt on the way in to a link.
@@ -80,8 +80,8 @@ pub async fn landing(st: St) {
     // Read now rather than at mount: nothing writes the bar before this runs,
     // and reading it here is one less thing to keep in step.
     let asked = route::current();
-    // Nothing linked to. The picker is already up, which is the whole of what
-    // "home" means here.
+    // Nothing linked to. The landing page is already up, which is the whole of
+    // what "home" means here.
     if asked.at != Target::Home {
         go(st, asked);
     }
@@ -104,6 +104,14 @@ fn go(st: St, asked: Route) {
         Target::Pr(repo, number) => {
             name_it(st, &repo);
             spawn_forever(open_pr(st, repo, number));
+        }
+        // A commit reached by its own link — Back out of one, or a link
+        // somebody sent — arrives without the pull request it may have been
+        // opened out of. It is the commit that was linked to, so the commit is
+        // what opens.
+        Target::Commit(repo, sha) => {
+            name_it(st, &repo);
+            spawn_forever(open_commit(st, repo, sha, None));
         }
     }
 }

@@ -11,7 +11,8 @@ use crate::backend::auth::Token;
 use crate::backend::clone::Progress;
 use crate::backend::difftool::Expansion;
 use crate::backend::github::{
-    PrDetail, PrSummary, RepoRef, RepoView, Snapshot, Thread, statuses_of,
+    CommitView, Commits, FetchJob, PrDetail, PrHeader, PrState, PrSummary, RepoRef, RepoView,
+    Snapshot, Thread, statuses_of,
 };
 use crate::backend::highlight;
 use crate::backend::markdown;
@@ -28,6 +29,7 @@ use super::conversation::ConvPane;
 use super::filetree::FileTreePane;
 use super::github::GhPanel;
 use super::ide::{Index, Panel};
+use super::landing::Landing;
 use super::page::Tab;
 use super::panes::{self, Drag, DragMask, Edge};
 use super::prefs::PrefsPanel;
@@ -52,13 +54,17 @@ pub enum ViewMode {
 /// changed, and browsing is the same thing with nothing marked.
 #[derive(Clone, PartialEq)]
 pub enum Workspace {
-    /// Nothing opened yet. The picker is up, because choosing something is the
-    /// only thing there is to do.
+    /// Nothing opened yet. The landing page is up in place of the IDE, because
+    /// choosing something is the only thing there is to do.
     Empty,
     Pr(Box<PrDetail>),
     /// A repository with no pull request in view — because it has none open,
     /// or because reading the code is the point.
     Repo(Box<RepoView>),
+    /// One commit of it, diffed against the commit before it. Usually opened
+    /// out of the pull request it belongs to, which rides along inside so that
+    /// the conversation beside it stays whole.
+    Commit(Box<CommitView>),
 }
 
 impl Workspace {
@@ -76,8 +82,59 @@ impl Workspace {
         }
     }
 
+    pub fn commit(&self) -> Option<&CommitView> {
+        match self {
+            Workspace::Commit(view) => Some(view),
+            _ => None,
+        }
+    }
+
     pub fn is_open(&self) -> bool {
         !matches!(self, Workspace::Empty)
+    }
+
+    /// Which repository this is, whichever of the three it is — what the pull
+    /// request list beside it is a list for.
+    pub fn repo_ref(&self) -> Option<&RepoRef> {
+        match self {
+            Workspace::Empty => None,
+            Workspace::Pr(pr) => Some(&pr.repo),
+            Workspace::Repo(view) => Some(&view.repo),
+            Workspace::Commit(view) => Some(&view.repo),
+        }
+    }
+
+    /// The open pull request's number, when one is open — what the switcher
+    /// marks as the one you are already reading.
+    ///
+    /// A commit of a pull request is deliberately not it: the pull request is
+    /// what that row would take you to, and it is somewhere else from here.
+    pub fn pr_number(&self) -> Option<u64> {
+        self.pr().map(|pr| pr.number)
+    }
+
+    /// The pull request whatever is open belongs to — the one that is open, or
+    /// the one a commit was opened out of.
+    ///
+    /// This is what the conversation pane is about, and reading one commit of a
+    /// pull request does not change the answer.
+    pub fn header(&self) -> Option<PrHeader> {
+        match self {
+            Workspace::Pr(pr) => Some(pr.header()),
+            Workspace::Commit(view) => view.pr.clone(),
+            _ => None,
+        }
+    }
+
+    /// The same as a pair of identifiers, for the two loads that hang off it.
+    pub fn review_key(&self) -> Option<(RepoRef, u64)> {
+        match self {
+            Workspace::Pr(pr) => Some((pr.repo.clone(), pr.number)),
+            Workspace::Commit(view) => {
+                Some((view.repo.clone(), view.pr.as_ref().map(|p| p.number)?))
+            }
+            _ => None,
+        }
     }
 
     /// Whether there is a file list to walk.
@@ -92,6 +149,46 @@ impl Workspace {
             Workspace::Empty => false,
             Workspace::Pr(pr) => !pr.tree.is_empty(),
             Workspace::Repo(view) => !view.tree.is_empty(),
+            Workspace::Commit(view) => !view.tree.is_empty(),
+        }
+    }
+
+    /// What this workspace says is changed, and how — the explorer's badges,
+    /// and what the viewer opens as a diff rather than as source.
+    pub fn statuses(&self) -> HashMap<PathBuf, ChangeKind> {
+        match self {
+            Workspace::Pr(pr) => statuses_of(&pr.files),
+            Workspace::Commit(view) => statuses_of(&view.files),
+            // Nothing is changed in a repository being read on its own.
+            _ => HashMap::new(),
+        }
+    }
+
+    /// One job per changed file — what the clone fetches before anything else,
+    /// since it is what is being read.
+    pub fn changed_jobs(&self) -> Vec<FetchJob> {
+        match self {
+            Workspace::Pr(pr) => pr
+                .files
+                .iter()
+                .map(|f| FetchJob::for_changed(pr, f))
+                .collect(),
+            Workspace::Commit(view) => view
+                .files
+                .iter()
+                .map(|f| FetchJob::for_commit_change(view, f))
+                .collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// Everything needed to read one path of what is open, changed or not.
+    pub fn job_for(&self, rel: &Path) -> Option<FetchJob> {
+        match self {
+            Workspace::Empty => None,
+            Workspace::Pr(pr) => Some(FetchJob::new(pr, rel)),
+            Workspace::Repo(view) => Some(FetchJob::browsing(view, rel)),
+            Workspace::Commit(view) => Some(FetchJob::in_commit(view, rel)),
         }
     }
 
@@ -103,16 +200,18 @@ impl Workspace {
             Workspace::Empty => Target::Home,
             Workspace::Pr(pr) => Target::Pr(pr.repo.clone(), pr.number),
             Workspace::Repo(view) => Target::Repo(view.repo.clone()),
+            Workspace::Commit(view) => Target::Commit(view.repo.clone(), view.commit.sha.clone()),
         }
     }
 
-    /// The repository at the commit on show, and the merge base under it —
-    /// which a repository browsed on its own does not have.
+    /// The repository at the commit on show, and the one under it every diff is
+    /// read against — which a repository browsed on its own does not have.
     pub fn trees(&self) -> Option<(Snapshot, Snapshot)> {
         match self {
             Workspace::Empty => None,
             Workspace::Pr(pr) => Some((pr.tree.clone(), pr.base_tree.clone())),
             Workspace::Repo(view) => Some((view.tree.clone(), Snapshot::default())),
+            Workspace::Commit(view) => Some((view.tree.clone(), view.base_tree.clone())),
         }
     }
 }
@@ -130,15 +229,56 @@ pub enum Account {
     Failed(String),
 }
 
-/// Pull request list for the repo currently typed into the picker.
+/// The pull requests of one repository: which of them were asked for, and how
+/// the asking went.
+///
+/// Kept for as long as that repository is open rather than cleared once
+/// something has been picked out of it — it is what the switcher in the top bar
+/// switches between, and re-fetching it to open the menu would make a list you
+/// glance at cost a request.
 #[derive(Clone, PartialEq)]
-pub enum PrList {
+pub struct PrList {
+    pub repo: RepoRef,
+    pub state: PrState,
+    pub got: Got,
+}
+
+/// How a list of pull requests is getting on.
+#[derive(Clone, PartialEq)]
+pub enum Got {
+    Loading,
+    Ready(Vec<PrSummary>),
+    Failed(String),
+}
+
+impl PrList {
+    /// The pull requests themselves, empty until they are here.
+    pub fn items(&self) -> &[PrSummary] {
+        match &self.got {
+            Got::Ready(items) => items,
+            _ => &[],
+        }
+    }
+
+    /// Whether this is the answer to a question already being asked, so that
+    /// opening a pull request from a list does not go and fetch that same list
+    /// again underneath it.
+    pub fn covers(&self, repo: &RepoRef, state: PrState) -> bool {
+        self.repo == *repo && self.state == state
+    }
+}
+
+/// What the app is fetching from GitHub, for the one line that says so.
+///
+/// Separate from [`PrList`] because the two outlive each other in both
+/// directions: a pull request opens while its repository's list stays on the
+/// shelf, and a list is fetched in the background of a review that is already
+/// on screen.
+#[derive(Clone, PartialEq, Default)]
+pub enum Fetch {
+    #[default]
     Idle,
-    Loading(String),
-    Ready {
-        repo: RepoRef,
-        items: Vec<PrSummary>,
-    },
+    Working(String),
     Failed(String),
 }
 
@@ -151,6 +291,26 @@ pub enum Conversation {
     Loading,
     Ready(Box<Thread>),
     Failed(String),
+}
+
+/// The open pull request's commits — what its branch is made of.
+///
+/// Idle until somebody asks, unlike the conversation: the commits are one more
+/// request, and a review that never opens the tab should not spend it.
+#[derive(Clone, PartialEq)]
+pub enum CommitList {
+    Idle,
+    Loading,
+    Ready(Box<Commits>),
+    Failed(String),
+}
+
+/// Which half of the conversation pane is on show.
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
+pub enum ConvTab {
+    #[default]
+    Talk,
+    Commits,
 }
 
 /// Somewhere the reader has been: a file, how it was being shown, and the line
@@ -274,7 +434,15 @@ pub struct St {
     pub account: Signal<Account>,
     pub gh_open: Signal<bool>,
     pub repo_input: Signal<String>,
-    pub prs: Signal<PrList>,
+    /// The pull requests of whatever repository is open — `None` before any
+    /// repository has been named. Both the picker and the top bar's switcher
+    /// read this one list.
+    pub prs: Signal<Option<PrList>>,
+    /// Which of them to ask for: open, closed, or the lot.
+    pub pr_state: Signal<PrState>,
+    /// What is being fetched from GitHub, if anything, and what went wrong the
+    /// last time something was.
+    pub fetch: Signal<Fetch>,
     pub workspace: Signal<Workspace>,
     /// Per-file base/head content for what is open — decoded, and only for
     /// files somebody has actually looked at. The repository itself lives on
@@ -298,6 +466,9 @@ pub struct St {
     /// comes back instantly and without a second trip to GitHub.
     pub conv: Signal<Conversation>,
     pub conv_open: Signal<bool>,
+    /// And its commits, which the same pane shows in place of them.
+    pub commits: Signal<CommitList>,
+    pub conv_tab: Signal<ConvTab>,
 
     /// A file — and perhaps a line of it — named by a link that arrived before
     /// there was anything open to find it in. Set on the way to a fetch and
@@ -470,6 +641,20 @@ impl St {
         }
     }
 
+    /// Show one commit, diffed against the commit before it.
+    ///
+    /// The pull request it came out of stays beside it — the conversation, the
+    /// description and the list of commits are all facts about the pull
+    /// request, and reading one of its commits does not change any of them.
+    pub fn enter_commit(&self, view: CommitView) {
+        let reload = self
+            .workspace
+            .peek()
+            .commit()
+            .is_some_and(|open| open.repo == view.repo && open.commit.sha == view.commit.sha);
+        self.enter(Workspace::Commit(Box::new(view)), reload);
+    }
+
     /// Swap in something fetched from GitHub.
     ///
     /// `reload` means the same thing is already open, so the file being read
@@ -493,20 +678,41 @@ impl St {
         self.forget_contents();
         let mut cloning = self.cloning;
         cloning.set(None);
-        // Dropped here rather than when the new one lands, so the pane never
+        // The conversation and the commit list belong to a pull request, not to
+        // whichever of its commits is on screen — so stepping from a pull
+        // request into one of its commits, or from one commit to the next,
+        // keeps both rather than fetching them again.
+        //
+        // Dropped here rather than when the new ones land, so the pane never
         // shows the last pull request's comments under this one's title.
-        let mut conv = self.conv;
-        conv.set(Conversation::Loading);
+        //
+        // Not on a reload, though: `⟳` means fetch all of it again, and the
+        // conversation and the commits are part of what may have moved.
+        let same_review = !reload
+            && self
+                .workspace
+                .peek()
+                .review_key()
+                .is_some_and(|was| Some(was) == ws.review_key());
+        if !same_review {
+            let mut conv = self.conv;
+            conv.set(Conversation::Loading);
+            // Idle rather than empty: it is what has the pane go and fetch the
+            // commits the moment somebody looks at the tab, and — on a reload —
+            // what picks up whatever was just pushed. Before the workspace is
+            // written, since that write is what the fetch hangs off.
+            let mut commits = self.commits;
+            commits.set(CommitList::Idle);
+        }
         let mut statuses = self.statuses;
-        // A repository browsed on its own has nothing changed in it.
-        statuses.set(ws.pr().map(|pr| statuses_of(&pr.files)).unwrap_or_default());
+        statuses.set(ws.statuses());
         // What was ticked here last time. On a reload as well: a mark is about
         // a blob, so the ones that survived the push are still the answer, and
         // the ones that did not have quietly stopped matching anything.
         let mut marks = self.viewed;
         marks.set(
-            ws.pr()
-                .map(|pr| viewed::load(&viewed::pr_key(&pr.repo, pr.number)))
+            marks_key(&ws)
+                .map(|key| viewed::load(&key))
                 .unwrap_or_default(),
         );
         let link = Route::to(ws.target());
@@ -581,11 +787,13 @@ impl St {
         at.set((now != Some(line)).then_some(line));
     }
 
-    /// Close whatever is open, back to nothing — which puts the picker up,
-    /// since that is the only thing left to do.
+    /// Close whatever is open, back to nothing — which puts the landing page
+    /// up, since choosing something is the only thing left to do.
     pub fn close_workspace(&self) {
         let mut w = self.workspace;
         w.set(Workspace::Empty);
+        let mut commits = self.commits;
+        commits.set(CommitList::Idle);
         self.forget_contents();
         let mut cloning = self.cloning;
         cloning.set(None);
@@ -598,8 +806,11 @@ impl St {
         // this the address bar would go on naming a pull request that is no
         // longer on screen, and reloading would open it again.
         route::show(&Route::home());
+        // The overlay was for switching away from something open. With nothing
+        // open the landing page is the picker, and it is up by virtue of the
+        // workspace being empty.
         let mut gh = self.gh_open;
-        gh.set(true);
+        gh.set(false);
         self.bump_tick();
     }
 
@@ -623,10 +834,10 @@ impl St {
 
     // ----------------------------------------------------- marking files read
 
-    /// What a file of the open pull request is remembered as, or `None` when it
-    /// is not one — an unchanged file, or no pull request at all. Ticking a box
-    /// against those would be a note about nothing: a review is over the files
-    /// that changed.
+    /// What a changed file of what is open is remembered as, or `None` when it
+    /// is not one — an unchanged file, or a repository being browsed. Ticking a
+    /// box against those would be a note about nothing: a review is over the
+    /// files that changed.
     pub fn viewed_key(&self, rel: &Path) -> Option<String> {
         // The status map first, because this is asked once per row of the
         // explorer and answering it is a hash lookup where the workspace would
@@ -634,7 +845,11 @@ impl St {
         if !self.statuses.peek().contains_key(rel) {
             return None;
         }
-        Some(self.workspace.peek().pr()?.blob_key(rel).into_owned())
+        match &*self.workspace.peek() {
+            Workspace::Pr(pr) => Some(pr.blob_key(rel).into_owned()),
+            Workspace::Commit(view) => Some(view.blob_key(rel).into_owned()),
+            _ => None,
+        }
     }
 
     /// Whether this file has been marked read. A reactive read: ticking one box
@@ -662,8 +877,8 @@ impl St {
             }
         }
         let held = self.workspace.peek();
-        if let Some(pr) = held.pr() {
-            viewed::save(&viewed::pr_key(&pr.repo, pr.number), &marks.peek());
+        if let Some(key) = marks_key(&held) {
+            viewed::save(&key, &marks.peek());
         }
     }
 
@@ -674,12 +889,19 @@ impl St {
         if marks.is_empty() {
             return 0;
         }
-        let held = self.workspace.read();
-        let Some(pr) = held.pr() else { return 0 };
-        pr.files
-            .iter()
-            .filter(|f| marks.contains(pr.blob_key_of(f).as_ref()))
-            .count()
+        match &*self.workspace.read() {
+            Workspace::Pr(pr) => pr
+                .files
+                .iter()
+                .filter(|f| marks.contains(pr.blob_key_of(f).as_ref()))
+                .count(),
+            Workspace::Commit(view) => view
+                .files
+                .iter()
+                .filter(|f| marks.contains(view.blob_key_of(f).as_ref()))
+                .count(),
+            _ => 0,
+        }
     }
 
     // --------------------------------------------- stepping through the diff
@@ -800,6 +1022,9 @@ impl St {
                 pr.tree.entry(rel).is_some() || pr.files.iter().any(|f| f.path == rel)
             }
             Workspace::Repo(view) => view.tree.entry(rel).is_some(),
+            Workspace::Commit(view) => {
+                view.tree.entry(rel).is_some() || view.files.iter().any(|f| f.path == rel)
+            }
         }
     }
 
@@ -915,6 +1140,20 @@ impl St {
     }
 }
 
+/// Where the ticks against this workspace's changed files are kept.
+///
+/// A commit keeps its own, apart from the pull request it belongs to: reading
+/// one commit's version of a file is not the same claim as having read what the
+/// whole pull request does to it. `None` for a repository being browsed, which
+/// has nothing changed to tick.
+fn marks_key(ws: &Workspace) -> Option<String> {
+    match ws {
+        Workspace::Pr(pr) => Some(viewed::pr_key(&pr.repo, pr.number)),
+        Workspace::Commit(view) => Some(viewed::commit_key(&view.repo, &view.commit.sha)),
+        _ => None,
+    }
+}
+
 /// Hold a piece of state in the root scope rather than in `App`.
 ///
 /// `App` is not the root scope. Dioxus wraps whatever is launched in an error
@@ -969,10 +1208,14 @@ pub fn App() -> Element {
 
             token: root(None),
             account: root(Account::Checking),
-            // Nothing is open at launch, so the picker is where to start.
-            gh_open: root(true),
+            // The overlay is asked for, never assumed: with nothing open the
+            // landing page is the picker, and it is up because the workspace
+            // is empty rather than because this is set.
+            gh_open: root(false),
             repo_input: root(String::new()),
-            prs: root(PrList::Idle),
+            prs: root(None),
+            pr_state: root(PrState::default()),
+            fetch: root(Fetch::Idle),
             workspace: root(Workspace::Empty),
             pr_files: root(HashMap::new()),
             warm_order: root(VecDeque::new()),
@@ -980,6 +1223,8 @@ pub fn App() -> Element {
             store_gen: root(0),
             conv: root(Conversation::Loading),
             conv_open: root(true),
+            commits: root(CommitList::Idle),
+            conv_tab: root(ConvTab::default()),
 
             pending: root(None),
 
@@ -1009,6 +1254,11 @@ pub fn App() -> Element {
             ),
             Workspace::Repo(view) => build_tree_from_paths(
                 &format!("{} @ {}", view.repo, view.branch),
+                view.tree.paths(),
+                &statuses,
+            ),
+            Workspace::Commit(view) => build_tree_from_paths(
+                &format!("{} @ {}", view.repo, view.commit.short()),
                 view.tree.paths(),
                 &statuses,
             ),
@@ -1104,13 +1354,8 @@ pub fn App() -> Element {
     use_effect(move || {
         let opened = {
             let held = st.workspace.read();
-            held.trees().map(|(head, base)| {
-                let changed = held
-                    .pr()
-                    .map(super::prcache::changed_jobs)
-                    .unwrap_or_default();
-                (head, base, changed)
-            })
+            held.trees()
+                .map(|(head, base)| (head, base, held.changed_jobs()))
         };
         let Some((head, base, changed)) = opened else {
             return;
@@ -1147,13 +1392,60 @@ pub fn App() -> Element {
     // read on a review. Re-runs on `⟳`, which is how a reply written since
     // shows up.
     use_effect(move || {
-        let target = st
+        let Some((repo, number)) = st.workspace.read().review_key() else {
+            return;
+        };
+        // `enter` decides whether this pull request's conversation is still the
+        // one on screen, and says so by leaving it on `Loading` or not —
+        // stepping into one of its commits keeps it, `⟳` does not. Peeked, so
+        // the fetch below cannot start itself again.
+        if !matches!(*st.conv.peek(), Conversation::Loading) {
+            return;
+        }
+        spawn_forever(super::conversation::load(st, repo, number));
+    });
+
+    // The pull requests of whatever repository is open, kept alongside it —
+    // which is what makes the switcher in the top bar a list to swap through
+    // rather than a button that goes and fetches one. It follows the repository
+    // and the open/closed/all toggle, and nothing else: opening a second pull
+    // request on the same repository is a list already in hand.
+    use_effect(move || {
+        let state = *st.pr_state.read();
+        // Whatever is open — or, with nothing open, whatever the picker last
+        // named, so that flipping open/closed/all in front of a list refetches
+        // that list rather than waiting for something to be opened.
+        let repo = st
             .workspace
             .read()
-            .pr()
-            .map(|pr| (pr.repo.clone(), pr.number));
-        let Some((repo, number)) = target else { return };
-        spawn_forever(super::conversation::load(st, repo, number));
+            .repo_ref()
+            .cloned()
+            .or_else(|| st.prs.peek().as_ref().map(|l| l.repo.clone()));
+        let Some(repo) = repo else { return };
+        if st
+            .prs
+            .peek()
+            .as_ref()
+            .is_some_and(|l| l.covers(&repo, state))
+        {
+            return;
+        }
+        spawn_forever(super::github::load_repo_prs(st, repo));
+    });
+
+    // And the open pull request's commits, once somebody looks at the tab they
+    // are under. One request, spent on being asked for rather than on every
+    // review that never opens it.
+    use_effect(move || {
+        let asked = *st.conv_tab.read() == ConvTab::Commits;
+        let target = st.workspace.read().review_key();
+        let Some((repo, number)) = target.filter(|_| asked) else {
+            return;
+        };
+        if !matches!(*st.commits.peek(), CommitList::Idle) {
+            return;
+        }
+        spawn_forever(super::conversation::load_commits(st, repo, number));
     });
 
     // Unfolding the conversation claims 380px the explorer may currently be
@@ -1187,30 +1479,39 @@ pub fn App() -> Element {
         style { dangerous_inner_html: look }
         Tab {}
         div { class: "app", style: "{panes}",
-            TopBar {}
-            div {
-                class: "main",
-                // What the dividers are allowed to give away — and, when the
-                // window has just given away some of it, the moment the panes
-                // are moved back inside what is left. The panes are `flex:
-                // none`, so this is the only thing that resizes them, which is
-                // what makes the sizes here the sizes on screen.
-                onresize: move |e| {
-                    if let Ok(size) = e.get_content_box_size() {
-                        let mut area = st.main_size;
-                        area.set((size.width, size.height));
-                        panes::refit(&st);
+            // The IDE is for something being open. With nothing open it would
+            // be three empty panes under a modal, so the landing page stands
+            // in for the lot — including the top bar, whose every control is
+            // about what is open.
+            if st.workspace.read().is_open() {
+                TopBar {}
+                div {
+                    class: "main",
+                    // What the dividers are allowed to give away — and, when
+                    // the window has just given away some of it, the moment
+                    // the panes are moved back inside what is left. The panes
+                    // are `flex: none`, so this is the only thing that resizes
+                    // them, which is what makes the sizes here the sizes on
+                    // screen.
+                    onresize: move |e| {
+                        if let Ok(size) = e.get_content_box_size() {
+                            let mut area = st.main_size;
+                            area.set((size.width, size.height));
+                            panes::refit(&st);
+                        }
+                    },
+                    FileTreePane {}
+                    div { class: "rightcol",
+                        Viewer {}
+                        Bottom {}
                     }
-                },
-                FileTreePane {}
-                div { class: "rightcol",
-                    Viewer {}
-                    Bottom {}
+                    ConvPane {}
                 }
-                ConvPane {}
-            }
-            if *st.gh_open.read() {
-                GhPanel {}
+                if *st.gh_open.read() {
+                    GhPanel {}
+                }
+            } else {
+                Landing {}
             }
             if *st.prefs_open.read() {
                 PrefsPanel {}

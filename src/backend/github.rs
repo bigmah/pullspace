@@ -33,6 +33,15 @@ const MAX_FILE_PAGES: u32 = 30;
 /// 100 comments per page, per kind. A thread past this is one nobody is
 /// reading to the end of anyway, and the pane says when it was cut short.
 const MAX_COMMENT_PAGES: u32 = 5;
+/// GitHub answers at most 250 commits on a pull request, so three pages is
+/// every one there is to have from this endpoint.
+const MAX_COMMIT_PAGES: u32 = 3;
+/// And at most 300 files on a single commit, which is the same three pages.
+const MAX_COMMIT_FILE_PAGES: u32 = 3;
+/// How many pull requests one listing holds. GitHub's own maximum per page,
+/// asked for in one request — a second page of a list nobody scrolls to the
+/// bottom of is not worth the wait or the budget.
+pub const PR_PAGE: usize = 100;
 
 /// Percent-encode one path segment into `out`. Avoids a dependency for the
 /// handful of characters that actually show up in repo paths.
@@ -120,6 +129,35 @@ pub fn parse_target(input: &str) -> Option<(RepoRef, Option<u64>)> {
         _ => None,
     };
     Some((RepoRef { owner, name }, number))
+}
+
+/// The commit one piece of text names, when it names one: `owner/repo` and a
+/// hex sha after the word github.com writes it under.
+///
+/// `owner/repo/commit/<sha>` as typed, and the browser URL it came from. It is
+/// checked before [`parse_target`] wherever both could answer, since that reads
+/// the same text as a bare repository with something after it.
+pub fn parse_commit_target(input: &str) -> Option<(RepoRef, String)> {
+    let s = input.trim();
+    let rest = strip_host(s).unwrap_or(s);
+    let parts: Vec<&str> = rest.split('/').filter(|p| !p.is_empty()).collect();
+    match parts.as_slice() {
+        [owner, name, "commit" | "commits", sha, ..] if is_sha(sha) => Some((
+            RepoRef {
+                owner: owner.to_string(),
+                name: name.trim_end_matches(".git").to_string(),
+            },
+            sha.to_string(),
+        )),
+        _ => None,
+    }
+}
+
+/// A commit, as git lets one be written: hex, and enough of it to be worth
+/// resolving. Seven is what everybody quotes and what GitHub's own links use;
+/// forty is the whole hash.
+pub fn is_sha(s: &str) -> bool {
+    (7..=40).contains(&s.len()) && s.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
 /// The account one piece of text names, when it names an account and not a
@@ -612,6 +650,10 @@ struct RawPr {
     #[serde(default)]
     draft: bool,
     state: String,
+    /// Set only on a pull request that was closed by being merged, which is the
+    /// one thing `state` does not say.
+    #[serde(default)]
+    merged_at: Option<String>,
     updated_at: String,
     html_url: String,
     head: RawRef,
@@ -624,9 +666,55 @@ pub struct PrSummary {
     pub title: String,
     pub author: String,
     pub draft: bool,
+    /// `open` or `closed`, as GitHub says it.
+    pub state: String,
+    /// Closed by landing rather than by being turned down. GitHub calls both
+    /// `closed`, and they are not the same news.
+    pub merged: bool,
     pub updated_at: String,
     pub head_ref: String,
     pub base_ref: String,
+}
+
+impl PrSummary {
+    pub fn is_open(&self) -> bool {
+        self.state == "open"
+    }
+}
+
+/// Which of a repository's pull requests to ask for.
+///
+/// GitHub's own three, in GitHub's own words — a list that offers anything else
+/// is a list somebody has to work out the meaning of.
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
+pub enum PrState {
+    #[default]
+    Open,
+    /// Turned down or landed: GitHub calls both of those closed.
+    Closed,
+    All,
+}
+
+impl PrState {
+    /// The three, in the order they are offered.
+    pub const EVERY: [PrState; 3] = [PrState::Open, PrState::Closed, PrState::All];
+
+    /// What GitHub calls it, which is also what the button says.
+    pub fn label(self) -> &'static str {
+        match self {
+            PrState::Open => "open",
+            PrState::Closed => "closed",
+            PrState::All => "all",
+        }
+    }
+
+    pub fn why(self) -> &'static str {
+        match self {
+            PrState::Open => "Pull requests still open",
+            PrState::Closed => "Pull requests that have been merged or turned down",
+            PrState::All => "Every pull request, open or closed",
+        }
+    }
 }
 
 fn author_of(user: &Option<User>) -> String {
@@ -635,26 +723,34 @@ fn author_of(user: &Option<User>) -> String {
         .unwrap_or_else(|| "ghost".to_string())
 }
 
-/// Open pull requests, most recently updated first.
-pub async fn list_prs(token: &str, repo: &RepoRef) -> Result<Vec<PrSummary>> {
+/// A repository's pull requests, most recently updated first.
+///
+/// One page, which is [`PR_PAGE`] of them — enough that "the pull requests on
+/// this repository" is answered in full for very nearly every repository, and
+/// the caller is told which are the ones it is not.
+pub async fn list_prs(token: &str, repo: &RepoRef, state: PrState) -> Result<Vec<PrSummary>> {
     let url = format!(
-        "{API}/repos/{}/{}/pulls?state=open&sort=updated&direction=desc&per_page=50",
+        "{API}/repos/{}/{}/pulls?state={}&sort=updated&direction=desc&per_page={PR_PAGE}",
         encode_segment(&repo.owner),
         encode_segment(&repo.name),
+        state.label(),
     );
     let raw: Vec<RawPr> = get_json(token, &url).await?;
-    Ok(raw
-        .into_iter()
-        .map(|p| PrSummary {
-            number: p.number,
-            title: p.title,
-            author: author_of(&p.user),
-            draft: p.draft,
-            updated_at: p.updated_at,
-            head_ref: p.head.name,
-            base_ref: p.base.name,
-        })
-        .collect())
+    Ok(raw.into_iter().map(summary_of).collect())
+}
+
+fn summary_of(p: RawPr) -> PrSummary {
+    PrSummary {
+        number: p.number,
+        title: p.title,
+        author: author_of(&p.user),
+        draft: p.draft,
+        merged: p.merged_at.is_some(),
+        state: p.state,
+        updated_at: p.updated_at,
+        head_ref: p.head.name,
+        base_ref: p.base.name,
+    }
 }
 
 #[derive(Deserialize)]
@@ -676,6 +772,18 @@ fn change_kind(status: &str) -> ChangeKind {
         "renamed" => ChangeKind::Renamed,
         // "modified", "changed", "unchanged" and anything new GitHub adds.
         _ => ChangeKind::Modified,
+    }
+}
+
+/// One entry of a changed-file list, whether it came from a pull request or
+/// from a single commit — GitHub writes both the same way.
+fn file_of(f: &RawFile) -> PrFile {
+    PrFile {
+        path: PathBuf::from(&f.filename),
+        previous_path: f.previous_filename.as_deref().map(PathBuf::from),
+        status: change_kind(&f.status),
+        additions: f.additions,
+        deletions: f.deletions,
     }
 }
 
@@ -859,40 +967,87 @@ pub struct PrDetail {
     pub base_tree: Snapshot,
 }
 
-impl PrDetail {
-    /// What one changed file is remembered as, once somebody has marked it
-    /// read: the git blob it is made of.
-    ///
-    /// The blob rather than the path, because a mark is a statement about
-    /// contents — see [`viewed`](crate::backend::viewed). Nearly always the
-    /// head side; the base side for a file this pull request deletes, which has
-    /// no head side to hash. Falling back to the path covers the one case with
-    /// no blob at all: a pull request whose tree GitHub would not serve, where
-    /// a mark keyed by name is still better than no marks.
-    pub fn blob_key(&self, path: &std::path::Path) -> Cow<'_, str> {
-        if let Some(entry) = self.tree.entry(path) {
-            return Cow::Borrowed(entry.sha.as_str());
-        }
-        find_file(&self.files, path)
-            .and_then(|f| self.base_tree.entry(f.base_path()))
-            .map_or_else(
-                || Cow::Owned(format!("path:{}", path.display())),
-                |entry| Cow::Borrowed(entry.sha.as_str()),
-            )
+/// What one changed file is remembered as, once somebody has marked it read:
+/// the git blob it is made of.
+///
+/// The blob rather than the path, because a mark is a statement about
+/// contents — see [`viewed`](crate::backend::viewed). Nearly always the head
+/// side; the base side for a file the change deletes, which has no head side to
+/// hash. Falling back to the path covers the one case with no blob at all: a
+/// tree GitHub would not serve, where a mark keyed by name is still better than
+/// no marks.
+///
+/// A free function because a commit is diffed the same way a pull request is,
+/// and both hold the same three things to answer it with.
+fn blob_key_in<'a>(
+    tree: &'a Snapshot,
+    base_tree: &'a Snapshot,
+    files: &[PrFile],
+    path: &std::path::Path,
+) -> Cow<'a, str> {
+    if let Some(entry) = tree.entry(path) {
+        return Cow::Borrowed(entry.sha.as_str());
     }
-
-    /// [`blob_key`](Self::blob_key) for a caller already holding the changed
-    /// file — asked once per file when the read count is taken, where the
-    /// lookup above would fall back to a scan of the whole list each time.
-    pub fn blob_key_of(&self, f: &PrFile) -> Cow<'_, str> {
-        if let Some(entry) = self.tree.entry(&f.path) {
-            return Cow::Borrowed(entry.sha.as_str());
-        }
-        self.base_tree.entry(f.base_path()).map_or_else(
-            || Cow::Owned(format!("path:{}", f.path.display())),
+    find_file(files, path)
+        .and_then(|f| base_tree.entry(f.base_path()))
+        .map_or_else(
+            || Cow::Owned(format!("path:{}", path.display())),
             |entry| Cow::Borrowed(entry.sha.as_str()),
         )
+}
+
+/// [`blob_key_in`] for a caller already holding the changed file — asked once
+/// per file when the read count is taken, where the lookup above would fall
+/// back to a scan of the whole list each time.
+fn blob_key_of_in<'a>(tree: &'a Snapshot, base_tree: &'a Snapshot, f: &PrFile) -> Cow<'a, str> {
+    if let Some(entry) = tree.entry(&f.path) {
+        return Cow::Borrowed(entry.sha.as_str());
     }
+    base_tree.entry(f.base_path()).map_or_else(
+        || Cow::Owned(format!("path:{}", f.path.display())),
+        |entry| Cow::Borrowed(entry.sha.as_str()),
+    )
+}
+
+impl PrDetail {
+    pub fn blob_key(&self, path: &std::path::Path) -> Cow<'_, str> {
+        blob_key_in(&self.tree, &self.base_tree, &self.files, path)
+    }
+
+    pub fn blob_key_of(&self, f: &PrFile) -> Cow<'_, str> {
+        blob_key_of_in(&self.tree, &self.base_tree, f)
+    }
+
+    /// The half of a pull request that is worth keeping hold of while one of
+    /// its commits is on screen — see [`PrHeader`].
+    pub fn header(&self) -> PrHeader {
+        PrHeader {
+            number: self.number,
+            title: self.title.clone(),
+            body: self.body.clone(),
+            author: self.author.clone(),
+            draft: self.draft,
+            html_url: self.html_url.clone(),
+        }
+    }
+}
+
+/// A pull request, as much of it as anything other than the diff needs.
+///
+/// It travels with a commit opened out of one, which is what lets the
+/// conversation pane stay whole while a single commit is being read — the
+/// description, the discussion and the list of commits all belong to the pull
+/// request, not to whichever of its commits is on screen. Strings only: the
+/// trees and the changed files are the part that is expensive, and they are the
+/// part a commit view is replacing.
+#[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
+pub struct PrHeader {
+    pub number: u64,
+    pub title: String,
+    pub body: String,
+    pub author: String,
+    pub draft: bool,
+    pub html_url: String,
 }
 
 /// Load a PR: metadata, the merge base, the changed-file list, and the full
@@ -923,13 +1078,7 @@ pub async fn load_pr(token: &str, repo: &RepoRef, number: u64) -> Result<PrDetai
             format!("{API}/repos/{owner}/{name}/pulls/{number}/files?per_page=100&page={page}");
         let raw: Vec<RawFile> = get_json(token, &url).await?;
         let full_page = raw.len() == 100;
-        files.extend(raw.into_iter().map(|f| PrFile {
-            path: PathBuf::from(&f.filename),
-            previous_path: f.previous_filename.map(PathBuf::from),
-            status: change_kind(&f.status),
-            additions: f.additions,
-            deletions: f.deletions,
-        }));
+        files.extend(raw.iter().map(file_of));
         if !full_page {
             break;
         }
@@ -1056,14 +1205,16 @@ fn comment_of(raw: RawComment, kind: CommentKind) -> Comment {
     }
 }
 
-/// Read a list endpoint page by page. The bool is true when there was more
-/// than [`MAX_COMMENT_PAGES`] worth.
+/// Read a list endpoint page by page. The bool is true when there was more than
+/// `pages` worth — which every caller has to say something about, since a list
+/// silently cut off is a list read as complete.
 async fn get_paged<T: serde::de::DeserializeOwned>(
     token: &str,
     base: &str,
+    pages: u32,
 ) -> Result<(Vec<T>, bool)> {
     let mut out = Vec::new();
-    for page in 1..=MAX_COMMENT_PAGES {
+    for page in 1..=pages {
         let url = format!("{base}?per_page=100&page={page}");
         let raw: Vec<T> = get_json(token, &url).await?;
         let full_page = raw.len() == 100;
@@ -1106,6 +1257,7 @@ pub async fn pr_comments(token: &str, repo: &RepoRef, number: u64) -> Result<Thr
     let (discussion, more): (Vec<RawComment>, bool) = get_paged(
         token,
         &format!("{API}/repos/{owner}/{name}/issues/{number}/comments"),
+        MAX_COMMENT_PAGES,
     )
     .await
     .with_context(|| format!("reading the discussion on #{number}"))?;
@@ -1119,6 +1271,7 @@ pub async fn pr_comments(token: &str, repo: &RepoRef, number: u64) -> Result<Thr
     let (inline, more): (Vec<RawComment>, bool) = get_paged(
         token,
         &format!("{API}/repos/{owner}/{name}/pulls/{number}/comments"),
+        MAX_COMMENT_PAGES,
     )
     .await
     .with_context(|| format!("reading the line comments on #{number}"))?;
@@ -1132,6 +1285,7 @@ pub async fn pr_comments(token: &str, repo: &RepoRef, number: u64) -> Result<Thr
     let (reviews, more): (Vec<RawComment>, bool) = get_paged(
         token,
         &format!("{API}/repos/{owner}/{name}/pulls/{number}/reviews"),
+        MAX_COMMENT_PAGES,
     )
     .await
     .with_context(|| format!("reading the reviews of #{number}"))?;
@@ -1149,6 +1303,263 @@ pub async fn pr_comments(token: &str, repo: &RepoRef, number: u64) -> Result<Thr
 
     Ok(Thread {
         comments,
+        truncated,
+    })
+}
+
+// ----------------------------------------------------------------- commits
+
+/// One commit of a pull request, as the list of them reads.
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+pub struct CommitSummary {
+    pub sha: String,
+    /// The whole message. Its first line is the subject and the rest is the
+    /// body — split by [`subject`](Self::subject) and [`body`](Self::body)
+    /// rather than at the seam, so nothing anybody wrote is thrown away.
+    pub message: String,
+    /// The GitHub account that wrote it, or — for a commit whose author has no
+    /// account here — the name git has for them.
+    pub author: String,
+    /// ISO 8601, as git recorded it.
+    pub date: String,
+    pub html_url: String,
+}
+
+impl CommitSummary {
+    /// The seven characters everybody actually says a commit by.
+    pub fn short(&self) -> &str {
+        let end = self
+            .sha
+            .char_indices()
+            .nth(7)
+            .map_or(self.sha.len(), |(i, _)| i);
+        &self.sha[..end]
+    }
+
+    /// The first line, which is what a list of commits is a list of.
+    pub fn subject(&self) -> &str {
+        self.message.lines().next().unwrap_or_default().trim_end()
+    }
+
+    /// Everything after it, empty for the one-line message most commits are.
+    pub fn body(&self) -> &str {
+        match self.message.split_once('\n') {
+            Some((_, rest)) => rest.trim(),
+            None => "",
+        }
+    }
+}
+
+/// The commits of one pull request, oldest first — the order they were written
+/// in, which is the order they are read in.
+#[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
+pub struct Commits {
+    pub items: Vec<CommitSummary>,
+    /// GitHub stops at 250 commits on this endpoint, and this says when it did.
+    pub truncated: bool,
+}
+
+#[derive(Deserialize)]
+struct RawPrCommit {
+    #[serde(default)]
+    sha: String,
+    #[serde(default)]
+    commit: RawCommitBody,
+    /// The GitHub account, when the email on the commit belongs to one.
+    #[serde(default)]
+    author: Option<User>,
+    #[serde(default)]
+    html_url: String,
+}
+
+#[derive(Deserialize, Default)]
+struct RawCommitBody {
+    #[serde(default)]
+    message: String,
+    #[serde(default)]
+    author: Option<RawSignature>,
+}
+
+/// Git's own idea of who wrote something and when — a name and a date typed
+/// into a commit, with no account behind either.
+#[derive(Deserialize)]
+struct RawSignature {
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    date: String,
+}
+
+fn commit_of(raw: RawPrCommit) -> CommitSummary {
+    let signature = raw.commit.author;
+    let named = signature
+        .as_ref()
+        .map(|a| a.name.clone())
+        .unwrap_or_default();
+    // The account first: it is the name the rest of the pull request is written
+    // under. The git author is the fallback for a commit written from an email
+    // address GitHub does not know.
+    let author = raw
+        .author
+        .map(|u| u.login)
+        .filter(|login| !login.is_empty())
+        .or(Some(named))
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| "unknown".to_string());
+    CommitSummary {
+        sha: raw.sha,
+        message: raw.commit.message,
+        author,
+        date: signature.map(|a| a.date).unwrap_or_default(),
+        html_url: raw.html_url,
+    }
+}
+
+/// One commit, opened the way a pull request is: the files it changes, diffed
+/// against the commit before it.
+///
+/// The same shape as a [`PrDetail`] where it matters — two trees, a
+/// changed-file list, and the two commits they belong to — because everything
+/// downstream of that is the same work. What it is *not* is a pull request:
+/// there is no conversation on a commit and no merge base under it, and the
+/// pull request it was opened out of rides along in `pr` rather than being
+/// reconstructed from it.
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+pub struct CommitView {
+    pub repo: RepoRef,
+    pub commit: CommitSummary,
+    /// The first parent — what this is diffed against. Empty for the first
+    /// commit in a repository, which has nothing before it.
+    pub parent_sha: String,
+    /// More than one parent. Worth saying: GitHub lists no files for most merge
+    /// commits, and an empty diff with no explanation reads as a bug.
+    pub merge: bool,
+    pub files: Vec<PrFile>,
+    /// GitHub stops at 300 files on a commit, and this says when it did.
+    pub truncated: bool,
+    /// Every file in the repository at this commit, so the explorer shows the
+    /// whole tree rather than only what the commit touched. Filled in by the
+    /// caller, as [`PrDetail`]'s is.
+    pub tree: Snapshot,
+    /// And at the parent, which every left-hand side is read from.
+    pub base_tree: Snapshot,
+    /// The pull request this was opened out of, when it was opened out of one.
+    pub pr: Option<PrHeader>,
+}
+
+impl CommitView {
+    pub fn blob_key(&self, path: &std::path::Path) -> Cow<'_, str> {
+        blob_key_in(&self.tree, &self.base_tree, &self.files, path)
+    }
+
+    pub fn blob_key_of(&self, f: &PrFile) -> Cow<'_, str> {
+        blob_key_of_in(&self.tree, &self.base_tree, f)
+    }
+
+    /// Where this is on github.com.
+    pub fn html_url(&self) -> String {
+        if self.commit.html_url.is_empty() {
+            return format!(
+                "https://github.com/{}/{}/commit/{}",
+                self.repo.owner, self.repo.name, self.commit.sha
+            );
+        }
+        self.commit.html_url.clone()
+    }
+}
+
+#[derive(Deserialize)]
+struct RawCommitDetail {
+    #[serde(default)]
+    sha: String,
+    #[serde(default)]
+    commit: RawCommitBody,
+    #[serde(default)]
+    author: Option<User>,
+    #[serde(default)]
+    html_url: String,
+    #[serde(default)]
+    parents: Vec<RawCommit>,
+    #[serde(default)]
+    files: Vec<RawFile>,
+}
+
+/// One commit and what it changed.
+///
+/// The file list is paged because GitHub's is: it answers up to 300 files on a
+/// commit, a hundred to a page, and repeats the commit itself on each of them.
+pub async fn load_commit(token: &str, repo: &RepoRef, sha: &str) -> Result<CommitView> {
+    let base = format!(
+        "{API}/repos/{}/{}/commits/{}",
+        encode_segment(&repo.owner),
+        encode_segment(&repo.name),
+        encode_segment(sha),
+    );
+
+    let mut head: Option<RawCommitDetail> = None;
+    let mut files = Vec::new();
+    let mut truncated = false;
+    for page in 1..=MAX_COMMIT_FILE_PAGES {
+        let raw: RawCommitDetail = get_json(token, &format!("{base}?per_page=100&page={page}"))
+            .await
+            .with_context(|| format!("reading commit {sha}"))?;
+        let full_page = raw.files.len() == 100;
+        files.extend(raw.files.iter().map(file_of));
+        if head.is_none() {
+            head = Some(raw);
+        }
+        if !full_page {
+            break;
+        }
+        if page == MAX_COMMIT_FILE_PAGES {
+            truncated = true;
+        }
+    }
+    // Only reachable with `MAX_COMMIT_FILE_PAGES` set to zero, which it is not.
+    let raw = head.context("GitHub said nothing about that commit")?;
+
+    let mut parents = raw.parents.iter();
+    let parent_sha = parents.next().map(|p| p.sha.clone()).unwrap_or_default();
+    let merge = parents.next().is_some();
+    // The endpoint answers with the full sha whatever was asked for, which is
+    // what everything downstream should be keyed by.
+    let sha = if raw.sha.is_empty() {
+        sha.to_string()
+    } else {
+        raw.sha.clone()
+    };
+
+    Ok(CommitView {
+        tree: Snapshot::unknown(repo, &sha),
+        base_tree: Snapshot::unknown(repo, &parent_sha),
+        repo: repo.clone(),
+        commit: commit_of(RawPrCommit {
+            sha,
+            commit: raw.commit,
+            author: raw.author,
+            html_url: raw.html_url,
+        }),
+        parent_sha,
+        merge,
+        files,
+        truncated,
+        pr: None,
+    })
+}
+
+/// Every commit on a pull request — what the branch is made of, rather than
+/// what it adds up to.
+pub async fn pr_commits(token: &str, repo: &RepoRef, number: u64) -> Result<Commits> {
+    let base = format!(
+        "{API}/repos/{}/{}/pulls/{number}/commits",
+        encode_segment(&repo.owner),
+        encode_segment(&repo.name),
+    );
+    let (raw, truncated): (Vec<RawPrCommit>, bool) = get_paged(token, &base, MAX_COMMIT_PAGES)
+        .await
+        .with_context(|| format!("reading the commits on #{number}"))?;
+    Ok(Commits {
+        items: raw.into_iter().map(commit_of).collect(),
         truncated,
     })
 }
@@ -1424,6 +1835,173 @@ mod tests {
             after.blob_key(Path::new("src/b.rs")),
             "byte-identical, so it stays read"
         );
+    }
+
+    /// A commit as the endpoint sends it, with only the fields read here.
+    fn raw_commit(sha: &str, message: &str, login: Option<&str>, name: &str) -> RawPrCommit {
+        RawPrCommit {
+            sha: sha.to_string(),
+            commit: RawCommitBody {
+                message: message.to_string(),
+                author: Some(RawSignature {
+                    name: name.to_string(),
+                    date: "2026-08-13T09:00:00Z".to_string(),
+                }),
+            },
+            author: login.map(|login| User {
+                login: login.to_string(),
+            }),
+            html_url: String::new(),
+        }
+    }
+
+    #[test]
+    fn a_commit_link_is_read_however_it_arrives() {
+        let sha = "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0";
+        for typed in [
+            format!("o/r/commit/{sha}"),
+            format!("https://github.com/o/r/commit/{sha}"),
+            format!("github.com/o/r/commits/{sha}"),
+            // GitHub hangs a file and a line off its own commit links.
+            format!("https://github.com/o/r/commit/{sha}/files/src/main.rs"),
+        ] {
+            let (repo, got) = parse_commit_target(&typed).expect("{typed}");
+            assert_eq!(repo.to_string(), "o/r", "{typed}");
+            assert_eq!(got, sha, "{typed}");
+        }
+        // The short form people actually paste out of a terminal.
+        assert_eq!(
+            parse_commit_target("o/r/commit/abc1234").map(|(_, sha)| sha),
+            Some("abc1234".to_string())
+        );
+    }
+
+    #[test]
+    fn only_something_shaped_like_a_sha_is_a_commit() {
+        // A branch, a tag, half a sha, and a word that is not hex: all of them
+        // are a repository with something after it, not a commit.
+        for typed in [
+            "o/r/commit/main",
+            "o/r/commit/v1.2.3",
+            "o/r/commit/abc123",
+            "o/r/commit/zzzzzzzz",
+            "o/r/commit/",
+            "o/r/pull/12",
+            "o/r",
+        ] {
+            assert!(parse_commit_target(typed).is_none(), "{typed}");
+        }
+        assert!(is_sha("abc1234"));
+        assert!(is_sha(&"a".repeat(40)));
+        assert!(!is_sha(&"a".repeat(41)));
+        assert!(!is_sha("abc123"));
+    }
+
+    #[test]
+    fn a_commit_remembers_its_files_by_the_blob_they_are_made_of() {
+        let view = CommitView {
+            repo: RepoRef::default(),
+            commit: commit_of(raw_commit("abc1234", "m", None, "Ada")),
+            parent_sha: "parent".to_string(),
+            merge: false,
+            files: vec![
+                changed("src/a.rs", ChangeKind::Modified),
+                changed("gone.rs", ChangeKind::Deleted),
+            ],
+            truncated: false,
+            tree: snapshot(&[("src/a.rs", "now")]),
+            base_tree: snapshot(&[("src/a.rs", "before"), ("gone.rs", "was-here")]),
+            pr: None,
+        };
+        // The head side, exactly as a pull request's is…
+        assert_eq!(view.blob_key(Path::new("src/a.rs")), "now");
+        // …and the base side for the one with no head side left.
+        assert_eq!(view.blob_key(Path::new("gone.rs")), "was-here");
+        assert_eq!(
+            view.blob_key_of(&changed("src/a.rs", ChangeKind::Modified)),
+            "now"
+        );
+    }
+
+    #[test]
+    fn a_commit_message_is_a_subject_and_what_follows_it() {
+        let one = commit_of(raw_commit(
+            "a".repeat(40).as_str(),
+            "fix the thing",
+            None,
+            "Ada",
+        ));
+        assert_eq!(one.short(), "aaaaaaa", "seven characters, not eight");
+        assert_eq!(one.subject(), "fix the thing");
+        assert_eq!(one.body(), "", "a one-line message has nothing under it");
+
+        let full = commit_of(raw_commit(
+            "0123456789abcdef",
+            "fix the thing\n\nBecause it was broken.\n\nCloses #12\n",
+            None,
+            "Ada",
+        ));
+        assert_eq!(full.short(), "0123456");
+        assert_eq!(full.subject(), "fix the thing");
+        assert_eq!(full.body(), "Because it was broken.\n\nCloses #12");
+    }
+
+    /// A sha shorter than the seven characters everybody quotes — which is not
+    /// something GitHub sends, and is not something to panic over either.
+    #[test]
+    fn a_short_sha_is_as_short_as_it_is() {
+        let stub = commit_of(raw_commit("abc", "x", None, ""));
+        assert_eq!(stub.short(), "abc");
+    }
+
+    #[test]
+    fn a_commit_is_attributed_to_the_account_first_and_the_signature_after() {
+        let with_account = commit_of(raw_commit("s", "m", Some("ada"), "Ada Lovelace"));
+        assert_eq!(
+            with_account.author, "ada",
+            "the login is what the PR is under"
+        );
+
+        let no_account = commit_of(raw_commit("s", "m", None, "Ada Lovelace"));
+        assert_eq!(
+            no_account.author, "Ada Lovelace",
+            "an email GitHub does not know still has a name on it"
+        );
+
+        let anonymous = commit_of(raw_commit("s", "m", None, ""));
+        assert_eq!(anonymous.author, "unknown", "rather than an empty column");
+    }
+
+    #[test]
+    fn merged_and_closed_are_not_the_same_news() {
+        let raw = |state: &str, merged: bool| RawPr {
+            number: 1,
+            title: "t".to_string(),
+            body: None,
+            user: None,
+            draft: false,
+            state: state.to_string(),
+            merged_at: merged.then(|| "2026-08-13T09:00:00Z".to_string()),
+            updated_at: String::new(),
+            html_url: String::new(),
+            head: RawRef {
+                name: "feature".to_string(),
+                sha: String::new(),
+            },
+            base: RawRef {
+                name: "main".to_string(),
+                sha: String::new(),
+            },
+        };
+        let open = summary_of(raw("open", false));
+        assert!(open.is_open() && !open.merged);
+        // Both of these are `closed` to GitHub, and the badge on them differs.
+        let landed = summary_of(raw("closed", true));
+        assert!(!landed.is_open() && landed.merged);
+        let dropped = summary_of(raw("closed", false));
+        assert!(!dropped.is_open() && !dropped.merged);
+        // And nobody's account is still somebody.
+        assert_eq!(open.author, "ghost");
     }
 
     #[test]
@@ -1780,13 +2358,59 @@ impl FetchJob {
     }
 
     fn build(pr: &PrDetail, rel: &std::path::Path, f: Option<&PrFile>) -> Self {
+        Self::between(
+            &pr.repo,
+            &pr.base_sha,
+            &pr.head_sha,
+            &pr.tree,
+            &pr.base_tree,
+            rel,
+            f,
+        )
+    }
+
+    /// For any path of a commit being read on its own.
+    pub fn in_commit(view: &CommitView, rel: &std::path::Path) -> Self {
+        Self::commit_build(view, rel, find_file(&view.files, rel))
+    }
+
+    /// [`in_commit`](Self::in_commit) for a caller already holding the file.
+    pub fn for_commit_change<'a>(view: &'a CommitView, f: &'a PrFile) -> Self {
+        Self::commit_build(view, &f.path, Some(f))
+    }
+
+    fn commit_build(view: &CommitView, rel: &std::path::Path, f: Option<&PrFile>) -> Self {
+        Self::between(
+            &view.repo,
+            &view.parent_sha,
+            &view.commit.sha,
+            &view.tree,
+            &view.base_tree,
+            rel,
+            f,
+        )
+    }
+
+    /// One path, between two commits of one repository — which is all a diff
+    /// ever is here, whether the two commits are a pull request's or a single
+    /// commit and the one before it.
+    #[allow(clippy::too_many_arguments)]
+    fn between(
+        repo: &RepoRef,
+        base_sha: &str,
+        head_sha: &str,
+        tree: &Snapshot,
+        base_tree: &Snapshot,
+        rel: &std::path::Path,
+        f: Option<&PrFile>,
+    ) -> Self {
         let base_path = f.map_or_else(|| rel.to_path_buf(), |f| f.base_path().clone());
         FetchJob {
-            repo: pr.repo.clone(),
-            base_sha: pr.base_sha.clone(),
-            head_sha: pr.head_sha.clone(),
-            head_blob: pr.tree.entry(rel).cloned(),
-            base_blob: pr.base_tree.entry(&base_path).cloned(),
+            repo: repo.clone(),
+            base_sha: base_sha.to_string(),
+            head_sha: head_sha.to_string(),
+            head_blob: tree.entry(rel).cloned(),
+            base_blob: base_tree.entry(&base_path).cloned(),
             path: rel.to_path_buf(),
             base_path,
             status: f.map(|f| f.status),

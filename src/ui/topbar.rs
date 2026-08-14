@@ -3,11 +3,27 @@ use std::time::Duration;
 use dioxus::prelude::*;
 
 use crate::backend::auth::open_browser;
+use crate::backend::github::{PrHeader, RepoRef};
 
-use super::app::{Account, PrList, St, Workspace};
+use super::app::{Account, Fetch, St, Workspace};
 use super::compat;
-use super::github::{browse_repo, open_pr};
+use super::github::{PrListBody, PrStates, browse_repo, open_commit, open_pr};
 use super::ide;
+
+/// What the bar says is open, and what it offers to do about it.
+///
+/// One shape for all three, because the row is the same row: what this is
+/// called, what it is, a link to it on github.com, and the way out of it.
+struct Crumb {
+    /// The name — a pull request's number, a repository, a commit's sha.
+    lead: String,
+    /// And what it is called: the title, the branch, the subject line.
+    trail: String,
+    why: String,
+    url: String,
+    close: &'static str,
+    close_why: &'static str,
+}
 
 /// Bytes, in the units anybody would say them in.
 pub fn size_label(bytes: u64) -> String {
@@ -46,31 +62,80 @@ pub fn TopBar() -> Element {
             "wschip repo",
             "A GitHub repository being read — no pull request, so nothing is marked as changed",
         ),
+        Workspace::Commit(_) => (
+            "commit",
+            "wschip cmp",
+            "One commit, diffed against the commit before it",
+        ),
     };
 
-    let pr = workspace.pr().map(|p| {
-        (
-            format!("{} #{}", p.repo, p.number),
-            p.title.clone(),
-            p.html_url.clone(),
-        )
-    });
-    let browsing = workspace
-        .repo()
-        .map(|v| (v.repo.to_string(), v.branch.clone(), v.html_url()));
+    // What is open, said the same way whichever of the three it is: a name, the
+    // thing it is called, somewhere on github.com, and the way out of it.
+    let crumb = match &*workspace {
+        Workspace::Empty => None,
+        Workspace::Pr(p) => Some(Crumb {
+            lead: format!("{} #{}", p.repo, p.number),
+            trail: p.title.clone(),
+            why: format!(
+                "{} #{} — {}\nSwitch to another pull request on this repository",
+                p.repo, p.number, p.title
+            ),
+            url: p.html_url.clone(),
+            close: "close PR",
+            close_why: "Close this pull request",
+        }),
+        Workspace::Repo(v) => Some(Crumb {
+            lead: v.repo.to_string(),
+            trail: format!("@ {}", v.branch),
+            why: format!(
+                "{} at {} — no pull request, just the code\nOpen one of this repository's pull requests",
+                v.repo, v.branch
+            ),
+            url: v.html_url(),
+            close: "close repo",
+            close_why: "Close this repository",
+        }),
+        // The sha is the name of a commit and the subject is what it is for.
+        Workspace::Commit(v) => Some(Crumb {
+            lead: v.commit.short().to_string(),
+            trail: v.commit.subject().to_string(),
+            why: match &v.pr {
+                Some(pr) => format!(
+                    "{} — {}\nOne commit of #{}. Its other commits are in the pane on the right; the pull requests of {} are in here.",
+                    v.commit.short(),
+                    v.commit.subject(),
+                    pr.number,
+                    v.repo,
+                ),
+                None => format!(
+                    "{} — {}\nOne commit of {}, diffed against the commit before it",
+                    v.commit.short(),
+                    v.commit.subject(),
+                    v.repo,
+                ),
+            },
+            url: v.html_url(),
+            close: "close commit",
+            close_why: "Close this commit",
+        }),
+    };
     let pr_target = workspace.pr().map(|p| (p.repo.clone(), p.number));
     let repo_target = workspace.repo().map(|v| v.repo.clone());
+    let commit_target = workspace
+        .commit()
+        .map(|v| (v.repo.clone(), v.commit.sha.clone(), v.pr.clone()));
     let ws_open = workspace.is_open();
 
-    let (reload_note, reload_error) = match &*st.prs.read() {
-        PrList::Loading(note) => (Some(note.clone()), None),
-        PrList::Failed(e) => (None, Some(e.clone())),
-        _ => (None, None),
+    let (reload_note, reload_error) = match &*st.fetch.read() {
+        Fetch::Working(note) => (Some(note.clone()), None),
+        Fetch::Failed(e) => (None, Some(e.clone())),
+        Fetch::Idle => (None, None),
     };
     let reloading = reload_note.is_some();
     let refresh_title = match &*workspace {
         Workspace::Pr(_) => "Reload this pull request from GitHub",
         Workspace::Repo(_) => "Reload this repository from GitHub",
+        Workspace::Commit(_) => "Reload this commit from GitHub",
         Workspace::Empty => "Nothing open to reload",
     };
     let refresh_cls = if reloading {
@@ -135,6 +200,28 @@ pub fn TopBar() -> Element {
             }
         }
         Workspace::Repo(view) => view.tree.truncated.then_some(partial_tree),
+        Workspace::Commit(view) => {
+            if view.truncated {
+                Some((
+                    "truncated",
+                    "This commit touches more files than GitHub will list; only the first 300 were loaded",
+                ))
+            } else if view.merge && view.files.is_empty() {
+                Some((
+                    "merge commit",
+                    "GitHub lists no changed files for a merge commit — what it brought in is in the commits it merged",
+                ))
+            } else if view.tree.truncated {
+                Some(partial_tree)
+            } else if view.tree.is_empty() {
+                Some((
+                    "changed files only",
+                    "The repository tree could not be read, so the explorer lists only the files this commit changes",
+                ))
+            } else {
+                None
+            }
+        }
         Workspace::Empty => None,
     };
 
@@ -160,41 +247,11 @@ pub fn TopBar() -> Element {
         div { class: "{bar_cls}",
             span { class: "brand", "pullspace" }
             span { class: "{ws_cls}", title: "{ws_why}", "{ws_label}" }
-            if let Some((prnum, title, url)) = pr {
-                span {
-                    class: "prcrumb",
-                    title: "{prnum} — {title}",
-                    span { class: "prnum", "{prnum}" }
-                    span { class: "prcrumbtitle", "{title}" }
-                }
-                if let Some((label, why)) = warn {
-                    span { class: "prwarn", title: "{why}", "{label}" }
-                }
-                if let Some((note, why)) = status.clone() {
-                    span { class: "prwarm", title: "{why}", "{note}" }
-                }
-                if let Some(e) = reload_error.clone() {
-                    span { class: "prwarn", title: "{e}", "reload failed" }
-                }
-                button {
-                    class: "iconbtn",
-                    title: "Open on github.com",
-                    onclick: move |_| open_browser(&url),
-                    "↗"
-                }
-                button {
-                    class: "closebtn",
-                    title: "Close this pull request",
-                    onclick: move |_| st.close_workspace(),
-                    span { class: "closex", "✕" }
-                    "close PR"
-                }
-            } else if let Some((repo, branch, url)) = browsing {
-                span {
-                    class: "prcrumb",
-                    title: "{repo} at {branch} — no pull request, just the code",
-                    span { class: "prnum", "{repo}" }
-                    span { class: "prcrumbtitle", "@ {branch}" }
+            if let Some(crumb) = crumb {
+                PrSwitch {
+                    lead: crumb.lead,
+                    trail: crumb.trail,
+                    why: crumb.why,
                 }
                 if let Some((label, why)) = warn {
                     span { class: "prwarn", title: "{why}", "{label}" }
@@ -208,15 +265,15 @@ pub fn TopBar() -> Element {
                 button {
                     class: "iconbtn",
                     title: "Open on github.com",
-                    onclick: move |_| open_browser(&url),
+                    onclick: move |_| open_browser(&crumb.url),
                     "↗"
                 }
                 button {
                     class: "closebtn",
-                    title: "Close this repository",
+                    title: "{crumb.close_why}",
                     onclick: move |_| st.close_workspace(),
                     span { class: "closex", "✕" }
-                    "close repo"
+                    "{crumb.close}"
                 }
             }
             SearchBox {}
@@ -242,9 +299,119 @@ pub fn TopBar() -> Element {
             RefreshButton {
                 pr_target,
                 repo_target,
+                commit_target,
                 reloading,
                 refresh_title,
                 refresh_cls,
+            }
+        }
+    }
+}
+
+/// The crumb that says what is open — and, behind it, everything else that
+/// could be.
+///
+/// A review is rarely one pull request. The list of them is already here, kept
+/// alongside whatever is open (see the effect in [`App`](super::app::App)), so
+/// swapping is a click on the thing you are already looking at rather than a
+/// trip back through the picker. The repository itself is at the foot of the
+/// list, which is the way out of a pull request and into the code around it.
+#[component]
+fn PrSwitch(lead: String, trail: String, why: String) -> Element {
+    let st = use_context::<St>();
+    let mut open = use_signal(|| false);
+
+    let current = st.workspace.read().pr_number();
+    let repo = st.workspace.read().repo_ref().cloned();
+    // The repository row is the one being read only when the repository itself
+    // is what is open — a commit of it is somewhere else.
+    let browsing = st.workspace.read().repo().is_some();
+    // Whose pull requests these are. Usually the repository that is open, but
+    // the picker can have moved on to another one without opening it — and a
+    // list that says whose it is cannot be read as the wrong repository's.
+    let listed = st.prs.read().as_ref().map(|l| l.repo.to_string());
+
+    // A swap that has landed is a menu that has done what it was opened for.
+    // On the workspace rather than on the click, so the menu stays up — with
+    // the row still under the pointer — for as long as the loading takes.
+    use_effect(move || {
+        let _ = st.workspace.read();
+        open.set(false);
+    });
+
+    rsx! {
+        div {
+            class: "prswitch",
+            // Escape, wherever the focus is inside here — which after the click
+            // that opened the menu is the crumb, above the menu rather than in
+            // it, so the handler goes on the pair of them.
+            onkeydown: move |e| {
+                if e.key() == Key::Escape && *open.peek() {
+                    e.stop_propagation();
+                    open.set(false);
+                }
+            },
+            button {
+                class: "prcrumb prcrumbbtn",
+                title: "{why}",
+                onclick: move |_| {
+                    let showing = *open.peek();
+                    open.set(!showing);
+                },
+                span { class: "prnum", "{lead}" }
+                span { class: "prcrumbtitle", "{trail}" }
+                span { class: "prchev", "▾" }
+            }
+            if *open.read() {
+                // Everything else on the page, for as long as the menu is up:
+                // a click anywhere out here puts it away, which is the one
+                // thing every menu does.
+                div {
+                    class: "menuback",
+                    onclick: move |_| open.set(false),
+                }
+                div { class: "prmenu",
+                    div { class: "prmenuhdr",
+                        if let Some(listed) = listed {
+                            span { class: "ghlabel", "{listed}" }
+                        }
+                        span { class: "spacer" }
+                        PrStates {}
+                    }
+                    div { class: "prmenubody", PrListBody { current } }
+                    if let Some(repo) = repo {
+                        BrowseFoot { repo, current: browsing }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// The way out of a pull request and into the repository it is against — the
+/// row at the foot of the switcher, and the one that is already ticked when the
+/// repository is what is open.
+#[component]
+fn BrowseFoot(repo: RepoRef, current: bool) -> Element {
+    let st = use_context::<St>();
+    let class = if current {
+        "prmenufoot on"
+    } else {
+        "prmenufoot"
+    };
+    rsx! {
+        div {
+            class: "{class}",
+            title: if current { "Already open" } else { "Read {repo} at its default branch, with no pull request" },
+            // Root scope: loading replaces the bar this row hangs off.
+            onclick: move |_| {
+                if !current {
+                    spawn_forever(browse_repo(st, repo.clone()));
+                }
+            },
+            span { class: "prmenufoot-label", "the repository itself" }
+            if current {
+                span { class: "prhere", "reading" }
             }
         }
     }
@@ -360,8 +527,9 @@ fn SearchBox() -> Element {
 /// off it.
 #[component]
 fn RefreshButton(
-    pr_target: Option<(crate::backend::github::RepoRef, u64)>,
-    repo_target: Option<crate::backend::github::RepoRef>,
+    pr_target: Option<(RepoRef, u64)>,
+    repo_target: Option<RepoRef>,
+    commit_target: Option<(RepoRef, String, Option<PrHeader>)>,
     reloading: bool,
     refresh_title: &'static str,
     refresh_cls: &'static str,
@@ -382,14 +550,21 @@ fn RefreshButton(
             class: cls,
             title: "{refresh_title}",
             disabled: reloading,
-            onclick: move |_| match (pr_target.clone(), repo_target.clone()) {
+            onclick: move |_| match (
+                pr_target.clone(),
+                repo_target.clone(),
+                commit_target.clone(),
+            ) {
                 // Root scope: reloading replaces the workspace, and this button
                 // is re-rendered underneath the task that did it.
-                (Some((repo, number)), _) => {
+                (Some((repo, number)), ..) => {
                     spawn_forever(open_pr(st, repo, number));
                 }
-                (_, Some(repo)) => {
+                (_, Some(repo), _) => {
                     spawn_forever(browse_repo(st, repo));
+                }
+                (.., Some((repo, sha, pr))) => {
+                    spawn_forever(open_commit(st, repo, sha, pr));
                 }
                 _ => {
                     nudged.set(true);

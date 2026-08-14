@@ -16,7 +16,7 @@ use std::path::Path;
 
 use dioxus::prelude::*;
 
-use crate::backend::github::{FetchJob, PrDetail, Snapshot};
+use crate::backend::github::{FetchJob, Snapshot};
 use crate::backend::{blobs, clone};
 
 use super::app::{PrFileState, St};
@@ -96,12 +96,7 @@ pub fn ensure_file(st: St, job: FetchJob) {
 
 /// Everything needed to read one path of whatever is open.
 fn job_for(st: &St, rel: &Path) -> Option<FetchJob> {
-    let ws = st.workspace.peek();
-    match (ws.pr(), ws.repo()) {
-        (Some(pr), _) => Some(FetchJob::new(pr, rel)),
-        (_, Some(view)) => Some(FetchJob::browsing(view, rel)),
-        _ => None,
-    }
+    st.workspace.peek().job_for(rel)
 }
 
 /// [`ensure_file`] for callers that only have a path.
@@ -135,15 +130,6 @@ pub fn ensure_hover(st: St, rel: &Path) {
         return;
     }
     ensure_file(st, job);
-}
-
-/// One job per file the PR changes — what the clone fetches before it fetches
-/// anything else, since it is what the review is about.
-pub fn changed_jobs(pr: &PrDetail) -> Vec<FetchJob> {
-    pr.files
-        .iter()
-        .map(|f| FetchJob::for_changed(pr, f))
-        .collect()
 }
 
 /// The fallback for a browser with nowhere to keep anything: read the pull

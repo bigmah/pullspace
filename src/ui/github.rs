@@ -1,11 +1,18 @@
-//! The GitHub overlay: pick a repository, pick a pull request, and — if a
+//! The GitHub picker: find a repository, pick a pull request, and — if a
 //! private repository is wanted — sign in.
 //!
-//! The picker is up in every state, signed in or not. GitHub serves public
-//! repositories to anyone, `api.github.com` answers cross-origin, and file
-//! bytes come off the CDN unmetered — so a token buys private repositories and
-//! a rate limit of 5000 an hour instead of 60, and nothing else. Asking for one
-//! before showing the box would be charging entry to a public building.
+//! It wears two frames. Over an open workspace it is [`GhPanel`], the overlay
+//! the top bar summons; with nothing open the same controls are the landing
+//! page — see [`super::landing`]. Both are built from the pieces here: the
+//! search box and the pull request list carry the show, and the account and
+//! the local store sit under them as one quiet strip, because both matter and
+//! neither is what anyone came to do.
+//!
+//! The picker works signed in or not. GitHub serves public repositories to
+//! anyone, `api.github.com` answers cross-origin, and file bytes come off the
+//! CDN unmetered — so a token buys private repositories and a rate limit of
+//! 5000 an hour instead of 60, and nothing else. Asking for one before showing
+//! the box would be charging entry to a public building.
 
 use std::collections::HashMap;
 use std::time::Duration;
@@ -15,10 +22,11 @@ use dioxus::prelude::*;
 use crate::backend::auth::{self, Token, open_browser};
 use crate::backend::blobs;
 use crate::backend::github::{
-    self, OwnerHit, PrSummary, RepoHit, RepoRef, RepoView, parse_owner, parse_target,
+    self, OwnerHit, PR_PAGE, PrHeader, PrState, PrSummary, RepoHit, RepoRef, RepoView,
+    parse_commit_target, parse_owner, parse_target,
 };
 
-use super::app::{Account, PrList, St};
+use super::app::{Account, Fetch, Got, PrList, St};
 use super::compat;
 use super::topbar::size_label;
 
@@ -51,7 +59,7 @@ pub fn GhPanel() -> Element {
                 class: "ghpanel",
                 onclick: move |e| e.stop_propagation(),
                 div { class: "ghhdr",
-                    span { class: "ghtitle", "GitHub" }
+                    span { class: "ghtitle", "Open from GitHub" }
                     span { class: "spacer" }
                     button {
                         class: "iconbtn",
@@ -61,33 +69,70 @@ pub fn GhPanel() -> Element {
                     }
                 }
                 div { class: "ghbody",
-                    match account.clone() {
-                        Account::Checking => rsx! {
-                            div { class: "ghnote", "Looking for a saved sign-in…" }
-                        },
-                        Account::SignedOut => rsx! {
-                            Anonymous { form: token_form, showing, error: None }
-                        },
-                        Account::Failed(e) => rsx! {
-                            Anonymous { form: token_form, showing, error: Some(e) }
-                        },
-                        Account::SignedIn { login } => rsx! { SignedIn { login } },
-                    }
-                    // Everything below is the same whether or not there is a
-                    // token — it is only *which* repositories answer that
-                    // changes. Held back while the saved token is being
-                    // checked, so a search started in that half-second does not
-                    // go out anonymously and come back rate-limited.
-                    if !matches!(account, Account::Checking) {
-                        // Whichever box the reader came to type in gets the
-                        // caret. The token form is only up because something
-                        // wants a token, so when it is up, it is that one.
-                        RepoPicker { autofocus: !showing }
-                        PrSection {}
-                    }
-                    LocalCopy {}
+                    PickerBody { autofocus: !showing }
                 }
+                PickerFoot { form: token_form, showing }
             }
+        }
+    }
+}
+
+/// The picker itself: the search box, and the pull requests of whatever it
+/// last named. What the overlay and the landing page have in common, which is
+/// everything except the frame.
+#[component]
+pub(super) fn PickerBody(autofocus: bool) -> Element {
+    let st = use_context::<St>();
+    // Held back while the saved token is being checked, so a search started in
+    // that half-second does not go out anonymously and come back rate-limited.
+    // It is only *which* repositories answer that a token changes — the
+    // controls are the same either way.
+    if matches!(&*st.account.read(), Account::Checking) {
+        return rsx! {
+            div { class: "ghsection",
+                div { class: "ghnote", "Looking for a saved sign-in…" }
+            }
+        };
+    }
+    rsx! {
+        // Whichever box the reader came to type in gets the caret. The token
+        // form is only up because something wants a token, so when it is up,
+        // it is that one.
+        RepoPicker { autofocus }
+        PrSection {}
+    }
+}
+
+/// The strip under the picker: who is asking, and what is kept on the disk.
+///
+/// One quiet row each. The token form unfolds out of the first on request, and
+/// is up unasked only when a saved token has been rejected and needs replacing.
+#[component]
+pub(super) fn PickerFoot(form: Signal<Option<bool>>, showing: bool) -> Element {
+    let st = use_context::<St>();
+    let account = st.account.read().clone();
+    // The body already says the check is running, and a footer with no rows
+    // yet would be a bordered strip of nothing.
+    if matches!(account, Account::Checking) {
+        return rsx! {};
+    }
+
+    rsx! {
+        div { class: "ghfoot",
+            match account {
+                Account::SignedOut => rsx! {
+                    AccountLine { form, showing, error: None }
+                },
+                Account::Failed(e) => rsx! {
+                    AccountLine { form, showing, error: Some(e) }
+                },
+                Account::SignedIn { login } => rsx! { SignedIn { login } },
+                Account::Checking => rsx! {},
+            }
+            if showing {
+                SignIn {}
+            }
+            LocalCopy {}
         }
     }
 }
@@ -96,10 +141,10 @@ pub fn GhPanel() -> Element {
 
 /// What is on the disk, and the one button for getting rid of it.
 ///
-/// Worth a panel of its own because it is the one thing pullspace leaves
-/// behind. Everything else about the app is a page that forgets you: this keeps
-/// entire repositories, and somebody who wants that space back should not have
-/// to go looking through browser settings for it.
+/// One row of the footer, and only once there is something to report — it is
+/// the one thing pullspace leaves behind, so somebody who wants the space back
+/// should not have to go looking through browser settings for it, but a store
+/// with nothing in it is not worth a paragraph to a first-time visitor.
 #[component]
 fn LocalCopy() -> Element {
     let st = use_context::<St>();
@@ -114,6 +159,9 @@ fn LocalCopy() -> Element {
     });
 
     let (files, used) = stored.cloned().unwrap_or((0, None));
+    if files == 0 {
+        return rsx! {};
+    }
     let size = match used {
         Some((used, quota)) if quota > 0.0 => format!(
             " · {} of {} used",
@@ -124,38 +172,31 @@ fn LocalCopy() -> Element {
     };
 
     rsx! {
-        div { class: "ghsection",
-            div { class: "ghrow",
-                div { class: "ghlabel", "Local copy" }
-                span { class: "spacer" }
-                if files > 0 {
-                    button {
-                        class: "linkbtn",
-                        title: "Delete every repository kept in this browser",
-                        // Root scope: emptying the store means deleting every
-                        // file in it, and closing the panel part way through
-                        // must not leave that half done.
-                        onclick: move |_| {
-                            spawn_forever(async move {
-                                blobs::clear().await;
-                                // The decoded copies search reads from are a
-                                // copy of what has just been deleted.
-                                crate::backend::scan::forget();
-                                st.store_changed();
-                            });
-                        },
-                        "Clear"
-                    }
-                }
+        div { class: "ghrow",
+            span {
+                class: "ghwho",
+                title: "Repositories you open are kept in this browser's own filesystem, \
+                        so a repository opened before comes back instantly, and a pull \
+                        request on it downloads only what changed.",
+                "{files} files kept in this browser{size}"
             }
-            div { class: "ghhelp",
-                if files == 0 {
-                    "Repositories you open are kept in this browser's own filesystem, so the \
-                     next pull request on one of them opens without downloading it again."
-                } else {
-                    "{files} files kept{size} — so a repository opened before comes back \
-                     instantly, and a pull request on it downloads only what changed."
-                }
+            span { class: "spacer" }
+            button {
+                class: "linkbtn",
+                title: "Delete every repository kept in this browser",
+                // Root scope: emptying the store means deleting every file in
+                // it, and closing the panel part way through must not leave
+                // that half done.
+                onclick: move |_| {
+                    spawn_forever(async move {
+                        blobs::clear().await;
+                        // The decoded copies search reads from are a copy of
+                        // what has just been deleted.
+                        crate::backend::scan::forget();
+                        st.store_changed();
+                    });
+                },
+                "Clear"
             }
         }
     }
@@ -172,42 +213,35 @@ const NEW_TOKEN_URL: &str = "https://github.com/settings/personal-access-tokens/
 /// there is a token that needs fixing. It cannot be settled at mount: the panel
 /// is up from the first frame, while the saved token is still being checked, so
 /// a rejection arrives after whatever was decided on the way in.
-fn form_open(form: &Signal<Option<bool>>, account: &Account) -> bool {
+pub(super) fn form_open(form: &Signal<Option<bool>>, account: &Account) -> bool {
     form.read().unwrap_or(matches!(account, Account::Failed(_)))
 }
 
-/// Signed out: say what that costs, and offer the token form to anyone it costs
-/// something.
+/// Signed out: one line saying so and what it costs, and the way to change it.
 ///
-/// It costs two things and no others — private repositories, and the difference
-/// between sixty requests an hour and five thousand — so both are named here,
-/// next to the button that fixes them. The picker below this is live either way.
+/// It costs two things and no others — private repositories, and the
+/// difference between sixty API requests an hour and five thousand — so the
+/// line names them, and the form that fixes them unfolds beneath. The picker
+/// above is live either way.
 #[component]
-fn Anonymous(form: Signal<Option<bool>>, showing: bool, error: Option<String>) -> Element {
+fn AccountLine(form: Signal<Option<bool>>, showing: bool, error: Option<String>) -> Element {
     let mut form = form;
 
     rsx! {
-        div { class: "ghsection ghaccount",
-            span { class: "ghwho", "Browsing " b { "anonymously" } }
+        if let Some(e) = error {
+            div { class: "gherror", "{e}" }
+        }
+        div { class: "ghrow",
+            span { class: "ghwho",
+                "Browsing "
+                b { "anonymously" }
+                " — public repositories, 60 API requests an hour"
+            }
             span { class: "spacer" }
             button {
                 class: "linkbtn",
                 onclick: move |_| form.set(Some(!showing)),
                 if showing { "Cancel" } else { "Add a token" }
-            }
-        }
-        if let Some(e) = error {
-            div { class: "gherror", "{e}" }
-        }
-        if showing {
-            SignIn {}
-        } else {
-            div { class: "ghsection",
-                div { class: "ghhelp",
-                    "Public repositories and their pull requests need no sign-in. A token adds "
-                    "private repositories, and raises GitHub's limit of 60 API requests an hour "
-                    "to 5000 — file contents come off the CDN and count against neither."
-                }
             }
         }
     }
@@ -234,6 +268,11 @@ fn SignIn() -> Element {
     rsx! {
         div { class: "ghsection",
             div { class: "ghlabel", "GitHub token" }
+            div { class: "ghhelp",
+                "A token adds private repositories, and raises GitHub's limit of 60 API "
+                "requests an hour to 5000 — file contents come off the CDN and count "
+                "against neither."
+            }
             input {
                 class: "ghinput",
                 // A bearer token is a password, and shoulder-surfing is real.
@@ -321,7 +360,7 @@ fn SignedIn(login: String) -> Element {
     let st = use_context::<St>();
 
     rsx! {
-        div { class: "ghsection ghaccount",
+        div { class: "ghrow",
             span { class: "ghwho", "Signed in as " b { "{login}" } }
             span { class: "spacer" }
             button {
@@ -333,43 +372,159 @@ fn SignedIn(login: String) -> Element {
     }
 }
 
-/// The open pull requests of whatever repository the picker last loaded.
+/// The pull requests of whatever repository is open, or was last named in the
+/// picker.
 ///
 /// Signed in or not: a public repository lists its pull requests to anyone, and
 /// this pane is the same one either way.
 #[component]
 fn PrSection() -> Element {
     let st = use_context::<St>();
-    let prs = st.prs.read().clone();
+    let held = st.prs.read().clone();
+    // What is on screen already, so the row for it is marked rather than
+    // offered as somewhere to go.
+    let current = st.workspace.read().pr_number();
+    let fetching = st.fetch.read().clone();
+
+    // A load on its way, or the report of the one that failed — both shown
+    // here rather than nowhere, because this picker is where the thing being
+    // fetched was asked for.
+    let status: Option<Element> = match &fetching {
+        Fetch::Working(note) => Some(rsx! {
+            div { class: "ghnote busy", "{note}" }
+        }),
+        Fetch::Failed(e) => Some(rsx! {
+            div { class: "gherror", "{e}" }
+        }),
+        Fetch::Idle => None,
+    };
+
+    let Some(list) = held else {
+        // Nothing named yet. The box above already says what to type, so the
+        // section stays out of the way until it has news to report.
+        if status.is_none() {
+            return rsx! {};
+        }
+        return rsx! {
+            div { class: "ghsection prsection", {status} }
+        };
+    };
+    let repo = list.repo.clone();
+    let count = list.items().len();
+    let word = state_word(list.state);
+    let ready = matches!(list.got, Got::Ready(_));
 
     rsx! {
         div { class: "ghsection prsection",
-            match prs {
-                PrList::Idle => rsx! {
-                    div { class: "ghnote", "Pick a repository to list its open pull requests." }
-                },
-                PrList::Loading(note) => rsx! { div { class: "ghnote", "{note}" } },
-                PrList::Failed(e) => rsx! { div { class: "gherror", "{e}" } },
-                PrList::Ready { repo, items } if items.is_empty() => rsx! {
-                    div { class: "ghnote", "No open pull requests in {repo}." }
-                    BrowseRow { repo, no_prs: true }
-                },
-                PrList::Ready { repo, items } => rsx! {
-                    div { class: "ghlabel", "{items.len()} open in {repo}" }
-                    div { class: "prlist",
-                        for pr in items {
-                            // The clone looks removable — clippy says so — but
-                            // the key reads `pr` and whether that read lands
-                            // before or after the move into props is the rsx
-                            // macro's business, not ours. Seen to fail on
-                            // another machine; keep the clone.
-                            PrRow { key: "{pr.number}", repo: repo.clone(), pr: pr.clone() }
-                        }
-                    }
-                    BrowseRow { repo, no_prs: false }
-                },
+            {status}
+            div { class: "ghrow",
+                if ready && count > 0 {
+                    div { class: "ghlabel", "{count} {word}in {repo}" }
+                } else {
+                    div { class: "ghlabel", "Pull requests in {repo}" }
+                }
+                span { class: "spacer" }
+                PrStates {}
+            }
+            PrListBody { current }
+            BrowseRow { repo, no_prs: ready && count == 0 }
+        }
+    }
+}
+
+/// Open · closed · all — which of a repository's pull requests the list is a
+/// list of.
+///
+/// One toggle, read by the picker and by the top bar's switcher alike, because
+/// there is one list and both of them are looking at it.
+#[component]
+pub(super) fn PrStates() -> Element {
+    let st = use_context::<St>();
+    let mut pr_state = st.pr_state;
+    let now = *pr_state.read();
+
+    rsx! {
+        div { class: "prstates",
+            for state in PrState::EVERY {
+                button {
+                    key: "{state.label()}",
+                    class: if state == now { "pstate on" } else { "pstate" },
+                    title: "{state.why()}",
+                    onclick: move |_| pr_state.set(state),
+                    "{state.label()}"
+                }
             }
         }
+    }
+}
+
+/// The adjective in "3 open pull requests" — with the space it needs, since the
+/// list of everything has no adjective at all.
+fn state_word(state: PrState) -> &'static str {
+    match state {
+        PrState::Open => "open ",
+        PrState::Closed => "closed ",
+        PrState::All => "",
+    }
+}
+
+/// A repository's pull requests, however the fetching of them went.
+///
+/// The same rows in the panel and in the top bar's switcher, reading the same
+/// signal — so swapping through pull requests and picking one out of the picker
+/// are two ways at one list rather than two lists.
+#[component]
+pub(super) fn PrListBody(current: Option<u64>) -> Element {
+    let st = use_context::<St>();
+    let held = st.prs.read().clone();
+    let Some(list) = held else {
+        return rsx! {};
+    };
+    let repo = list.repo.clone();
+    let word = state_word(list.state);
+
+    match &list.got {
+        Got::Loading => rsx! {
+            div { class: "ghnote", "Loading pull requests…" }
+        },
+        Got::Failed(e) => rsx! {
+            div { class: "gherror", "{e}" }
+            button {
+                class: "linkbtn",
+                // Root scope: the note this button is in is replaced by the
+                // load it starts.
+                onclick: move |_| {
+                    spawn_forever(load_repo_prs(st, repo.clone()));
+                },
+                "Try again"
+            }
+        },
+        Got::Ready(items) if items.is_empty() => rsx! {
+            div { class: "ghnote", "No {word}pull requests in {repo}." }
+        },
+        Got::Ready(items) => rsx! {
+            div { class: "prlist",
+                for pr in items.iter() {
+                    // The clone looks removable — clippy says so — but the key
+                    // reads `pr` and whether that read lands before or after
+                    // the move into props is the rsx macro's business, not
+                    // ours. Seen to fail on another machine; keep the clone.
+                    PrRow {
+                        key: "{pr.number}",
+                        repo: repo.clone(),
+                        pr: pr.clone(),
+                        current: current == Some(pr.number),
+                    }
+                }
+            }
+            // A page full is a page that may have had more behind it, and a
+            // list quietly cut off reads as the whole of what there is.
+            if items.len() >= PR_PAGE {
+                div { class: "ghnote",
+                    "The {PR_PAGE} most recently updated. Older ones are on github.com."
+                }
+            }
+        },
     }
 }
 
@@ -655,7 +810,7 @@ fn drill(st: St, mut highlight: Signal<usize>, login: &str) {
     highlight.set(0);
 }
 
-/// Enter, or Load: open whatever is typed.
+/// Enter, or the Open button: open whatever is typed.
 ///
 /// Unless what is typed is an account, which has nothing to open — a person is
 /// not a pull request. Stepping into it is what was meant, and it is what the
@@ -748,12 +903,11 @@ fn RepoPicker(autofocus: bool) -> Element {
 
     rsx! {
         div { class: "ghsection",
-            div { class: "ghlabel", "Repository, owner or pull request" }
             div { class: "ghrow",
                 input {
                     class: "ghinput",
                     r#type: "text",
-                    placeholder: "search repos, orgs and users · owner/repo · or a link to a pull request",
+                    placeholder: "Search GitHub · owner/repo · or paste a link to a PR or commit",
                     spellcheck: "false",
                     autocomplete: "off",
                     value: "{typed}",
@@ -808,7 +962,7 @@ fn RepoPicker(autofocus: bool) -> Element {
                 button {
                     class: "primarybtn",
                     onclick: move |_| go(st, open, highlight),
-                    "Load"
+                    "Open"
                 }
             }
             if showing {
@@ -854,7 +1008,7 @@ fn RepoPicker(autofocus: bool) -> Element {
                 } else if typed.trim().chars().count() < MIN_QUERY {
                     div { class: "ghnote",
                         "Type a repository, organisation or user name to search GitHub, \
-                         or paste a link to a pull request."
+                         or paste a link to a pull request or a commit."
                     }
                 } else {
                     div { class: "ghnote", "Nothing on GitHub matches “{typed}”." }
@@ -992,23 +1146,47 @@ fn BrowseRow(repo: RepoRef, no_prs: bool) -> Element {
 }
 
 #[component]
-fn PrRow(repo: RepoRef, pr: PrSummary) -> Element {
+fn PrRow(repo: RepoRef, pr: PrSummary, current: bool) -> Element {
     let st = use_context::<St>();
     let number = pr.number;
     let target = repo;
+    let class = if current { "pritem on" } else { "pritem" };
+    // The date alone. Which afternoon somebody last pushed to a branch is what
+    // picks a pull request out of a list; the time of day is not.
+    let day: String = pr.updated_at.chars().take(10).collect();
     rsx! {
         div {
-            class: "pritem",
-            // Root scope: switching the list to `Loading` unmounts this row.
-            onclick: move |_| { spawn_forever(open_pr(st, target.clone(), number)); },
+            class: "{class}",
+            title: if current { "Already open" } else { "Open #{number}" },
+            // Root scope: opening one replaces the list this row is drawn in.
+            onclick: move |_| {
+                // Clicking the pull request you are reading is not a reload —
+                // `⟳` is, and it is two inches away.
+                if !current {
+                    spawn_forever(open_pr(st, target.clone(), number));
+                }
+            },
             div { class: "prtop",
                 span { class: "prnum", "#{pr.number}" }
                 span { class: "prtitle", "{pr.title}" }
+                if current {
+                    span { class: "prhere", "reading" }
+                }
                 if pr.draft {
                     span { class: "prdraft", "draft" }
                 }
+                if pr.merged {
+                    span { class: "prdraft merged", "merged" }
+                } else if !pr.is_open() {
+                    span { class: "prdraft closed", "closed" }
+                }
             }
-            div { class: "prmeta", "{pr.author} · {pr.head_ref} → {pr.base_ref}" }
+            div { class: "prmeta",
+                "{pr.author} · {pr.head_ref} → {pr.base_ref}"
+                if !day.is_empty() {
+                    " · {day}"
+                }
+            }
         }
     }
 }
@@ -1020,16 +1198,23 @@ fn do_sign_out(st: St) {
     t.set(None);
     let mut a = st.account;
     a.set(Account::SignedOut);
+    // What that account could see is not what the next caller can.
     let mut p = st.prs;
-    p.set(PrList::Idle);
+    p.set(None);
 }
 
-/// Load whatever the user typed: a repo lists its PRs, a PR link opens it.
+/// Load whatever the user typed: a repo lists its PRs, a PR link opens it, and
+/// a link to a commit opens that commit's diff.
 async fn open_target(st: St) {
     let raw = st.repo_input.peek().clone();
-    let mut prs = st.prs;
+    // Before the repository: `owner/repo/commit/<sha>` names a repository as
+    // well, and answering with that one would drop the half that was pasted.
+    if let Some((repo, sha)) = parse_commit_target(&raw) {
+        return open_commit(st, repo, sha, None).await;
+    }
     let Some((repo, number)) = parse_target(&raw) else {
-        prs.set(PrList::Failed(
+        let mut fetch = st.fetch;
+        fetch.set(Fetch::Failed(
             "That is not a repository — pick one from the list, or paste a GitHub link."
                 .to_string(),
         ));
@@ -1041,14 +1226,31 @@ async fn open_target(st: St) {
     load_repo_prs(st, repo).await;
 }
 
-/// Show a repository's open pull requests.
-async fn load_repo_prs(st: St, repo: RepoRef) {
+/// Show a repository's pull requests, in whichever state is toggled on.
+///
+/// It is the picker's answer to a repository being chosen, and it is also what
+/// runs by itself whenever something opens — see the effect in
+/// [`App`](super::app::App) — so that the switcher in the top bar always has a
+/// list to switch through.
+pub(super) async fn load_repo_prs(st: St, repo: RepoRef) {
     let token = st.api_token();
+    let state = *st.pr_state.peek();
     let mut prs = st.prs;
-    prs.set(PrList::Loading("Loading pull requests…".to_string()));
-    match github::list_prs(&token, &repo).await {
-        Ok(items) => prs.set(PrList::Ready { repo, items }),
-        Err(e) => prs.set(PrList::Failed(format!("{e:#}"))),
+    prs.set(Some(PrList {
+        repo: repo.clone(),
+        state,
+        got: Got::Loading,
+    }));
+
+    let got = match github::list_prs(&token, &repo, state).await {
+        Ok(items) => Got::Ready(items),
+        Err(e) => Got::Failed(format!("{e:#}")),
+    };
+    // A repository opened, or the toggle flipped, while this was in flight: the
+    // answer is to a question nobody is asking any more.
+    let wanted = prs.peek().as_ref().is_some_and(|l| l.covers(&repo, state));
+    if wanted {
+        prs.set(Some(PrList { repo, state, got }));
     }
 }
 
@@ -1060,31 +1262,71 @@ async fn load_repo_prs(st: St, repo: RepoRef) {
 /// is keyed by commit.
 pub(super) async fn browse_repo(st: St, repo: RepoRef) {
     let token = st.api_token();
-    let mut prs = st.prs;
+    let mut fetch = st.fetch;
 
-    prs.set(PrList::Loading("Reading the repository…".to_string()));
+    fetch.set(Fetch::Working("Reading the repository…".to_string()));
     let head = match github::repo_head(&token, &repo).await {
         Ok(h) => h,
-        Err(e) => return prs.set(PrList::Failed(format!("{e:#}"))),
+        Err(e) => return fetch.set(Fetch::Failed(format!("{e:#}"))),
     };
 
-    prs.set(PrList::Loading("Reading the file tree…".to_string()));
+    fetch.set(Fetch::Working("Reading the file tree…".to_string()));
     // A pull request with no readable tree still has its changed files to show.
     // A repository has nothing at all, so this is where it stops — with the
     // list still on screen, rather than on an explorer that looks empty.
     let Some(tree) = tree_at(&token, &repo, &head.sha).await else {
-        return prs.set(PrList::Failed(format!(
+        return fetch.set(Fetch::Failed(format!(
             "Could not read the file list for {repo}."
         )));
     };
 
-    prs.set(PrList::Idle);
+    fetch.set(Fetch::Idle);
     st.enter_repo(RepoView {
         repo,
         branch: head.branch,
         head_sha: head.sha,
         tree,
     });
+}
+
+/// Open one commit: what it changed, diffed against the commit before it, with
+/// the repository around it as of that commit.
+///
+/// The same three steps a pull request takes — metadata, then the tree at each
+/// side — because from the explorer down it is the same thing: two commits and
+/// a list of what differs between them.
+///
+/// `pr` is the pull request it was opened out of, when it was opened out of
+/// one. It travels no further than the conversation pane, which goes on showing
+/// that pull request's description and discussion while one of its commits is
+/// being read.
+pub(super) async fn open_commit(st: St, repo: RepoRef, sha: String, pr: Option<PrHeader>) {
+    let token = st.api_token();
+    let mut fetch = st.fetch;
+
+    fetch.set(Fetch::Working("Loading commit…".to_string()));
+    let mut view = match github::load_commit(&token, &repo, &sha).await {
+        Ok(v) => v,
+        Err(e) => return fetch.set(Fetch::Failed(format!("{e:#}"))),
+    };
+    view.pr = pr;
+
+    fetch.set(Fetch::Working("Reading the file tree…".to_string()));
+    // As for a pull request: a tree that will not load costs the explorer its
+    // unchanged files, which is a smaller loss than refusing to open the diff.
+    if let Some(tree) = tree_at(&token, &repo, &view.commit.sha).await {
+        view.tree = tree;
+    }
+    // The parent's, which every left-hand side is read from. A root commit has
+    // no parent and no left-hand side to read.
+    if !view.parent_sha.is_empty()
+        && let Some(base) = tree_at(&token, &repo, &view.parent_sha).await
+    {
+        view.base_tree = base;
+    }
+
+    fetch.set(Fetch::Idle);
+    st.enter_commit(view);
 }
 
 /// Which files a commit is made of.
@@ -1109,15 +1351,15 @@ async fn tree_at(token: &str, repo: &RepoRef, sha: &str) -> Option<github::Snaps
 /// downstream of it is keyed by that commit.
 pub(super) async fn open_pr(st: St, repo: RepoRef, number: u64) {
     let token = st.api_token();
-    let mut prs = st.prs;
+    let mut fetch = st.fetch;
 
-    prs.set(PrList::Loading("Loading pull request…".to_string()));
+    fetch.set(Fetch::Working("Loading pull request…".to_string()));
     let mut detail = match github::load_pr(&token, &repo, number).await {
         Ok(d) => d,
-        Err(e) => return prs.set(PrList::Failed(format!("{e:#}"))),
+        Err(e) => return fetch.set(Fetch::Failed(format!("{e:#}"))),
     };
 
-    prs.set(PrList::Loading("Reading the file tree…".to_string()));
+    fetch.set(Fetch::Working("Reading the file tree…".to_string()));
     // A tree that will not load costs the explorer its unchanged files, which
     // is a smaller loss than refusing to open the review at all.
     if let Some(tree) = tree_at(&token, &repo, &detail.head_sha).await {
@@ -1131,7 +1373,7 @@ pub(super) async fn open_pr(st: St, repo: RepoRef, number: u64) {
         detail.base_tree = base;
     }
 
-    prs.set(PrList::Idle);
+    fetch.set(Fetch::Idle);
     st.enter_pr(detail);
 }
 

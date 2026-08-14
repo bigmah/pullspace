@@ -1,7 +1,9 @@
 //! What is open, said in the address bar — and read back out of it.
 //!
-//! `#/owner/repo/pull/123`, and `#/owner/repo` for a repository being read on
-//! its own. Behind the `#` on purpose: this is a static page, and the fragment
+//! `#/owner/repo/pull/123`, `#/owner/repo/commit/<sha>` for one commit of it,
+//! and `#/owner/repo` for a repository being read on its own — the three words
+//! github.com writes the same three things under. Behind the `#` on purpose:
+//! this is a static page, and the fragment
 //! is the one part of a URL no host ever sees, so a deep link works on GitHub
 //! Pages, on a bare directory, and under any `base_path` — with nothing to
 //! configure and no server to teach about routes.
@@ -23,9 +25,9 @@
 
 use std::path::{Path, PathBuf};
 
-use super::github::{RepoRef, parse_target, strip_host};
+use super::github::{RepoRef, parse_commit_target, parse_target, strip_host};
 
-/// Which pull request or repository is open.
+/// Which pull request, commit or repository is open.
 #[derive(Clone, Default, PartialEq, Eq, Debug)]
 pub enum Target {
     /// Nothing open — the picker.
@@ -34,6 +36,8 @@ pub enum Target {
     /// A repository being read on its own, at its default branch.
     Repo(RepoRef),
     Pr(RepoRef, u64),
+    /// One commit, diffed against the one before it.
+    Commit(RepoRef, String),
 }
 
 impl Target {
@@ -43,7 +47,7 @@ impl Target {
         match self {
             Target::Home => None,
             Target::Repo(_) => Some("blob"),
-            Target::Pr(..) => Some("files"),
+            Target::Pr(..) | Target::Commit(..) => Some("files"),
         }
     }
 }
@@ -85,6 +89,9 @@ impl Route {
             Target::Pr(repo, number) => {
                 format!("#/{}/{}/pull/{number}", repo.owner, repo.name)
             }
+            Target::Commit(repo, sha) => {
+                format!("#/{}/{}/commit/{sha}", repo.owner, repo.name)
+            }
         };
         if let Some(marker) = self.at.marker()
             && let Some(place) = &self.place
@@ -110,10 +117,16 @@ impl Route {
 pub fn parse(hash: &str) -> Route {
     let text = hash.trim().trim_start_matches('#');
     let (head, place) = split(text);
-    let at = match parse_target(&head) {
-        Some((repo, Some(number))) => Target::Pr(repo, number),
-        Some((repo, None)) => Target::Repo(repo),
-        None => Target::Home,
+    // A commit first: `owner/repo/commit/<sha>` is a repository with something
+    // after it as far as `parse_target` is concerned, so asking it first would
+    // answer with the repository every time.
+    let at = match parse_commit_target(&head) {
+        Some((repo, sha)) => Target::Commit(repo, sha),
+        None => match parse_target(&head) {
+            Some((repo, Some(number))) => Target::Pr(repo, number),
+            Some((repo, None)) => Target::Repo(repo),
+            None => Target::Home,
+        },
     };
     // A file named under nothing is a file nobody can open.
     let place = place.filter(|_| at != Target::Home);
@@ -130,6 +143,7 @@ fn split(text: &str) -> (String, Option<Place>) {
     let parts: Vec<&str> = rest.split('/').filter(|p| !p.is_empty()).collect();
     let cut = match parts.as_slice() {
         [_, _, "pull" | "pulls", _, "files", ..] => 5,
+        [_, _, "commit" | "commits", _, "files", ..] => 5,
         [_, _, "blob", ..] => 3,
         _ => return (rest.to_string(), None),
     };
@@ -321,6 +335,50 @@ mod tests {
             "#/rust-lang/rust/pull/7/files/src/ui/app.rs:L42"
         );
         assert_eq!(parse(&route.hash()), route);
+    }
+
+    #[test]
+    fn a_commit_round_trips() {
+        let sha = "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0";
+        let route = Route::to(Target::Commit(repo("rust-lang", "rust"), sha.to_string()));
+        assert_eq!(route.hash(), format!("#/rust-lang/rust/commit/{sha}"));
+        assert_eq!(parse(&route.hash()), route);
+
+        // And a line of a file inside one, which is what a link to a commit is
+        // usually made to point at.
+        let route = Route {
+            at: Target::Commit(repo("o", "r"), "abc1234".to_string()),
+            place: place("src/main.rs", Some(42)),
+        };
+        assert_eq!(route.hash(), "#/o/r/commit/abc1234/files/src/main.rs:L42");
+        assert_eq!(parse(&route.hash()), route);
+    }
+
+    /// github.com's own commit URL, which is the one anybody has to hand.
+    #[test]
+    fn a_commit_link_pasted_after_the_hash_is_read_as_one() {
+        assert_eq!(
+            parse("#https://github.com/o/r/commit/abc1234"),
+            Route::to(Target::Commit(repo("o", "r"), "abc1234".to_string()))
+        );
+    }
+
+    /// Only hex, and only enough of it — anything else after `commit/` is a
+    /// repository being read with a word after it, not a commit.
+    #[test]
+    fn something_that_is_not_a_sha_is_not_a_commit() {
+        for text in [
+            "#/o/r/commit/main",
+            "#/o/r/commit/abc",
+            "#/o/r/commit/",
+            "#/o/r/commit/zzzzzzz",
+        ] {
+            assert_eq!(
+                parse(text),
+                Route::to(Target::Repo(repo("o", "r"))),
+                "{text}"
+            );
+        }
     }
 
     #[test]

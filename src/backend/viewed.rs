@@ -78,6 +78,13 @@ pub fn pr_key(repo: &RepoRef, number: u64) -> String {
     format!("{repo}#{number}")
 }
 
+/// And one commit of it, read on its own. Apart from the pull request's own
+/// marks on purpose — the same file read in one commit and read across the
+/// whole branch are two different readings.
+pub fn commit_key(repo: &RepoRef, sha: &str) -> String {
+    format!("{repo}@{sha}")
+}
+
 fn book() -> Book {
     store::get(store::VIEWED)
         .and_then(|raw| serde_json::from_str::<Book>(&raw).ok())

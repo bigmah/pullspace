@@ -26,7 +26,12 @@ review summaries and the comments left on lines of the diff, merged into one
 list in the order they were written. Bodies are drawn as the markdown they are
 — headings, lists, tables, and fenced code with the same highlighter the viewer
 uses — through the renderer described under [Markdown](#markdown), so nothing
-anybody wrote on the pull request is ever handed to this page as markup.
+anybody wrote on the pull request is ever handed to this page as markup. Beside
+it, **COMMITS** is the other half of the same pane: every commit on the branch,
+oldest first, each one its subject line, its author and its short SHA. Clicking
+one puts *that commit's* diff in the two panes — what it changed, against the
+commit before it — while the list stays where it is, so a branch can be read the
+way it was written, one commit at a time.
 
 A panel across the bottom of the code holds the answer to "where else is this?"
 — search hits, references, definitions — and closes again once it has been read.
@@ -95,8 +100,9 @@ pasting a link goes to the hourly budget instead and keeps working meanwhile.
 
 The chip on the right of the top bar opens the GitHub panel. Type part of a
 repository name and pick it from the results — `↑`/`↓` and `Enter`, or click —
-to list its open pull requests. With the box empty it offers your own
-repositories, most recently pushed first.
+to list its pull requests: **open** to begin with, with **closed** and **all**
+a click away, merged and turned down told apart in the list. With the box empty
+it offers your own repositories, most recently pushed first.
 
 Nothing has to be typed in full: `owner/repo` works, an exact name is pinned to
 the top of the results, and pasting a pull request URL jumps straight to it.
@@ -167,6 +173,41 @@ and the tree you have expanded are kept.
 
 A repository with no open pull requests can be opened on its own, at the tip of
 its default branch — the same two panes, with nothing marked as changed.
+
+### Swapping between them
+
+A review is rarely one pull request. Once anything on a repository is open, its
+pull requests are listed alongside it, and the crumb in the top bar — the one
+naming what you are reading — drops them down: every one of them, the one you
+are on marked, and the repository itself at the foot of the list. Picking
+another swaps to it without a trip back through the picker; the list is already
+in hand, so opening the menu costs nothing. It is the same list the panel shows
+and the same open/closed/all toggle, because there is one list and two ways at
+it.
+
+### One commit of it
+
+A pull request is not always one thing to read. The **COMMITS** tab lists what
+its branch is made of, and clicking a commit opens that commit on its own: the
+files it changed, diffed against its parent, with the whole repository around
+them as of that commit — the same explorer, the same diffs, the same search and
+Go to Definition. The top bar says `commit` where it said `pull request`, and
+the row you are on is marked in the list, so the next commit is the next click.
+
+The pull request stays beside it the whole time. Its description, its discussion
+and its list of commits are facts about the pull request rather than about
+whichever commit is on screen, so none of them are re-fetched on the way in or
+thrown away — and the switcher in the top bar still has the pull request itself
+in it, one click away, whenever you want the branch as a whole again.
+
+A commit has an address like everything else — `#/owner/repo/commit/<sha>`, the
+way github.com writes it — so one can be linked to, reloaded into, and reached
+by pasting a commit URL into the picker. Opened that way there is no pull
+request to show beside it, and the pane says nothing about one.
+
+Two things a commit view will not show, because GitHub does not answer with
+them: the changed files of a **merge commit**, and anything past the **300th**
+file of a very large one. Both say so in the top bar rather than looking empty.
 
 ## The local copy
 

@@ -9,8 +9,10 @@
 
 use dioxus::prelude::*;
 
+use crate::backend::github::RepoRef;
+
 use super::app::St;
-use super::github::{PickerBody, PickerFoot, form_open};
+use super::github::{PickerBody, PickerFoot, browse_repo, form_open};
 
 /// What pullspace is, in the three claims that pick it out: the shape of the
 /// review, the conversation beside it, and the absence of a server.
@@ -57,6 +59,30 @@ pub fn Landing() -> Element {
                 div { class: "landing-hero",
                     div { class: "landing-logo", "pullspace" }
                     div { class: "landing-tag", "Read pull requests the way you read code." }
+                    // The demo: one click and no decisions, for whoever has no
+                    // repository in mind yet. It opens this app's own source —
+                    // the one repository every copy of pullspace can vouch
+                    // for, and reading it is the demo.
+                    button {
+                        class: "landing-try",
+                        title: "Open bigmah/pullspace at its default branch — this app, reading its own source",
+                        onclick: move |_| {
+                            let repo = RepoRef {
+                                owner: "bigmah".to_string(),
+                                name: "pullspace".to_string(),
+                            };
+                            // The picker's box follows, as it does for a link
+                            // arrived on: the panel opened later should offer
+                            // this repository's pull requests rather than a
+                            // blank box.
+                            let mut input = st.repo_input;
+                            input.set(repo.to_string());
+                            // Root scope: what loads replaces the page this
+                            // button is on.
+                            spawn_forever(browse_repo(st, repo));
+                        },
+                        "Try it on pullspace's own source →"
+                    }
                 }
                 PickerBody { autofocus: !showing }
                 div { class: "landing-points",

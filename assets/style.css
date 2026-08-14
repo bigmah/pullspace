@@ -2233,6 +2233,19 @@ button { font-family: inherit; user-select: none; }
 
 .landing-tag { color: var(--fg-dim); font-size: 14px; margin-top: 8px; }
 
+/* The demo, as a line rather than a second filled button: the search below is
+   still the way in for anyone who arrived knowing what to open. */
+.landing-try {
+  margin-top: 14px;
+  background: none;
+  border: none;
+  color: var(--accent);
+  font-size: 12.5px;
+  cursor: pointer;
+}
+
+.landing-try:hover { text-decoration: underline; }
+
 /* The picker at page scale. The section chrome is the panel's; here the page
    is the panel, so the ruled lines go and the box grows into a marquee. */
 .landing-col .ghsection { border-bottom: none; padding: 10px 0; }

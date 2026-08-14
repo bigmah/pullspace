@@ -24,9 +24,12 @@ pub fn TopBar() -> Element {
     let st = use_context::<St>();
     let mut gh_open = st.gh_open;
 
-    let workspace = st.workspace.read().clone();
+    // One read of the workspace, and only the crumbs leave it. The whole
+    // workspace — two tree snapshots and every changed file — is not something
+    // to clone here: this bar re-renders on every clone progress tick.
+    let workspace = st.workspace.read();
     // What is on screen, said in the same place whatever it is.
-    let (ws_label, ws_cls, ws_why) = match &workspace {
+    let (ws_label, ws_cls, ws_why) = match &*workspace {
         Workspace::Empty => (
             "nothing open",
             "wschip local",
@@ -44,10 +47,15 @@ pub fn TopBar() -> Element {
         ),
     };
 
-    let pr = workspace.pr().cloned();
-    let browsing = workspace.repo().cloned();
+    let pr = workspace
+        .pr()
+        .map(|p| (format!("{} #{}", p.repo, p.number), p.title.clone(), p.html_url.clone()));
+    let browsing = workspace
+        .repo()
+        .map(|v| (v.repo.to_string(), v.branch.clone(), v.html_url()));
     let pr_target = workspace.pr().map(|p| (p.repo.clone(), p.number));
     let repo_target = workspace.repo().map(|v| v.repo.clone());
+    let ws_open = workspace.is_open();
 
     let (reload_note, reload_error) = match &*st.prs.read() {
         PrList::Loading(note) => (Some(note.clone()), None),
@@ -55,7 +63,7 @@ pub fn TopBar() -> Element {
         _ => (None, None),
     };
     let reloading = reload_note.is_some();
-    let refresh_title = match &workspace {
+    let refresh_title = match &*workspace {
         Workspace::Pr(_) => "Reload this pull request from GitHub",
         Workspace::Repo(_) => "Reload this repository from GitHub",
         Workspace::Empty => "Nothing open to reload",
@@ -103,7 +111,7 @@ pub fn TopBar() -> Element {
         "partial tree",
         "This repository is past GitHub's tree limit, so some files are missing from the explorer",
     );
-    let warn = match &workspace {
+    let warn = match &*workspace {
         Workspace::Pr(pr) => {
             if pr.truncated {
                 Some((
@@ -140,18 +148,19 @@ pub fn TopBar() -> Element {
     // Anonymous browsing works, and works well for public repositories — but
     // the sixty-an-hour limit is the thing people hit without knowing why, so
     // it is named here rather than in an error later.
-    let anon = matches!(&*st.account.read(), Account::SignedOut) && workspace.is_open();
+    let anon = matches!(&*st.account.read(), Account::SignedOut) && ws_open;
+    drop(workspace);
 
     rsx! {
         div { class: "{bar_cls}",
             span { class: "brand", "pullspace" }
             span { class: "{ws_cls}", title: "{ws_why}", "{ws_label}" }
-            if let Some(pr) = pr {
+            if let Some((prnum, title, url)) = pr {
                 span {
                     class: "prcrumb",
-                    title: "{pr.repo} #{pr.number} — {pr.title}",
-                    span { class: "prnum", "{pr.repo} #{pr.number}" }
-                    span { class: "prcrumbtitle", "{pr.title}" }
+                    title: "{prnum} — {title}",
+                    span { class: "prnum", "{prnum}" }
+                    span { class: "prcrumbtitle", "{title}" }
                 }
                 if let Some((label, why)) = warn {
                     span { class: "prwarn", title: "{why}", "{label}" }
@@ -165,7 +174,7 @@ pub fn TopBar() -> Element {
                 button {
                     class: "iconbtn",
                     title: "Open on github.com",
-                    onclick: move |_| open_browser(&pr.html_url),
+                    onclick: move |_| open_browser(&url),
                     "↗"
                 }
                 button {
@@ -175,29 +184,26 @@ pub fn TopBar() -> Element {
                     span { class: "closex", "✕" }
                     "close PR"
                 }
-            } else if let Some(view) = browsing {
+            } else if let Some((repo, branch, url)) = browsing {
                 span {
                     class: "prcrumb",
-                    title: "{view.repo} at {view.branch} — no pull request, just the code",
-                    span { class: "prnum", "{view.repo}" }
-                    span { class: "prcrumbtitle", "@ {view.branch}" }
+                    title: "{repo} at {branch} — no pull request, just the code",
+                    span { class: "prnum", "{repo}" }
+                    span { class: "prcrumbtitle", "@ {branch}" }
                 }
                 if let Some((label, why)) = warn {
                     span { class: "prwarn", title: "{why}", "{label}" }
                 }
-                if let Some((note, why)) = status.clone() {
+                if let Some((note, why)) = status {
                     span { class: "prwarm", title: "{why}", "{note}" }
                 }
-                if let Some(e) = reload_error.clone() {
+                if let Some(e) = reload_error {
                     span { class: "prwarn", title: "{e}", "reload failed" }
                 }
                 button {
                     class: "iconbtn",
                     title: "Open on github.com",
-                    onclick: {
-                        let url = view.html_url();
-                        move |_| open_browser(&url)
-                    },
+                    onclick: move |_| open_browser(&url),
                     "↗"
                 }
                 button {
@@ -271,7 +277,6 @@ fn SearchBox() -> Element {
         "searchbox"
     };
     let why = error
-        .clone()
         .unwrap_or_else(|| "Search every file of this repository  (⌘F)".to_string());
     let index_label = st.index.read().label();
 

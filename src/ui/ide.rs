@@ -319,7 +319,7 @@ pub fn goto_def(st: St, name: &str) {
         // A single answer is not a result to present, it is somewhere to be.
         1 => {
             let sym = &found[0];
-            st.open_at(sym.path.clone(), sym.line);
+            st.open_at(sym.path.to_path_buf(), sym.line);
             show(&st, Panel::Hidden);
         }
         _ => show(

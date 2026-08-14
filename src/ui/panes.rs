@@ -4,8 +4,7 @@
 //! The sizes are published as CSS custom properties on the app's root element
 //! and read back by the stylesheet, so moving a divider re-renders exactly one
 //! short template — not the file tree, and not the ten thousand lines of code
-//! next to it. On the desktop backend every DOM event costs a round trip into
-//! Rust, so what a `mousemove` touches is the whole cost of a drag.
+//! next to it. What a `mousemove` touches is the whole cost of a drag.
 //!
 //! A drag is measured from where the press landed rather than from the pointer
 //! alone, so the divider stays exactly under the cursor however far it travels

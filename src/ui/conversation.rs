@@ -8,7 +8,7 @@
 use dioxus::prelude::*;
 
 use crate::backend::auth::open_browser;
-use crate::backend::github::{self, Comment, CommentKind, PrDetail, RepoRef};
+use crate::backend::github::{self, Comment, CommentKind, RepoRef};
 
 use super::app::{Conversation, St};
 use super::panes::{Edge, Splitter};
@@ -65,13 +65,29 @@ pub fn ConvPane() -> Element {
     let st = use_context::<St>();
     // A repository browsed on its own has no conversation to show, and the
     // local working tree certainly does not.
-    let Some(pr) = st.workspace.read().pr().cloned() else {
+    //
+    // Only the handful of fields the pane draws leave the guard — the whole
+    // `PrDetail` carries two tree snapshots, which is not something to clone
+    // on every fold and unfold of the pane.
+    let held = st.workspace.read();
+    let Some(pr) = held.pr() else {
         return rsx! {};
     };
+    let desc = Desc {
+        author: pr.author.clone(),
+        number: pr.number,
+        draft: pr.draft,
+        title: pr.title.clone(),
+        body: pr.body.trim().to_string(),
+        html_url: pr.html_url.clone(),
+    };
+    let repo = pr.repo.clone();
+    let number = pr.number;
+    drop(held);
     let mut open = st.conv_open;
-    let conv = st.conv.read().clone();
+    let conv = st.conv.read();
 
-    let count = match &conv {
+    let count = match &*conv {
         Conversation::Ready(thread) => thread.comments.len(),
         _ => 0,
     };
@@ -93,11 +109,9 @@ pub fn ConvPane() -> Element {
         };
     }
 
-    let repo = pr.repo.clone();
-    let number = pr.number;
-    let reloading = conv == Conversation::Loading;
+    let reloading = matches!(&*conv, Conversation::Loading);
 
-    let body = match conv {
+    let body = match &*conv {
         Conversation::Loading => rsx! {
             div { class: "panel-empty", "Loading the conversation…" }
         },
@@ -148,23 +162,36 @@ pub fn ConvPane() -> Element {
                 }
             }
             div { class: "conv-body",
-                Description { pr }
+                Description { desc }
                 {body}
             }
         }
     }
 }
 
+/// What the description card needs of a pull request, and nothing else —
+/// small enough that the prop comparison a re-render starts with is a few
+/// string compares rather than a walk of two tree snapshots.
+#[derive(Clone, PartialEq)]
+struct Desc {
+    author: String,
+    number: u64,
+    draft: bool,
+    title: String,
+    /// Already trimmed.
+    body: String,
+    html_url: String,
+}
+
 #[component]
-fn Description(pr: PrDetail) -> Element {
-    let body = pr.body.trim().to_string();
-    let url = pr.html_url.clone();
+fn Description(desc: Desc) -> Element {
+    let url = desc.html_url.clone();
     rsx! {
         div { class: "convitem convdesc",
             div { class: "convmeta",
-                span { class: "convwho", "{pr.author}" }
-                span { class: "convkind", "opened #{pr.number}" }
-                if pr.draft {
+                span { class: "convwho", "{desc.author}" }
+                span { class: "convkind", "opened #{desc.number}" }
+                if desc.draft {
                     span { class: "prdraft", "draft" }
                 }
                 span { class: "spacer" }
@@ -175,11 +202,11 @@ fn Description(pr: PrDetail) -> Element {
                     "↗"
                 }
             }
-            div { class: "convtitle", "{pr.title}" }
-            if body.is_empty() {
+            div { class: "convtitle", "{desc.title}" }
+            if desc.body.is_empty() {
                 div { class: "convnone", "No description." }
             } else {
-                div { class: "convtext", "{body}" }
+                div { class: "convtext", "{desc.body}" }
             }
         }
     }

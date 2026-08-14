@@ -61,10 +61,14 @@ impl FileDiff {
 }
 
 /// One row of a side-by-side view: removed line on the left, added on the right.
-#[derive(Clone, PartialEq)]
-pub struct Row {
-    pub left: Option<Line>,
-    pub right: Option<Line>,
+///
+/// Borrowed rather than owned: the split view rebuilds its rows on every
+/// render, and a row that carried copies of its lines would be copying every
+/// segment of the visible diff each time.
+#[derive(Clone, Copy, PartialEq)]
+pub struct Row<'a> {
+    pub left: Option<&'a Line>,
+    pub right: Option<&'a Line>,
 }
 
 pub fn diff_file(old: &str, new: &str) -> FileDiff {
@@ -234,40 +238,40 @@ fn header(lines: &[Line]) -> String {
 }
 
 /// Pair up runs of deletions and additions into side-by-side rows.
-pub fn to_rows(lines: &[Line]) -> Vec<Row> {
+pub fn to_rows(lines: &[Line]) -> Vec<Row<'_>> {
     let mut rows = Vec::new();
     let mut i = 0;
     while i < lines.len() {
         match lines[i].kind {
             LineKind::Ctx => {
                 rows.push(Row {
-                    left: Some(lines[i].clone()),
-                    right: Some(lines[i].clone()),
+                    left: Some(&lines[i]),
+                    right: Some(&lines[i]),
                 });
                 i += 1;
             }
             LineKind::Del => {
-                let mut dels = Vec::new();
+                let dels_from = i;
                 while i < lines.len() && lines[i].kind == LineKind::Del {
-                    dels.push(lines[i].clone());
                     i += 1;
                 }
-                let mut adds = Vec::new();
+                let adds_from = i;
                 while i < lines.len() && lines[i].kind == LineKind::Add {
-                    adds.push(lines[i].clone());
                     i += 1;
                 }
+                let dels = &lines[dels_from..adds_from];
+                let adds = &lines[adds_from..i];
                 for k in 0..dels.len().max(adds.len()) {
                     rows.push(Row {
-                        left: dels.get(k).cloned(),
-                        right: adds.get(k).cloned(),
+                        left: dels.get(k),
+                        right: adds.get(k),
                     });
                 }
             }
             LineKind::Add => {
                 rows.push(Row {
                     left: None,
-                    right: Some(lines[i].clone()),
+                    right: Some(&lines[i]),
                 });
                 i += 1;
             }

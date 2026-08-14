@@ -13,10 +13,11 @@
 //! nearly always; across a repository it is a very good guess, delivered
 //! instantly, on a machine that has no compiler on it.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
+use std::rc::Rc;
 use std::sync::OnceLock;
 
-use regex::Regex;
+use regex::{Regex, RegexSet};
 
 /// One definition.
 #[derive(Clone, PartialEq, Debug)]
@@ -24,8 +25,9 @@ pub struct Symbol {
     pub name: String,
     /// `fn`, `struct`, `class` — whatever the language calls it.
     pub kind: &'static str,
-    /// Repo-relative.
-    pub path: PathBuf,
+    /// Repo-relative. Shared rather than owned: an index holds tens of
+    /// thousands of these, nearly all naming the same few thousand files.
+    pub path: Rc<Path>,
     /// 1-based.
     pub line: usize,
     /// The defining line, trimmed — enough to tell two `new`s apart in a list.
@@ -35,6 +37,21 @@ pub struct Symbol {
 struct LangSpec {
     extensions: &'static [&'static str],
     patterns: Vec<(&'static str, Regex)>,
+    /// The same patterns as one set, so a line that defines nothing — nearly
+    /// every line — is turned away in a single pass instead of one per pattern.
+    set: RegexSet,
+}
+
+impl LangSpec {
+    fn new(extensions: &'static [&'static str], patterns: Vec<(&'static str, Regex)>) -> Self {
+        let set = RegexSet::new(patterns.iter().map(|(_, re)| re.as_str()))
+            .expect("the patterns above just compiled individually");
+        LangSpec {
+            extensions,
+            patterns,
+            set,
+        }
+    }
 }
 
 fn langs() -> &'static Vec<LangSpec> {
@@ -42,9 +59,9 @@ fn langs() -> &'static Vec<LangSpec> {
     LANGS.get_or_init(|| {
         let re = |s: &str| Regex::new(s).expect("bad symbol pattern");
         vec![
-            LangSpec {
-                extensions: &["rs"],
-                patterns: vec![
+            LangSpec::new(
+                &["rs"],
+                vec![
                     ("fn", re(r#"^\s*(?:pub(?:\([^)]*\))?\s+)?(?:default\s+)?(?:const\s+)?(?:async\s+)?(?:unsafe\s+)?(?:extern\s+"[^"]*"\s+)?fn\s+([A-Za-z_][A-Za-z0-9_]*)"#)),
                     ("struct", re(r"^\s*(?:pub(?:\([^)]*\))?\s+)?struct\s+([A-Za-z_][A-Za-z0-9_]*)")),
                     ("enum", re(r"^\s*(?:pub(?:\([^)]*\))?\s+)?enum\s+([A-Za-z_][A-Za-z0-9_]*)")),
@@ -54,10 +71,10 @@ fn langs() -> &'static Vec<LangSpec> {
                     ("const", re(r"^\s*(?:pub(?:\([^)]*\))?\s+)?(?:const|static)\s+([A-Za-z_][A-Za-z0-9_]*)\s*:")),
                     ("macro", re(r"^\s*macro_rules!\s+([A-Za-z_][A-Za-z0-9_]*)")),
                 ],
-            },
-            LangSpec {
-                extensions: &["js", "jsx", "ts", "tsx", "mjs", "cjs", "mts", "cts"],
-                patterns: vec![
+            ),
+            LangSpec::new(
+                &["js", "jsx", "ts", "tsx", "mjs", "cjs", "mts", "cts"],
+                vec![
                     ("fn", re(r"^\s*(?:export\s+)?(?:default\s+)?(?:async\s+)?function\s*\*?\s*([A-Za-z_$][A-Za-z0-9_$]*)")),
                     ("class", re(r"^\s*(?:export\s+)?(?:default\s+)?(?:abstract\s+)?class\s+([A-Za-z_$][A-Za-z0-9_$]*)")),
                     ("var", re(r"^\s*(?:export\s+)?(?:const|let|var)\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*=")),
@@ -65,39 +82,39 @@ fn langs() -> &'static Vec<LangSpec> {
                     ("type", re(r"^\s*(?:export\s+)?type\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*=")),
                     ("enum", re(r"^\s*(?:export\s+)?(?:const\s+)?enum\s+([A-Za-z_$][A-Za-z0-9_$]*)")),
                 ],
-            },
-            LangSpec {
-                extensions: &["py", "pyi"],
-                patterns: vec![
+            ),
+            LangSpec::new(
+                &["py", "pyi"],
+                vec![
                     ("fn", re(r"^\s*(?:async\s+)?def\s+([A-Za-z_][A-Za-z0-9_]*)")),
                     ("class", re(r"^\s*class\s+([A-Za-z_][A-Za-z0-9_]*)")),
                 ],
-            },
-            LangSpec {
-                extensions: &["go"],
-                patterns: vec![
+            ),
+            LangSpec::new(
+                &["go"],
+                vec![
                     ("fn", re(r"^func\s+(?:\([^)]*\)\s*)?([A-Za-z_][A-Za-z0-9_]*)")),
                     ("type", re(r"^type\s+([A-Za-z_][A-Za-z0-9_]*)")),
                     ("var", re(r"^(?:var|const)\s+([A-Za-z_][A-Za-z0-9_]*)")),
                 ],
-            },
-            LangSpec {
-                extensions: &["rb"],
-                patterns: vec![
+            ),
+            LangSpec::new(
+                &["rb"],
+                vec![
                     ("fn", re(r"^\s*def\s+(?:self\.)?([A-Za-z_][A-Za-z0-9_?!]*)")),
                     ("class", re(r"^\s*(?:class|module)\s+([A-Za-z_][A-Za-z0-9_]*)")),
                 ],
-            },
-            LangSpec {
-                extensions: &["java", "kt", "kts", "swift", "cs", "scala"],
-                patterns: vec![
+            ),
+            LangSpec::new(
+                &["java", "kt", "kts", "swift", "cs", "scala"],
+                vec![
                     ("class", re(r"^\s*(?:public\s+|private\s+|internal\s+|open\s+|final\s+|abstract\s+|sealed\s+|static\s+)*(?:class|interface|enum|struct|protocol|object|record)\s+([A-Za-z_][A-Za-z0-9_]*)")),
                     ("fn", re(r"^\s*(?:public\s+|private\s+|protected\s+|internal\s+|open\s+|override\s+|static\s+|final\s+|async\s+)*func?\s+([A-Za-z_][A-Za-z0-9_]*)\s*[(<]")),
                 ],
-            },
-            LangSpec {
-                extensions: &["c", "h", "cc", "cpp", "cxx", "hpp", "hh"],
-                patterns: vec![
+            ),
+            LangSpec::new(
+                &["c", "h", "cc", "cpp", "cxx", "hpp", "hh"],
+                vec![
                     ("class", re(r"^\s*(?:class|struct|union)\s+([A-Za-z_][A-Za-z0-9_]*)\s*(?:final\s*)?[:{]")),
                     ("type", re(r"^\s*(?:typedef\s+.*\s|using\s+)([A-Za-z_][A-Za-z0-9_]*)\s*[=;]")),
                     ("macro", re(r"^\s*#\s*define\s+([A-Za-z_][A-Za-z0-9_]*)")),
@@ -105,28 +122,28 @@ fn langs() -> &'static Vec<LangSpec> {
                     // the same line, or every prototype in every header is one.
                     ("fn", re(r"^[A-Za-z_][A-Za-z0-9_ \*&:<>,]*\s[\*&]?([A-Za-z_][A-Za-z0-9_]*)\s*\([^;]*\)\s*(?:const\s*)?\{")),
                 ],
-            },
-            LangSpec {
-                extensions: &["php"],
-                patterns: vec![
+            ),
+            LangSpec::new(
+                &["php"],
+                vec![
                     ("fn", re(r"^\s*(?:(?:public|private|protected|static|final|abstract)\s+)*function\s+&?([A-Za-z_][A-Za-z0-9_]*)")),
                     ("class", re(r"^\s*(?:abstract\s+|final\s+)*(?:class|interface|trait|enum)\s+([A-Za-z_][A-Za-z0-9_]*)")),
                 ],
-            },
-            LangSpec {
-                extensions: &["sh", "bash", "zsh"],
-                patterns: vec![
+            ),
+            LangSpec::new(
+                &["sh", "bash", "zsh"],
+                vec![
                     ("fn", re(r"^\s*(?:function\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*\(\s*\)\s*\{")),
                 ],
-            },
-            LangSpec {
-                extensions: &["sql"],
-                patterns: vec![
+            ),
+            LangSpec::new(
+                &["sql"],
+                vec![
                     ("table", re(r"(?i)^\s*create\s+(?:or\s+replace\s+)?(?:temp(?:orary)?\s+)?table\s+(?:if\s+not\s+exists\s+)?([A-Za-z_][A-Za-z0-9_.]*)")),
                     ("view", re(r"(?i)^\s*create\s+(?:or\s+replace\s+)?view\s+([A-Za-z_][A-Za-z0-9_.]*)")),
                     ("fn", re(r"(?i)^\s*create\s+(?:or\s+replace\s+)?(?:function|procedure)\s+([A-Za-z_][A-Za-z0-9_.]*)")),
                 ],
-            },
+            ),
         ]
     })
 }
@@ -146,18 +163,22 @@ pub fn scan_file(path: &Path, text: &str, out: &mut Vec<Symbol>) {
     let Some(spec) = path.extension().and_then(|e| e.to_str()).and_then(spec_for) else {
         return;
     };
+    let path: Rc<Path> = Rc::from(path);
     for (i, line) in text.lines().enumerate() {
-        for (kind, re) in &spec.patterns {
-            if let Some(m) = re.captures(line).and_then(|c| c.get(1)) {
-                out.push(Symbol {
-                    name: m.as_str().to_string(),
-                    kind,
-                    path: path.to_path_buf(),
-                    line: i + 1,
-                    preview: line.trim().to_string(),
-                });
-                break;
-            }
+        // `matches` reports in pattern order, so the lowest index is the same
+        // winner the old one-regex-at-a-time loop picked.
+        let Some(hit) = spec.set.matches(line).iter().next() else {
+            continue;
+        };
+        let (kind, re) = &spec.patterns[hit];
+        if let Some(m) = re.captures(line).and_then(|c| c.get(1)) {
+            out.push(Symbol {
+                name: m.as_str().to_string(),
+                kind,
+                path: Rc::clone(&path),
+                line: i + 1,
+                preview: line.trim().to_string(),
+            });
         }
     }
 }
@@ -170,10 +191,8 @@ pub fn scan_file(path: &Path, text: &str, out: &mut Vec<Symbol>) {
 /// opening a list of eleven.
 pub fn find_definitions(index: &[Symbol], name: &str, near: Option<&Path>) -> Vec<Symbol> {
     let mut found: Vec<Symbol> = index.iter().filter(|s| s.name == name).cloned().collect();
-    found.sort_by_key(|s| {
-        let here = near.is_some_and(|p| p == s.path);
-        (!here, s.path.clone(), s.line)
-    });
+    let here = |s: &Symbol| near.is_some_and(|p| p == s.path.as_ref());
+    found.sort_by(|a, b| (!here(a), &a.path, a.line).cmp(&(!here(b), &b.path, b.line)));
     found
 }
 
@@ -281,32 +300,32 @@ mod tests {
             Symbol {
                 name: "new".into(),
                 kind: "fn",
-                path: "a/z.rs".into(),
+                path: Path::new("a/z.rs").into(),
                 line: 9,
                 preview: String::new(),
             },
             Symbol {
                 name: "new".into(),
                 kind: "fn",
-                path: "b/y.rs".into(),
+                path: Path::new("b/y.rs").into(),
                 line: 3,
                 preview: String::new(),
             },
             Symbol {
                 name: "other".into(),
                 kind: "fn",
-                path: "b/y.rs".into(),
+                path: Path::new("b/y.rs").into(),
                 line: 1,
                 preview: String::new(),
             },
         ];
         let found = find_definitions(&index, "new", Some(Path::new("b/y.rs")));
         assert_eq!(found.len(), 2);
-        assert_eq!(found[0].path, PathBuf::from("b/y.rs"));
+        assert_eq!(&*found[0].path, Path::new("b/y.rs"));
 
         // With nowhere in particular to be near, it is path order.
         let found = find_definitions(&index, "new", None);
-        assert_eq!(found[0].path, PathBuf::from("a/z.rs"));
+        assert_eq!(&*found[0].path, Path::new("a/z.rs"));
         assert!(find_definitions(&index, "missing", None).is_empty());
     }
 }

@@ -123,15 +123,14 @@ fn hit_list(st: St, hits: &[Hit]) -> Element {
     if hits.is_empty() {
         return rsx! { div { class: "panel-empty", "No results." } };
     }
-    let hits = hits.to_vec();
     rsx! {
-        for (i, hit) in hits.into_iter().enumerate() {
+        for (i, hit) in hits.iter().enumerate() {
             {hit_row(st, i, hit)}
         }
     }
 }
 
-fn hit_row(st: St, i: usize, hit: Hit) -> Element {
+fn hit_row(st: St, i: usize, hit: &Hit) -> Element {
     let loc = scan::at_line(&hit.path, hit.line);
     let path = hit.path.clone();
     let line = hit.line;
@@ -154,7 +153,7 @@ fn hit_row(st: St, i: usize, hit: Hit) -> Element {
 /// them straight off `find_iter`. Anything else is ignored rather than
 /// trusted: this is one row of a search panel, not somewhere to panic.
 fn marked(text: &str, marks: &[(usize, usize)]) -> Element {
-    let mut parts: Vec<(bool, String)> = Vec::new();
+    let mut parts: Vec<(bool, &str)> = Vec::new();
     let mut at = 0;
     for &(start, end) in marks {
         if start < at
@@ -165,13 +164,13 @@ fn marked(text: &str, marks: &[(usize, usize)]) -> Element {
             continue;
         }
         if start > at {
-            parts.push((false, text[at..start].to_string()));
+            parts.push((false, &text[at..start]));
         }
-        parts.push((true, text[start..end].to_string()));
+        parts.push((true, &text[start..end]));
         at = end;
     }
     if at < text.len() {
-        parts.push((false, text[at..].to_string()));
+        parts.push((false, &text[at..]));
     }
     rsx! {
         for (i, (hit, part)) in parts.into_iter().enumerate() {
@@ -185,17 +184,16 @@ fn marked(text: &str, marks: &[(usize, usize)]) -> Element {
 }
 
 fn sym_list(st: St, syms: &[Symbol]) -> Element {
-    let syms = syms.to_vec();
     rsx! {
-        for (i, sym) in syms.into_iter().enumerate() {
+        for (i, sym) in syms.iter().enumerate() {
             {sym_row(st, i, sym)}
         }
     }
 }
 
-fn sym_row(st: St, i: usize, sym: Symbol) -> Element {
+fn sym_row(st: St, i: usize, sym: &Symbol) -> Element {
     let loc = scan::at_line(&sym.path, sym.line);
-    let path: PathBuf = sym.path.clone();
+    let path: PathBuf = sym.path.to_path_buf();
     let line = sym.line;
     rsx! {
         div {
@@ -223,7 +221,7 @@ fn peek_body(st: St, syms: &[Symbol], at: usize, body: &Peek) -> Element {
             }
         },
         Peek::Ready { start, lines } => {
-            let path = sym.path.clone();
+            let path = sym.path.to_path_buf();
             let line = sym.line;
             let start = *start;
             rsx! {
@@ -243,9 +241,8 @@ fn peek_body(st: St, syms: &[Symbol], at: usize, body: &Peek) -> Element {
 }
 
 fn peek_lines(lines: &[Vec<Span>], start: usize, defining: usize) -> Element {
-    let lines = lines.to_vec();
     rsx! {
-        for (i, spans) in lines.into_iter().enumerate() {
+        for (i, spans) in lines.iter().enumerate() {
             {
                 let no = start + i;
                 let cls = if no == defining { "cl peekdef" } else { "cl" };
@@ -253,7 +250,7 @@ fn peek_lines(lines: &[Vec<Span>], start: usize, defining: usize) -> Element {
                     div { key: "{no}", class: "{cls}",
                         span { class: "ln", "{no}" }
                         span { class: "lc",
-                            for (j, sp) in spans.into_iter().enumerate() {
+                            for (j, sp) in spans.iter().enumerate() {
                                 span { key: "{j}", style: "color:{sp.color}", "{sp.text}" }
                             }
                         }

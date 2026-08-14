@@ -142,7 +142,7 @@ pub fn ensure_hover(st: St, rel: &Path) {
 pub fn changed_jobs(pr: &PrDetail) -> Vec<FetchJob> {
     pr.files
         .iter()
-        .map(|f| FetchJob::new(pr, &f.path))
+        .map(|f| FetchJob::for_changed(pr, f))
         .collect()
 }
 

@@ -34,9 +34,8 @@ enum SourceLines {
     Plain(Vec<String>),
 }
 
-/// What the viewer has to show right now. Local files resolve synchronously on
-/// the desktop; pull request files — and, in a browser, every file — arrive
-/// over the network, hence `Loading`/`Failed`.
+/// What the viewer has to show right now. Every file arrives over the network
+/// or off the browser's filesystem, hence `Loading`/`Failed`.
 #[derive(Clone, PartialEq)]
 enum Pane {
     Empty,
@@ -153,12 +152,12 @@ pub fn Viewer() -> Element {
         Some(markdown::parse(text))
     });
 
-    // Draw the page, wherever the service layer draws it, and only while the
-    // preview is the mode being asked for. Keyed on the file's own text, so a
-    // reload that changes it redraws and one that does not costs nothing.
-    let preview = use_resource(move || {
+    // The page to draw, and only while the preview is the mode being asked
+    // for. Memoised on the file's own text, so a reload that changes it
+    // redraws and one that does not costs nothing.
+    let preview = use_memo(move || {
         let wanted = *st.view_mode.read() == ViewMode::Preview;
-        let source = match &*data.read() {
+        match &*data.read() {
             Pane::Ready { rel, old, new } if wanted && is_html(rel) => match (new, old) {
                 (FileContent::Text(t), _) => Some(t.clone()),
                 // Deleted by the PR: draw the version that is going away.
@@ -166,10 +165,6 @@ pub fn Viewer() -> Element {
                 _ => None,
             },
             _ => None,
-        };
-        async move {
-            let text = source?;
-            Some(text)
         }
     });
 
@@ -191,25 +186,28 @@ pub fn Viewer() -> Element {
     // Loading and failure replace the file, not the window around it: a header
     // that blinks out and back every time an uncached file is clicked is worse
     // jank than the wait it is reporting.
-    let (rel, new_side, pending) = match &*guard {
+    //
+    // Only whether the new side is absent leaves this match, not the side
+    // itself — the viewer renders often, and the one question the header asks
+    // is not worth cloning a file's contents to answer.
+    let (rel, new_absent, pending) = match &*guard {
         Pane::Empty => return rsx! { Welcome {} },
         Pane::Loading => (
             st.open.read().clone().unwrap_or_default(),
-            FileContent::Absent,
+            true,
             Some(rsx! { div { class: "notice", "Loading…" } }),
         ),
         Pane::Failed(e) => (
             st.open.read().clone().unwrap_or_default(),
-            FileContent::Absent,
+            true,
             Some(rsx! { div { class: "notice error", "{e}" } }),
         ),
-        Pane::Ready { rel, new, .. } => (rel.clone(), new.clone(), None),
+        Pane::Ready { rel, new, .. } => (rel.clone(), *new == FileContent::Absent, None),
     };
     let settled = pending.is_none();
 
     let status = st.statuses.read().get(&rel).copied();
-    let deleted_note =
-        settled && new_side == FileContent::Absent && status == Some(ChangeKind::Deleted);
+    let deleted_note = settled && new_absent && status == Some(ChangeKind::Deleted);
     let prose = markdown::is_markdown(&rel);
     let previewable = is_html(&rel) || prose;
     // Only changed files have a diff to show, and only HTML has a page to draw.
@@ -254,11 +252,8 @@ pub fn Viewer() -> Element {
             None => rsx! { div { class: "notice", "Nothing to render — this file has no text." } },
         },
         ViewMode::Preview => match &*preview.read() {
-            None => rsx! { div { class: "notice", "Drawing the page…" } },
-            Some(None) => {
-                rsx! { div { class: "notice", "Nothing to draw — this file has no text." } }
-            }
-            Some(Some(html)) => render_preview(html),
+            None => rsx! { div { class: "notice", "Nothing to draw — this file has no text." } },
+            Some(html) => render_preview(html),
         },
     };
 
@@ -339,7 +334,7 @@ pub fn Viewer() -> Element {
                 }
                 span { class: "spacer" }
                 if markable {
-                    ViewedBox { rel: rel.clone(), viewed }
+                    ViewedBox { rel, viewed }
                 }
                 if step_total > 0 {
                     FileStep { at: step_at, total: step_total }
@@ -564,10 +559,6 @@ fn marked(text: &str, color: Option<&str>, mark: Option<&str>) -> Element {
     if !parts.iter().any(|(hit, _)| *hit) {
         return rsx! { span { style: "{style}", "{text}" } };
     }
-    let parts: Vec<(bool, String)> = parts
-        .into_iter()
-        .map(|(hit, s)| (hit, s.to_string()))
-        .collect();
     rsx! {
         for (i, (hit, part)) in parts.into_iter().enumerate() {
             if hit {
@@ -580,16 +571,14 @@ fn marked(text: &str, color: Option<&str>, mark: Option<&str>) -> Element {
 }
 
 fn render_colored(lines: &[Vec<Span>], mark: Option<&str>) -> Element {
-    let lines = lines.to_vec();
-    let mark = mark.map(str::to_string);
     rsx! {
         div { class: "code",
-            for (i, spans) in lines.into_iter().enumerate() {
+            for (i, spans) in lines.iter().enumerate() {
                 div { class: "cl", id: "L{i + 1}",
                     span { class: "ln", "{i + 1}" }
                     span { class: "lc",
                         for sp in spans {
-                            {marked(&sp.text, Some(&sp.color), mark.as_deref())}
+                            {marked(&sp.text, Some(&sp.color), mark)}
                         }
                     }
                 }
@@ -634,14 +623,12 @@ fn render_preview(html: &str) -> Element {
 }
 
 fn render_plain(lines: &[String], mark: Option<&str>) -> Element {
-    let lines = lines.to_vec();
-    let mark = mark.map(str::to_string);
     rsx! {
         div { class: "code",
-            for (i, text) in lines.into_iter().enumerate() {
+            for (i, text) in lines.iter().enumerate() {
                 div { class: "cl", id: "L{i + 1}",
                     span { class: "ln", "{i + 1}" }
-                    span { class: "lc", {marked(&text, None, mark.as_deref())} }
+                    span { class: "lc", {marked(text, None, mark)} }
                 }
             }
         }
@@ -666,14 +653,12 @@ fn num(no: Option<usize>) -> String {
 /// questions about the same line and both are worth being able to see, so they
 /// nest rather than compete.
 fn segs_rsx(l: &Line, mark: Option<&str>) -> Element {
-    let segs = l.segs.clone();
-    let mark = mark.map(str::to_string);
     rsx! {
-        for seg in segs {
+        for seg in l.segs.iter() {
             if seg.emph {
-                span { class: "emph", {marked(&seg.text, None, mark.as_deref())} }
+                span { class: "emph", {marked(&seg.text, None, mark)} }
             } else {
-                {marked(&seg.text, None, mark.as_deref())}
+                {marked(&seg.text, None, mark)}
             }
         }
     }
@@ -703,7 +688,6 @@ fn inline_line(l: &Line, mark: Option<&str>) -> Element {
 /// whole question. Its text is pinned to the left edge too, so scrolling
 /// sideways through wide code does not take the answer with it.
 fn hunk_header(header: &str) -> Element {
-    let header = header.to_string();
     rsx! {
         div { class: "hunkhdr",
             span { class: "hunkhdrtext", "{header}" }
@@ -862,8 +846,8 @@ fn split_block(diff: &FileDiff, block: Block, mark: Option<&str>) -> Element {
                 }
                 for row in to_rows(&diff.lines[from..to]) {
                     div { class: "srow",
-                        {split_cell(row.left.as_ref(), false, mark)}
-                        {split_cell(row.right.as_ref(), true, mark)}
+                        {split_cell(row.left, false, mark)}
+                        {split_cell(row.right, true, mark)}
                     }
                 }
             }

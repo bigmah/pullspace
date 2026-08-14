@@ -1,11 +1,11 @@
 //! Markdown, drawn as elements of this app rather than as a page.
 //!
 //! Everything here builds nodes out of parsed text, so nothing a repository
-//! contains is ever handed to the webview as markup — see
+//! contains is ever handed to the page as markup — see
 //! [`crate::backend::markdown`] for why that matters. What it buys, over the
-//! picture [`crate::backend::htmlview`] draws of an HTML file, is a document
-//! that scrolls, wraps to the pane, can be selected out of, and whose links
-//! work: an outside one opens in the browser, and one pointing at a file in the
+//! sandboxed frame an HTML file is previewed in, is a document that scrolls,
+//! wraps to the pane, can be selected out of, and whose links work: an
+//! outside one opens in the browser, and one pointing at a file in the
 //! repository opens it in the viewer.
 
 use std::path::{Path, PathBuf};
@@ -104,8 +104,6 @@ fn percent_decoded(seg: &str) -> String {
 
 /// A whole document.
 pub fn render(st: St, rel: &Path, doc: &Doc) -> Element {
-    let blocks = doc.blocks.clone();
-    let rel = rel.to_path_buf();
     rsx! {
         div { class: "mdwrap",
             if doc.raw_html {
@@ -118,11 +116,11 @@ pub fn render(st: St, rel: &Path, doc: &Doc) -> Element {
                 }
             }
             div { class: "mddoc",
-                if blocks.is_empty() {
+                if doc.blocks.is_empty() {
                     div { class: "mdempty", "This file has nothing in it." }
                 }
-                for b in blocks {
-                    {block(st, &rel, &b)}
+                for b in doc.blocks.iter() {
+                    {block(st, rel, b)}
                 }
             }
         }
@@ -141,17 +139,13 @@ fn block(st: St, rel: &Path, b: &Block) -> Element {
             div { class: "mdp", {inline(st, rel, spans)} }
         },
         Block::Code { lang, text } => code(lang, text),
-        Block::Quote(inner) => {
-            let inner = inner.clone();
-            let rel = rel.to_path_buf();
-            rsx! {
-                div { class: "mdquote",
-                    for b in inner {
-                        {block(st, &rel, &b)}
-                    }
+        Block::Quote(inner) => rsx! {
+            div { class: "mdquote",
+                for b in inner.iter() {
+                    {block(st, rel, b)}
                 }
             }
-        }
+        },
         Block::List {
             ordered,
             start,
@@ -192,16 +186,14 @@ fn marker(ordered: bool, start: u64, index: usize, task: Option<bool>) -> String
 }
 
 fn list(st: St, rel: &Path, ordered: bool, start: u64, items: &[Item]) -> Element {
-    let items = items.to_vec();
-    let rel = rel.to_path_buf();
     rsx! {
         div { class: "mdlist",
-            for (i , item) in items.into_iter().enumerate() {
+            for (i , item) in items.iter().enumerate() {
                 div { class: "mditem",
                     span { class: "mdmark", "{marker(ordered, start, i, item.task)}" }
                     div { class: "mdbody",
-                        for b in item.blocks {
-                            {block(st, &rel, &b)}
+                        for b in item.blocks.iter() {
+                            {block(st, rel, b)}
                         }
                     }
                 }
@@ -211,9 +203,6 @@ fn list(st: St, rel: &Path, ordered: bool, start: u64, items: &[Item]) -> Elemen
 }
 
 fn table(st: St, rel: &Path, head: &[Vec<Span>], rows: &[Vec<Vec<Span>>]) -> Element {
-    let head = head.to_vec();
-    let rows = rows.to_vec();
-    let rel = rel.to_path_buf();
     rsx! {
         // A wide table scrolls inside itself rather than stretching the pane.
         div { class: "mdtablewrap",
@@ -221,17 +210,17 @@ fn table(st: St, rel: &Path, head: &[Vec<Span>], rows: &[Vec<Vec<Span>>]) -> Ele
                 if !head.is_empty() {
                     thead {
                         tr {
-                            for cell in head {
-                                th { {inline(st, &rel, &cell)} }
+                            for cell in head.iter() {
+                                th { {inline(st, rel, cell)} }
                             }
                         }
                     }
                 }
                 tbody {
-                    for row in rows {
+                    for row in rows.iter() {
                         tr {
-                            for cell in row {
-                                td { {inline(st, &rel, &cell)} }
+                            for cell in row.iter() {
+                                td { {inline(st, rel, cell)} }
                             }
                         }
                     }
@@ -242,11 +231,9 @@ fn table(st: St, rel: &Path, head: &[Vec<Span>], rows: &[Vec<Vec<Span>>]) -> Ele
 }
 
 fn inline(st: St, rel: &Path, spans: &[Span]) -> Element {
-    let spans = spans.to_vec();
-    let rel = rel.to_path_buf();
     rsx! {
-        for s in spans {
-            {run(st, &rel, s)}
+        for s in spans.iter() {
+            {run(st, rel, s)}
         }
     }
 }
@@ -268,18 +255,17 @@ fn classes(s: &Span, link: bool) -> String {
     cls
 }
 
-fn run(st: St, rel: &Path, s: Span) -> Element {
+fn run(st: St, rel: &Path, s: &Span) -> Element {
     let target = s.link.as_deref().map(|href| resolve(rel, href));
     let (title, click) = match &target {
         Some(Target::Web(url)) => (url.clone(), true),
         Some(Target::File(path)) => (format!("Open {}", path.display()), true),
         _ => (String::new(), false),
     };
-    let cls = classes(&s, click);
-    let text = s.text;
+    let cls = classes(s, click);
     if !click {
         return rsx! {
-            span { class: "{cls}", "{text}" }
+            span { class: "{cls}", "{s.text}" }
         };
     }
     rsx! {
@@ -294,7 +280,7 @@ fn run(st: St, rel: &Path, s: Span) -> Element {
                 Some(Target::File(path)) if st.has_file(path) => st.open_file(path.clone()),
                 _ => {}
             },
-            "{text}"
+            "{s.text}"
         }
     }
 }

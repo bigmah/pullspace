@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 
 // std's Instant panics on wasm32-unknown-unknown.
 use web_time::Instant;
@@ -538,7 +539,7 @@ impl St {
         if !self.statuses.peek().contains_key(rel) {
             return None;
         }
-        Some(self.workspace.peek().pr()?.blob_key(rel))
+        Some(self.workspace.peek().pr()?.blob_key(rel).into_owned())
     }
 
     /// Whether this file has been marked read. A reactive read: ticking one box
@@ -582,7 +583,7 @@ impl St {
         let Some(pr) = held.pr() else { return 0 };
         pr.files
             .iter()
-            .filter(|f| marks.contains(&pr.blob_key(&f.path)))
+            .filter(|f| marks.contains(pr.blob_key_of(f).as_ref()))
             .count()
     }
 
@@ -890,10 +891,12 @@ pub fn App() -> Element {
         }
     });
 
-    let tree: Memo<Option<FileNode>> = use_memo(move || {
+    // The whole tree, built once per workspace or refresh — and shared from
+    // behind an `Rc`, so the memo below can hand it on without copying it.
+    let full_tree: Memo<Option<Rc<FileNode>>> = use_memo(move || {
         st.refresh_tick.read();
-        let statuses = st.statuses.read().clone();
-        let root = match &*st.workspace.read() {
+        let statuses = st.statuses.read();
+        Some(Rc::new(match &*st.workspace.read() {
             Workspace::Empty => return None,
             Workspace::Pr(pr) => build_tree_from_paths(
                 &format!("{} #{}", pr.repo, pr.number),
@@ -905,11 +908,18 @@ pub fn App() -> Element {
                 view.tree.paths(),
                 &statuses,
             ),
-        };
+        }))
+    });
+    // The Δ filter, split out so flipping the toggle re-answers the cheap
+    // question — which nodes hold changes — without walking every path in the
+    // repository again.
+    let tree: Memo<Option<Rc<FileNode>>> = use_memo(move || {
+        let held = full_tree.read();
+        let root = held.as_ref()?;
         if *st.changes_only.read() {
-            filter_changed(&root)
+            filter_changed(root).map(Rc::new)
         } else {
-            Some(root)
+            Some(Rc::clone(root))
         }
     });
     use_context_provider(|| tree);
@@ -919,7 +929,11 @@ pub fn App() -> Element {
     // long way from this memo: the viewer's stepper is three components down,
     // and the keyboard has state and no context at all.
     use_effect(move || {
-        let order = tree.read().as_ref().map(changed_paths).unwrap_or_default();
+        let order = tree
+            .read()
+            .as_ref()
+            .map(|root| changed_paths(root))
+            .unwrap_or_default();
         let mut changed_files = st.changed_files;
         // The Δ filter rebuilds the tree without changing which files are
         // changed or what order they come in; an unconditional write would

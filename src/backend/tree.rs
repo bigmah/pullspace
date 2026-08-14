@@ -51,7 +51,7 @@ pub struct FileNode {
 impl FileNode {
     /// Whether this directory holds anything changed. Directories that do are
     /// the ones a review wants open on arrival.
-    pub fn has_changes(&self) -> bool {
+    fn has_changes(&self) -> bool {
         self.changed > 0
     }
 
@@ -71,19 +71,20 @@ struct DirTmp {
 
 impl DirTmp {
     fn insert(&mut self, rel: &Path) {
-        let mut parts: Vec<String> = rel
-            .components()
-            .map(|c| c.as_os_str().to_string_lossy().into_owned())
-            .collect();
-        if parts.is_empty() {
-            return;
-        }
-        let file = parts.pop().unwrap();
+        let Some(file) = rel.file_name() else { return };
         let mut cur = self;
-        for p in parts {
-            cur = cur.dirs.entry(p).or_default();
+        for c in rel.parent().into_iter().flat_map(|p| p.components()) {
+            let name = c.as_os_str().to_string_lossy();
+            // Two lookups the first time a directory is seen, and no owned key
+            // otherwise — `entry` would allocate one per component per file,
+            // and almost every component names a directory already here.
+            if !cur.dirs.contains_key(name.as_ref()) {
+                cur.dirs.insert(name.to_string(), DirTmp::default());
+            }
+            cur = cur.dirs.get_mut(name.as_ref()).unwrap();
         }
-        cur.files.insert(file, rel.to_path_buf());
+        cur.files
+            .insert(file.to_string_lossy().into_owned(), rel.to_path_buf());
     }
 
     fn build(

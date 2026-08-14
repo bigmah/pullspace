@@ -50,6 +50,16 @@ pub fn looks_binary(bytes: &[u8]) -> bool {
     bytes.iter().take(8000).any(|&b| b == 0)
 }
 
+/// Let the browser get on with whatever it was doing.
+///
+/// A timer rather than an `await` on more work of our own: yielding to the
+/// microtask queue only lets the next thing we queued run, and it is the
+/// event loop underneath — the one that paints, and delivers clicks — that
+/// has to be given a turn.
+pub(crate) async fn breathe(ms: u32) {
+    gloo_timers::future::TimeoutFuture::new(ms).await;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -79,8 +79,13 @@ fn remember(sha: &str, text: Option<Rc<str>>) {
     TEXTS.with(|c| {
         let mut c = c.borrow_mut();
         let size = text.as_ref().map(|t| t.len()).unwrap_or(0);
-        if c.map.insert(sha.to_string(), text).is_none() {
-            c.order.push_back(sha.to_string());
+        match c.map.insert(sha.to_string(), text) {
+            // Replaced: two concurrent reads of the same blob, the second
+            // landing on the first. The queue entry is already there, and the
+            // bytes the first put in have to come back out or the cache
+            // believes itself fuller than it is.
+            Some(old) => c.bytes = c.bytes.saturating_sub(old.map_or(0, |t| t.len())),
+            None => c.order.push_back(sha.to_string()),
         }
         c.bytes += size;
         while c.bytes > TEXT_CACHE_BYTES {
@@ -184,14 +189,14 @@ impl Walked {
 /// [`blobs::have`] is a set lookup. Doing it up front is what lets a walk
 /// report a total before it starts, so the progress note counts towards
 /// something real.
-pub fn candidates(files: &[TreeEntry]) -> (Vec<TreeEntry>, usize) {
+fn candidates(files: &[TreeEntry]) -> (Vec<&TreeEntry>, usize) {
     let mut wanted = Vec::new();
     let mut missing = 0;
     for entry in files {
         if entry.size > MAX_SCAN_BYTES || is_opaque(&entry.path) {
             missing += 1;
         } else if blobs::have(&entry.sha) {
-            wanted.push(entry.clone());
+            wanted.push(entry);
         } else {
             missing += 1;
         }
@@ -225,8 +230,8 @@ pub async fn walk(
     // in tree order: search results that come back in whatever order the
     // filesystem felt like are results nobody can scan down.
     let mut reads = stream::iter(wanted.into_iter().map(|entry| async move {
-        let text = read_text(&entry).await;
-        (entry.path, text)
+        let text = read_text(entry).await;
+        (&entry.path, text)
     }))
     .buffered(READ_CONCURRENCY);
 
@@ -236,7 +241,7 @@ pub async fn walk(
         match text {
             Read::Text(text) => {
                 at.read += 1;
-                if visit(&path, &text) == Flow::Stop {
+                if visit(path, &text) == Flow::Stop {
                     at.stopped = true;
                     break;
                 }
@@ -253,7 +258,7 @@ pub async fn walk(
         // A repository is thousands of files and the tab has a cursor blinking
         // in it. Nothing here is in a hurry.
         if seen.is_multiple_of(YIELD_EVERY) {
-            gloo_timers::future::TimeoutFuture::new(0).await;
+            super::breathe(0).await;
         }
     }
     progress(at.read, total);

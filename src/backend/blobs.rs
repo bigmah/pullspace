@@ -107,7 +107,7 @@ pub async fn open() -> bool {
     }
     if OPENING.with(|o| o.replace(true)) {
         while OPENING.with(|o| o.get()) {
-            gloo_timers::future::TimeoutFuture::new(15).await;
+            super::breathe(15).await;
         }
         return with(|_| ()).is_some();
     }
@@ -322,7 +322,7 @@ pub async fn sweep(limit: u64) {
         let when = opfs::modified(&snaps, &name).await.unwrap_or(0.0);
         dated.push((when, name));
     }
-    breathe().await;
+    super::breathe(0).await;
     // Newest first: the budget is spent on what was read most recently.
     dated.sort_by(|a, b| b.0.total_cmp(&a.0));
 
@@ -343,7 +343,7 @@ pub async fn sweep(limit: u64) {
                 bytes += file.size;
             }
         }
-        breathe().await;
+        super::breathe(0).await;
     }
 
     for prefix in opfs::list(&blobs).await {
@@ -356,18 +356,10 @@ pub async fn sweep(limit: u64) {
                 with(|s| s.have.remove(&sha));
             }
         }
-        breathe().await;
+        super::breathe(0).await;
     }
 }
 
-/// Stand back and let the event loop have a turn.
-///
-/// A sweep walks every file of every repository ever opened, and it does it
-/// while somebody is reading one of them. Nothing here is in a hurry; the
-/// browser it runs in is.
-async fn breathe() {
-    gloo_timers::future::TimeoutFuture::new(0).await;
-}
 
 /// Delete every stored file. What the button in the GitHub panel calls — the
 /// only thing here anyone should have to think about.

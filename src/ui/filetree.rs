@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::rc::Rc;
 
 use dioxus::prelude::*;
 
@@ -14,14 +15,13 @@ use super::prcache::ensure_hover;
 /// so the list is never quietly short.
 const MATCH_LIMIT: usize = 400;
 
-/// One listener for the whole tree, living in the webview, reporting the row the
+/// One listener for the whole tree, living in the page, reporting the row the
 /// pointer has settled on.
 ///
-/// A Dioxus handler cannot do this job. Every event one receives is delivered
-/// over a *synchronous* request that stops the webview — and painting with it —
-/// until Rust has answered. Hung off every row, that is a stall per row crossed,
-/// which is the one thing a hover highlight cannot afford. This costs nothing to
-/// cross, says nothing until the pointer stops, and what it does say goes back
+/// A Dioxus handler hung off every row would put a trip into Rust — and a
+/// re-render's worth of work — on every row the pointer crosses, which is the
+/// one thing a hover highlight cannot afford. This costs nothing to cross,
+/// says nothing until the pointer stops, and what it does say goes back
 /// asynchronously.
 const HOVER_JS: &str = r#"
     let timer = null;
@@ -55,17 +55,29 @@ const REVEAL_JS: &str = r#"
     });
 "#;
 
+/// One row as drawn: the tree's own row, plus the two facts about it that
+/// come from signals — settled here, in the listing memo, rather than read
+/// inside [`TreeRow`]. A row that read them itself would subscribe every row
+/// to `open` and `viewed`, and opening one file would re-render the whole
+/// tree instead of the two rows that changed.
+#[derive(Clone, PartialEq)]
+struct RowState {
+    row: Row,
+    active: bool,
+    viewed: bool,
+}
+
 /// The rows to draw, and how many matches were cut off the end of them.
 #[derive(Clone, PartialEq)]
 struct Listing {
-    rows: Vec<Row>,
+    rows: Vec<RowState>,
     hidden: usize,
 }
 
 #[component]
 pub fn FileTreePane() -> Element {
     let st = use_context::<St>();
-    let tree = use_context::<Memo<Option<FileNode>>>();
+    let tree = use_context::<Memo<Option<Rc<FileNode>>>>();
     let mut expanded = st.expanded;
     let mut query = st.tree_filter;
     let mut changes_only = st.changes_only;
@@ -137,17 +149,28 @@ pub fn FileTreePane() -> Element {
                 hidden: 0,
             };
         };
-        if needle.is_empty() {
-            return Listing {
-                rows: visible_rows(root, &expanded.read()),
-                hidden: 0,
-            };
-        }
-        let (rows, total) = matching_rows(root, &needle, MATCH_LIMIT);
-        Listing {
-            hidden: total - rows.len(),
-            rows,
-        }
+        let (rows, hidden) = if needle.is_empty() {
+            (visible_rows(root, &expanded.read()), 0)
+        } else {
+            let (rows, total) = matching_rows(root, &needle, MATCH_LIMIT);
+            let hidden = total - rows.len();
+            (rows, hidden)
+        };
+        let open = st.open.read();
+        let open = open.as_deref();
+        let rows = rows
+            .into_iter()
+            .map(|row| {
+                let (active, viewed) = match &row.kind {
+                    RowKind::File { .. } => {
+                        (open == Some(row.path.as_path()), st.is_viewed(&row.path))
+                    }
+                    RowKind::Dir { .. } => (false, false),
+                };
+                RowState { row, active, viewed }
+            })
+            .collect();
+        Listing { rows, hidden }
     });
 
     let filtering = !query.read().trim().is_empty();
@@ -252,8 +275,13 @@ pub fn FileTreePane() -> Element {
                 // and the guides that explain both would be drawing structure
                 // that is not there.
                 class: if filtering { "tree flat" } else { "tree" },
-                for row in listing.read().rows.iter() {
-                    TreeRow { key: "{row.path.display()}", row: row.clone() }
+                for rs in listing.read().rows.iter() {
+                    TreeRow {
+                        key: "{rs.row.path.display()}",
+                        row: rs.row.clone(),
+                        active: rs.active,
+                        viewed: rs.viewed,
+                    }
                 }
                 if let Some(note) = empty {
                     div { class: "tree-empty", "{note}" }
@@ -270,7 +298,7 @@ pub fn FileTreePane() -> Element {
 }
 
 #[component]
-fn TreeRow(row: Row) -> Element {
+fn TreeRow(row: Row, active: bool, viewed: bool) -> Element {
     let st = use_context::<St>();
     let mut expanded = st.expanded;
     // The guides run down the chevrons of every directory above this row, and
@@ -309,11 +337,9 @@ fn TreeRow(row: Row) -> Element {
             }
         }
         RowKind::File { status, hint } => {
-            let active = st.open.read().as_deref() == Some(row.path.as_path());
             // Read already: the row steps back out of the way, so what is left
             // to do is what stands out. Never the file being read, which is the
             // one row that has to stay legible.
-            let viewed = st.is_viewed(&row.path);
             let cls = match (active, viewed) {
                 (true, _) => "row file active",
                 (false, true) => "row file viewed",

@@ -22,6 +22,7 @@
 use std::cell::{Cell, RefCell};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 
 use anyhow::{Result, bail};
 use futures_util::stream::{self, StreamExt};
@@ -90,8 +91,9 @@ pub fn is_opaque(path: &Path) -> bool {
 
 thread_local! {
     /// Repositories the CDN would not serve — private ones. Remembered so that
-    /// only the first file of a private repository pays for finding out.
-    static CDN_REFUSED: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
+    /// only the first file of a private repository pays for finding out. A
+    /// handful at most, so a scan beats hashing the name on every fetch.
+    static CDN_REFUSED: RefCell<Vec<RepoRef>> = const { RefCell::new(Vec::new()) };
     /// Metered requests this clone has spent, against [`MAX_API_BLOBS`].
     static API_SPENT: Cell<usize> = const { Cell::new(0) };
     /// Reads somebody is waiting on, right now, with a cursor.
@@ -120,23 +122,16 @@ impl Drop for Waiting {
     }
 }
 
-/// Let the browser get on with whatever it was doing.
-///
-/// A timer rather than an `await` on more work of our own: yielding to the
-/// microtask queue only lets the next thing we queued run, and it is the
-/// event loop underneath — the one that paints, and delivers clicks — that has
-/// to be given a turn.
-async fn breathe(ms: u32) {
-    gloo_timers::future::TimeoutFuture::new(ms).await;
-}
-
 fn cdn_serves(repo: &RepoRef) -> bool {
-    CDN_REFUSED.with(|r| !r.borrow().contains(&repo.to_string()))
+    CDN_REFUSED.with(|r| !r.borrow().iter().any(|known| known == repo))
 }
 
 fn cdn_refused(repo: &RepoRef) {
     CDN_REFUSED.with(|r| {
-        r.borrow_mut().insert(repo.to_string());
+        let mut r = r.borrow_mut();
+        if !r.iter().any(|known| known == repo) {
+            r.push(repo.clone());
+        }
     });
 }
 
@@ -148,8 +143,9 @@ fn cdn_refused(repo: &RepoRef) {
 pub struct Want {
     pub path: PathBuf,
     pub sha: String,
-    /// The commit the CDN will serve `path` at.
-    pub commit: String,
+    /// The commit the CDN will serve `path` at. Shared — a plan holds one of
+    /// these per file, and they nearly all name the same commit.
+    pub commit: Rc<str>,
     pub size: u64,
 }
 
@@ -167,18 +163,21 @@ pub struct Plan {
 }
 
 #[derive(Default)]
-struct Planner {
+struct Planner<'a> {
     plan: Plan,
-    seen: HashSet<String>,
+    /// Borrowed from the snapshots being planned over — a tree can run to a
+    /// hundred thousand entries, and owning every SHA would be an allocation
+    /// apiece just to ask "seen this one?".
+    seen: HashSet<&'a str>,
 }
 
-impl Planner {
+impl<'a> Planner<'a> {
     /// Consider one file. Returns false once the budget is gone, which is the
     /// signal to stop walking the tree.
-    fn add(&mut self, path: &Path, sha: &str, commit: &str, size: u64) -> bool {
+    fn add(&mut self, path: &Path, sha: &'a str, commit: &Rc<str>, size: u64) -> bool {
         // The same content under two names, or both sides of a file the pull
         // request does not change: one copy, one fetch.
-        if !self.seen.insert(sha.to_string()) {
+        if !self.seen.insert(sha) {
             return true;
         }
         if blobs::have(sha) {
@@ -197,7 +196,7 @@ impl Planner {
         self.plan.wanted.push(Want {
             path: path.to_path_buf(),
             sha: sha.to_string(),
-            commit: commit.to_string(),
+            commit: Rc::clone(commit),
             size,
         });
         true
@@ -210,24 +209,26 @@ impl Planner {
 /// because that is what the reader opens while the rest is still arriving.
 pub fn plan(head: &Snapshot, base: &Snapshot, changed: &[FetchJob]) -> Plan {
     let mut planner = Planner::default();
+    let head_commit: Rc<str> = Rc::from(head.commit.as_str());
+    let base_commit: Rc<str> = Rc::from(base.commit.as_str());
 
     for job in changed {
         if job.wants_head()
             && let Some(entry) = head.entry(&job.path)
-            && !planner.add(&entry.path, &entry.sha, &head.commit, entry.size)
+            && !planner.add(&entry.path, &entry.sha, &head_commit, entry.size)
         {
             break;
         }
         if job.wants_base()
             && let Some(entry) = base.entry(&job.base_path)
-            && !planner.add(&entry.path, &entry.sha, &base.commit, entry.size)
+            && !planner.add(&entry.path, &entry.sha, &base_commit, entry.size)
         {
             break;
         }
     }
 
     for entry in &head.files {
-        if !planner.add(&entry.path, &entry.sha, &head.commit, entry.size) {
+        if !planner.add(&entry.path, &entry.sha, &head_commit, entry.size) {
             break;
         }
     }
@@ -385,7 +386,7 @@ pub async fn hydrate(
         // Somebody is looking at something. They are one file and this is
         // thousands, and theirs is the one with a cursor blinking at it.
         while WAITING.with(|w| w.get()) > 0 {
-            breathe(YIELD_MS).await;
+            super::breathe(YIELD_MS).await;
             if !wanted() {
                 return;
             }
@@ -393,7 +394,7 @@ pub async fn hydrate(
         // And a turn for the event loop regardless, so the tree still scrolls
         // and the panes still drag while several thousand files come down.
         if at.done.is_multiple_of(YIELD_EVERY) {
-            breathe(0).await;
+            super::breathe(0).await;
         }
     }
     // A clone that downloaded nothing changed nothing, so there is nothing to
@@ -542,7 +543,7 @@ mod tests {
         assert_eq!(plan.wanted.len(), 2);
         assert_eq!(plan.bytes, 300);
         // Every one of them is named by the commit the CDN will serve it at.
-        assert!(plan.wanted.iter().all(|w| w.commit == "head"));
+        assert!(plan.wanted.iter().all(|w| &*w.commit == "head"));
     }
 
     #[test]
@@ -606,7 +607,7 @@ mod tests {
             "the changed file's two sides come before the rest of the tree"
         );
         // The base side is read from the base commit, not the head.
-        assert_eq!(plan.wanted[1].commit, "base");
+        assert_eq!(&*plan.wanted[1].commit, "base");
     }
 
     #[test]

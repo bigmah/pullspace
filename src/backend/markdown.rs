@@ -1,11 +1,10 @@
 //! Markdown, parsed into blocks and runs of styled text.
 //!
-//! Deliberately not into HTML. A README is a file out of a repository, and the
-//! two places this app could put HTML are both wrong for it: the webview it
-//! draws its own UI in would execute it (see [`super::htmlview`] for what that
-//! is worth), and Blitz draws a picture, which cannot be scrolled through,
-//! selected, or clicked. So the markup is turned into a small tree the viewer
-//! renders with its own elements, and text is only ever text.
+//! Deliberately not into HTML. A README is a file out of a repository, and
+//! handing its markup to the page this app draws its own UI in would execute
+//! it — next to a GitHub token in local storage. So the markup is turned into
+//! a small tree the viewer renders with its own elements, and text is only
+//! ever text.
 //!
 //! Which is also why raw HTML *inside* the markdown is dropped rather than
 //! shown: a `<div align=center>` around a row of badges is invisible either
@@ -36,12 +35,6 @@ pub struct Span {
     /// True for an image's alt text. Nothing is fetched, so the alt text is
     /// what there is; saying it was an image is the honest way to show it.
     pub image: bool,
-}
-
-impl Span {
-    fn matches(&self, other: &Span) -> bool {
-        self.style == other.style && self.link == other.link && self.image == other.image
-    }
 }
 
 /// One entry in a list, which may hold blocks of its own — a nested list, or a
@@ -160,17 +153,24 @@ impl Inline {
         if text.is_empty() {
             return;
         }
-        let next = Span {
-            text: text.to_string(),
-            style: self.style,
-            link: self.link.clone(),
-            image: self.image,
-        };
         // Emphasis inside a word arrives as several events with the same
         // styling; joining them keeps the element count near the word count.
+        // Checked against the accumulator's own state, so the common merge
+        // builds no span — and clones no link — only to throw it away.
         match self.spans.last_mut() {
-            Some(prev) if prev.matches(&next) => prev.text.push_str(text),
-            _ => self.spans.push(next),
+            Some(prev)
+                if prev.style == self.style
+                    && prev.link == self.link
+                    && prev.image == self.image =>
+            {
+                prev.text.push_str(text)
+            }
+            _ => self.spans.push(Span {
+                text: text.to_string(),
+                style: self.style,
+                link: self.link.clone(),
+                image: self.image,
+            }),
         }
     }
 
@@ -316,7 +316,8 @@ impl Reader<'_> {
         }
         // Fenced blocks end with the newline before the closing fence, which
         // would otherwise draw an empty last line in every sample.
-        out.trim_end_matches('\n').to_string()
+        out.truncate(out.trim_end_matches('\n').len());
+        out
     }
 
     fn list(&mut self, start: Option<u64>) -> Block {

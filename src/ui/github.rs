@@ -352,16 +352,16 @@ fn PrSection() -> Element {
                 PrList::Failed(e) => rsx! { div { class: "gherror", "{e}" } },
                 PrList::Ready { repo, items } if items.is_empty() => rsx! {
                     div { class: "ghnote", "No open pull requests in {repo}." }
-                    BrowseRow { repo: repo.clone(), no_prs: true }
+                    BrowseRow { repo, no_prs: true }
                 },
                 PrList::Ready { repo, items } => rsx! {
                     div { class: "ghlabel", "{items.len()} open in {repo}" }
                     div { class: "prlist",
                         for pr in items {
-                            PrRow { key: "{pr.number}", repo: repo.clone(), pr: pr.clone() }
+                            PrRow { key: "{pr.number}", repo: repo.clone(), pr }
                         }
                     }
-                    BrowseRow { repo: repo.clone(), no_prs: false }
+                    BrowseRow { repo, no_prs: false }
                 },
             }
         }
@@ -990,7 +990,7 @@ fn BrowseRow(repo: RepoRef, no_prs: bool) -> Element {
 fn PrRow(repo: RepoRef, pr: PrSummary) -> Element {
     let st = use_context::<St>();
     let number = pr.number;
-    let target = repo.clone();
+    let target = repo;
     rsx! {
         div {
             class: "pritem",

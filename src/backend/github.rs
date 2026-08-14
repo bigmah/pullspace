@@ -7,6 +7,7 @@
 //! between — and, since nothing outside that one module is browser-specific,
 //! it is also what keeps the parsing in here testable on the host.
 
+use std::borrow::Cow;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
@@ -33,26 +34,39 @@ const MAX_FILE_PAGES: u32 = 30;
 /// reading to the end of anyway, and the pane says when it was cut short.
 const MAX_COMMENT_PAGES: u32 = 5;
 
-/// Percent-encode one path segment. Avoids a dependency for the handful of
-/// characters that actually show up in repo paths.
-fn encode_segment(seg: &str) -> String {
-    let mut out = String::with_capacity(seg.len());
+/// Percent-encode one path segment into `out`. Avoids a dependency for the
+/// handful of characters that actually show up in repo paths.
+fn push_encoded(out: &mut String, seg: &str) {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
     for b in seg.bytes() {
         match b {
             b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
                 out.push(b as char)
             }
-            _ => out.push_str(&format!("%{b:02X}")),
+            _ => {
+                out.push('%');
+                out.push(HEX[usize::from(b >> 4)] as char);
+                out.push(HEX[usize::from(b & 0xf)] as char);
+            }
         }
     }
+}
+
+fn encode_segment(seg: &str) -> String {
+    let mut out = String::with_capacity(seg.len());
+    push_encoded(&mut out, seg);
     out
 }
 
 fn encode_path(path: &str) -> String {
-    path.split('/')
-        .map(encode_segment)
-        .collect::<Vec<_>>()
-        .join("/")
+    let mut out = String::with_capacity(path.len() + 8);
+    for (i, seg) in path.split('/').enumerate() {
+        if i > 0 {
+            out.push('/');
+        }
+        push_encoded(&mut out, seg);
+    }
+    out
 }
 
 // -------------------------------------------------------------- repo target
@@ -855,14 +869,29 @@ impl PrDetail {
     /// no head side to hash. Falling back to the path covers the one case with
     /// no blob at all: a pull request whose tree GitHub would not serve, where
     /// a mark keyed by name is still better than no marks.
-    pub fn blob_key(&self, path: &std::path::Path) -> String {
+    pub fn blob_key(&self, path: &std::path::Path) -> Cow<'_, str> {
         if let Some(entry) = self.tree.entry(path) {
-            return entry.sha.clone();
+            return Cow::Borrowed(entry.sha.as_str());
         }
         find_file(&self.files, path)
             .and_then(|f| self.base_tree.entry(f.base_path()))
-            .map(|entry| entry.sha.clone())
-            .unwrap_or_else(|| format!("path:{}", path.display()))
+            .map_or_else(
+                || Cow::Owned(format!("path:{}", path.display())),
+                |entry| Cow::Borrowed(entry.sha.as_str()),
+            )
+    }
+
+    /// [`blob_key`](Self::blob_key) for a caller already holding the changed
+    /// file — asked once per file when the read count is taken, where the
+    /// lookup above would fall back to a scan of the whole list each time.
+    pub fn blob_key_of(&self, f: &PrFile) -> Cow<'_, str> {
+        if let Some(entry) = self.tree.entry(&f.path) {
+            return Cow::Borrowed(entry.sha.as_str());
+        }
+        self.base_tree.entry(f.base_path()).map_or_else(
+            || Cow::Owned(format!("path:{}", f.path.display())),
+            |entry| Cow::Borrowed(entry.sha.as_str()),
+        )
     }
 }
 
@@ -1135,7 +1164,7 @@ pub async fn raw_file(
     commit: &str,
     path: &std::path::Path,
 ) -> Result<(u16, Vec<u8>)> {
-    let rel = path.to_string_lossy().replace('\\', "/");
+    let rel = slashed(path);
     let url = format!(
         "{RAW}/{}/{}/{}/{}",
         encode_segment(&repo.owner),
@@ -1180,7 +1209,7 @@ pub async fn file_at(
     let (status, body) = if token.is_empty() {
         raw_file(repo, sha, path).await?
     } else {
-        let rel = path.to_string_lossy().replace('\\', "/");
+        let rel = slashed(path);
         let url = format!(
             "{API}/repos/{}/{}/contents/{}?ref={}",
             encode_segment(&repo.owner),
@@ -1204,8 +1233,19 @@ pub fn statuses_of(files: &[PrFile]) -> std::collections::HashMap<PathBuf, Chang
     files.iter().map(|f| (f.path.clone(), f.status)).collect()
 }
 
-pub fn find_file<'a>(files: &'a [PrFile], path: &std::path::Path) -> Option<&'a PrFile> {
+fn find_file<'a>(files: &'a [PrFile], path: &std::path::Path) -> Option<&'a PrFile> {
     files.iter().find(|f| f.path == path)
+}
+
+/// A repo-relative path as GitHub spells it. The replace only ever matters to
+/// a native run on Windows — and only there is it worth an allocation.
+fn slashed(path: &std::path::Path) -> Cow<'_, str> {
+    let rel = path.to_string_lossy();
+    if rel.contains('\\') {
+        Cow::Owned(rel.replace('\\', "/"))
+    } else {
+        rel
+    }
 }
 
 #[cfg(test)]
@@ -1729,7 +1769,17 @@ impl FetchJob {
     /// For any path in the PR's repository, changed or not.
     pub fn new(pr: &PrDetail, rel: &std::path::Path) -> Self {
         // Unchanged files are in the repo tree but not the PR's file list.
-        let f = find_file(&pr.files, rel);
+        Self::build(pr, rel, find_file(&pr.files, rel))
+    }
+
+    /// [`new`](Self::new) for a caller already holding the changed file.
+    /// The clone makes one of these per changed file, and looking each one up
+    /// in the list it came from would walk that list once per entry.
+    pub fn for_changed<'a>(pr: &'a PrDetail, f: &'a PrFile) -> Self {
+        Self::build(pr, &f.path, Some(f))
+    }
+
+    fn build(pr: &PrDetail, rel: &std::path::Path, f: Option<&PrFile>) -> Self {
         let base_path = f.map_or_else(|| rel.to_path_buf(), |f| f.base_path().clone());
         FetchJob {
             repo: pr.repo.clone(),

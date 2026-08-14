@@ -35,7 +35,7 @@ impl Layout {
     /// Bring anything absurd back into range. A saved layout is data from
     /// outside the program — a hand-edited storage entry should cost the
     /// layout, not the window.
-    pub fn sane(self) -> Self {
+    fn sane(self) -> Self {
         let ok = |v: f64, lo: f64, hi: f64, fallback: f64| {
             if v.is_finite() && v >= lo && v <= hi {
                 v

@@ -26,7 +26,10 @@ review summaries and the comments left on lines of the diff, merged into one
 list in the order they were written. Bodies are drawn as the markdown they are
 — headings, lists, tables, and fenced code with the same highlighter the viewer
 uses — through the renderer described under [Markdown](#markdown), so nothing
-anybody wrote on the pull request is ever handed to this page as markup.
+anybody wrote on the pull request is ever handed to this page as markup. Beside
+it, **COMMITS** is the other half of the same pane: every commit on the branch,
+oldest first, each one its subject line, its author and its short SHA — and a
+click on any whose message has more to it than a subject.
 
 A panel across the bottom of the code holds the answer to "where else is this?"
 — search hits, references, definitions — and closes again once it has been read.
@@ -95,8 +98,9 @@ pasting a link goes to the hourly budget instead and keeps working meanwhile.
 
 The chip on the right of the top bar opens the GitHub panel. Type part of a
 repository name and pick it from the results — `↑`/`↓` and `Enter`, or click —
-to list its open pull requests. With the box empty it offers your own
-repositories, most recently pushed first.
+to list its pull requests: **open** to begin with, with **closed** and **all**
+a click away, merged and turned down told apart in the list. With the box empty
+it offers your own repositories, most recently pushed first.
 
 Nothing has to be typed in full: `owner/repo` works, an exact name is pinned to
 the top of the results, and pasting a pull request URL jumps straight to it.
@@ -167,6 +171,17 @@ and the tree you have expanded are kept.
 
 A repository with no open pull requests can be opened on its own, at the tip of
 its default branch — the same two panes, with nothing marked as changed.
+
+### Swapping between them
+
+A review is rarely one pull request. Once anything on a repository is open, its
+pull requests are listed alongside it, and the crumb in the top bar — the one
+naming what you are reading — drops them down: every one of them, the one you
+are on marked, and the repository itself at the foot of the list. Picking
+another swaps to it without a trip back through the picker; the list is already
+in hand, so opening the menu costs nothing. It is the same list the panel shows
+and the same open/closed/all toggle, because there is one list and two ways at
+it.
 
 ## The local copy
 

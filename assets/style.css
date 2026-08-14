@@ -28,8 +28,32 @@
   --add-emph: rgba(79, 191, 122, 0.34);
   --del-bg: rgba(224, 108, 117, 0.13);
   --del-emph: rgba(224, 108, 117, 0.36);
-  --mono: "SF Mono", "Menlo", "Cascadia Code", "JetBrains Mono", monospace;
+  /* The two overlays that lift a row off the surface under it — a hovered line
+     of code, every other row of a table. Named rather than written out,
+     because which way they lift is the one thing that has to turn over when
+     the palette does: white on a dark app, black on a light one. */
+  --tint: rgba(255, 255, 255, 0.028);
+  --tint-soft: rgba(255, 255, 255, 0.018);
+  /* Prose that is meant to stand out of the body text around it — headings,
+     bold. A shade past --fg rather than a colour of its own. */
+  --fg-bright: #e8ecf4;
+  /* The explorer's indent guides. Barely there on purpose: they are for
+     following a column of names back to the folder it came out of, and
+     anything stronger draws the eye to the ruling rather than to the files. */
+  --guide: #2b2e38;
+  /* What sits on the accent: a button's label against its fill. */
+  --on-accent: #0f1116;
+  /* The default until the saved preferences arrive, which is one render: the
+     browser's own coding face, and the platform's under it for the browsers
+     that do not know the keyword. The appearance panel replaces this — see
+     `backend::prefs` for the four it offers. */
+  --mono: ui-monospace, Menlo, Consolas, "DejaVu Sans Mono", monospace;
   --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "Inter", sans-serif;
+  /* The code panes, and what the appearance panel moves. Everything that draws
+     a line of a file reads these two rather than setting a size of its own. */
+  --code-px: 12px;
+  --code-lh: 1.55;
+  --tab: 8;
 
   /* One height, one radius and one curve for every control in the app. The
      alternative is what happens by accident: nine buttons, nine sizes. */
@@ -399,10 +423,8 @@ button { font-family: inherit; user-select: none; }
      webview hands back an I-beam over every label in it. */
   cursor: default;
   user-select: none;
-  /* The indent guides. Barely there on purpose: they are for following a
-     column of names back to the folder it came out of, and anything stronger
-     draws the eye to the ruling rather than to the files. */
-  --guide: #2b2e38;
+  /* How far one level of nesting indents. The guides themselves are
+     `--guide`, up in the palette, since a theme has to be able to move them. */
   --step: 14px;
 }
 
@@ -866,6 +888,28 @@ button { font-family: inherit; user-select: none; }
 
 .resetbtn:hover { color: var(--fg); background: var(--bg-3); }
 
+/* The same button, for the link to what is on screen. It says "Copied" for a
+   moment afterwards, because a clipboard write is otherwise entirely silent
+   and a button that appears to do nothing gets pressed again. */
+.linkbtn {
+  flex: none;
+  margin-right: 8px;
+  min-width: 62px;
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  border-radius: var(--r);
+  color: var(--fg-dim);
+  cursor: pointer;
+  font-size: 11px;
+  height: 26px;
+  padding: 0 10px;
+  transition: background-color var(--quick) var(--ease), color var(--quick) var(--ease),
+    border-color var(--quick) var(--ease);
+}
+
+.linkbtn:hover { color: var(--fg); background: var(--bg-3); }
+.linkbtn.done { color: var(--accent); border-color: var(--accent-line); }
+
 /* ---------- symbol action bar ---------- */
 
 .symbar {
@@ -943,14 +987,15 @@ button { font-family: inherit; user-select: none; }
 
 .code {
   font-family: var(--mono);
-  font-size: 12px;
-  line-height: 1.55;
+  font-size: var(--code-px);
+  line-height: var(--code-lh);
+  tab-size: var(--tab);
   padding: 6px 0 60vh 0;
   min-width: fit-content;
 }
 
 .cl { display: flex; align-items: flex-start; white-space: pre; }
-.cl:hover { background: rgba(255, 255, 255, 0.028); }
+.cl:hover { background: var(--tint); }
 
 .ln {
   width: 46px;
@@ -969,6 +1014,22 @@ button { font-family: inherit; user-select: none; }
 .code.split .ln { width: 40px; padding-right: 8px; }
 
 .lc { white-space: pre; }
+
+/* A line number that can be linked to. The gutter is not obviously a control,
+   so it says so on the way past rather than sitting there underlined. */
+.ln.lnk { cursor: pointer; }
+.ln.lnk:hover { color: var(--accent); }
+
+/* And the line a link is pointing at, which stays lit for as long as it is the
+   answer — unlike `.flash`, which is the arrival and then goes. */
+/* Laid over whatever the row already had rather than replacing it — an added
+   line that is being linked to is still an added line, and `background-image`
+   is the layer above `background-color`. */
+.cl.linked, .scell.linked {
+  background-image: linear-gradient(var(--accent-soft), var(--accent-soft));
+}
+
+.cl.linked .ln, .scell.linked .ln { color: var(--accent); }
 
 .id { cursor: pointer; border-radius: 2px; }
 .id:hover { background: var(--accent-soft); outline: 1px solid var(--accent-line); }
@@ -1099,8 +1160,8 @@ button { font-family: inherit; user-select: none; }
     45deg,
     transparent,
     transparent 6px,
-    rgba(255, 255, 255, 0.02) 6px,
-    rgba(255, 255, 255, 0.02) 12px
+    var(--tint-soft) 6px,
+    var(--tint-soft) 12px
   );
 }
 
@@ -1356,17 +1417,10 @@ button { font-family: inherit; user-select: none; }
   margin-top: 6px;
 }
 
-/* Markdown, shown as written: wrapped, but with its own line breaks and
-   indentation left alone. */
-.convtext {
-  margin-top: 6px;
-  font-size: 12px;
-  line-height: 1.55;
-  color: var(--fg-dim);
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-  user-select: text;
-}
+/* The note that stands in for a `<details>` block or a badge table, which the
+   renderer drops rather than trusting — `.convkind` gives it the pill, this
+   puts it on a line of its own. */
+.convhtml { display: inline-block; margin-top: 8px; }
 
 .convnone { margin-top: 6px; font-size: 12px; color: var(--fg-faint); }
 
@@ -1511,6 +1565,74 @@ button { font-family: inherit; user-select: none; }
   animation: risein 140ms var(--ease);
 }
 
+/* The appearance panel is six rows of buttons and a sample. At the picker's
+   width it would be six short controls stranded in a lot of nothing. */
+.ghpanel.narrow { width: 460px; }
+
+/* ---------- appearance ---------- */
+
+.prefrow {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 40px;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.prefrow:last-child { border-bottom: none; }
+
+.preflabel {
+  width: 96px;
+  flex: none;
+  font-size: 11.5px;
+  color: var(--fg-dim);
+}
+
+.prefnum {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--fg);
+  min-width: 38px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+.prefhelp { font-size: 11px; color: var(--fg-faint); line-height: 1.5; }
+
+.swatches { display: inline-flex; gap: 8px; }
+
+/* The colour itself is the control. A ring rather than a fill for the one that
+   is on, so the swatch still shows the colour it is offering. */
+.swatch {
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 2px solid transparent;
+  border-radius: 50%;
+  background: var(--swatch);
+  background-clip: content-box;
+  cursor: pointer;
+  transition: transform var(--quick) var(--ease), border-color var(--quick) var(--ease);
+}
+
+.swatch:hover { transform: scale(1.12); }
+.swatch.on { border-color: var(--fg-dim); }
+
+/* Four lines of code drawn by the viewer's own renderer — the font, the size,
+   the spacing, the tab width and the syntax colours, all as they will be. */
+.prefsample {
+  margin: 12px 0 4px;
+  padding: 8px 0;
+  background: var(--bg);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--r);
+  overflow-x: auto;
+}
+
+.prefsample .code { padding: 0; }
+.prefsample .ln { width: 34px; padding-right: 10px; }
+
 @keyframes risein {
   from { transform: translateY(-6px); }
   to { transform: translateY(0); }
@@ -1619,7 +1741,7 @@ button { font-family: inherit; user-select: none; }
   background: var(--accent);
   border: 1px solid var(--accent);
   border-radius: var(--r);
-  color: #0f1116;
+  color: var(--on-accent);
   cursor: pointer;
   font-size: 12px;
   font-weight: 600;
@@ -1947,7 +2069,7 @@ button { font-family: inherit; user-select: none; }
 
 .mdempty { color: var(--fg-faint); font-size: 12px; }
 
-.mdh { font-weight: 700; line-height: 1.3; margin: 26px 0 10px; color: #e8ecf4; }
+.mdh { font-weight: 700; line-height: 1.3; margin: 26px 0 10px; color: var(--fg-bright); }
 .mddoc > .mdh:first-child { margin-top: 0; }
 
 /* The two that open sections get the rule under them, as they do everywhere
@@ -1963,7 +2085,7 @@ button { font-family: inherit; user-select: none; }
    wrapping had to be normalised to spaces before it got here. */
 .mdp { margin: 10px 0; white-space: pre-wrap; overflow-wrap: anywhere; }
 
-.mdb { font-weight: 700; color: #e8ecf4; }
+.mdb { font-weight: 700; color: var(--fg-bright); }
 .mdi { font-style: italic; }
 .mds { text-decoration: line-through; color: var(--fg-faint); }
 
@@ -1994,6 +2116,7 @@ button { font-family: inherit; user-select: none; }
 
 .mdcode {
   font-family: var(--mono);
+  tab-size: var(--tab);
   font-size: 12px;
   line-height: 1.55;
   background: var(--bg-1);
@@ -2048,7 +2171,39 @@ button { font-family: inherit; user-select: none; }
 }
 
 .mdtable th { background: var(--bg-2); font-weight: 700; white-space: nowrap; }
-.mdtable tbody tr:nth-child(even) { background: rgba(255, 255, 255, 0.018); }
+.mdtable tbody tr:nth-child(even) { background: var(--tint-soft); }
+
+/* The same markdown, drawn in a column rather than as the page — a comment, a
+   pull request's description. A README's measure and a README's headings are
+   both wrong here: the frame around this one is 380px wide and already has a
+   title on it, so the type comes down and the space between blocks closes up. */
+.mdsmall {
+  max-width: none;
+  margin-top: 6px;
+  padding: 0;
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--fg-dim);
+}
+
+.mdsmall .mdh { margin: 14px 0 6px; color: var(--fg); }
+.mdsmall .mdh1 { font-size: 14.5px; padding-bottom: 5px; }
+.mdsmall .mdh2 { font-size: 13.5px; padding-bottom: 4px; }
+.mdsmall .mdh3 { font-size: 12.5px; }
+.mdsmall .mdh4, .mdsmall .mdh5, .mdsmall .mdh6 { font-size: 12px; }
+.mdsmall .mdp { margin: 6px 0; }
+.mdsmall .mdb { color: var(--fg); }
+.mdsmall .mdcode { font-size: 11px; margin: 8px 0; padding: 7px 9px; }
+.mdsmall .mdc { font-size: 11px; }
+.mdsmall .mdlist { margin: 6px 0; }
+.mdsmall .mditem { margin: 2px 0; gap: 7px; }
+.mdsmall .mdquote { margin: 8px 0; padding-left: 10px; }
+.mdsmall .mdrule { margin: 12px 0; }
+.mdsmall .mdtablewrap { margin: 8px 0; }
+.mdsmall .mdtable { font-size: 11.5px; }
+.mdsmall .mdtable th, .mdsmall .mdtable td { padding: 4px 7px; }
+.mdsmall > :first-child { margin-top: 0; }
+.mdsmall > :last-child { margin-bottom: 0; }
 
 /* ---------- scrollbars ---------- */
 

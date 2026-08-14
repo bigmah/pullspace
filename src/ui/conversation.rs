@@ -1,17 +1,26 @@
 //! The conversation pane: a pull request's description, the discussion on it,
 //! and the comments left on lines of the diff.
 //!
-//! Bodies are markdown, and they are shown as the markdown they are. Rendering
-//! them would mean putting text written by someone else into this webview as
-//! HTML, which is not a trade worth making for a few bold headings.
+//! Bodies are markdown, and they are drawn as the markdown they are — through
+//! the same renderer the README goes through, which builds elements of this app
+//! out of parsed text and never hands the page a line of somebody else's
+//! markup. See [`crate::backend::markdown`] for why that distinction is the
+//! whole design: a review is read next to a GitHub token in local storage.
+
+use std::path::Path;
 
 use dioxus::prelude::*;
 
 use crate::backend::auth::open_browser;
 use crate::backend::github::{self, Comment, CommentKind, RepoRef};
+use crate::backend::markdown;
 
 use super::app::{Conversation, St};
 use super::panes::{Edge, Splitter};
+
+/// A comment's links are written from the root of the repository — there is no
+/// file they are relative to, the way a README's are.
+const ROOT: &str = "";
 
 /// Fetch the conversation for a pull request, unless it has been closed or
 /// swapped out from under us in the meantime.
@@ -183,6 +192,35 @@ struct Desc {
     html_url: String,
 }
 
+/// A body, drawn — and the note that says what drawing it had to leave out.
+///
+/// Parsed here rather than memoised: a comment is a few hundred bytes, and the
+/// row it is in only re-renders when the comment itself changes.
+#[component]
+fn Body(text: String) -> Element {
+    let st = use_context::<St>();
+    let doc = markdown::parse(&text);
+    rsx! {
+        if doc.raw_html {
+            HtmlNote {}
+        }
+        {super::markdown::render_body(st, Path::new(ROOT), &doc)}
+    }
+}
+
+/// Said once, in one place: raw HTML in a comment is not drawn, and a reader
+/// looking at a gap where a table or a `<details>` should be is owed the reason.
+#[component]
+fn HtmlNote() -> Element {
+    rsx! {
+        span {
+            class: "convkind convhtml",
+            title: "This comment contains HTML — a collapsed section, a table, an image. It is not drawn here; open the comment on github.com to read it.",
+            "html not drawn"
+        }
+    }
+}
+
 #[component]
 fn Description(desc: Desc) -> Element {
     let url = desc.html_url.clone();
@@ -206,7 +244,7 @@ fn Description(desc: Desc) -> Element {
             if desc.body.is_empty() {
                 div { class: "convnone", "No description." }
             } else {
-                div { class: "convtext", "{desc.body}" }
+                Body { text: desc.body.clone() }
             }
         }
     }
@@ -257,7 +295,7 @@ fn CommentRow(c: Comment) -> Element {
                 }
             }
             if !c.body.is_empty() {
-                div { class: "convtext", "{c.body}" }
+                Body { text: c.body.clone() }
             }
         }
     }

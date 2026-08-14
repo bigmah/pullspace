@@ -14,6 +14,8 @@ const PREFIX: &str = "pullspace.";
 pub const TOKEN: &str = "token";
 /// Pane sizes, as JSON.
 pub const LAYOUT: &str = "layout";
+/// Theme, accent, font and code size, as JSON.
+pub const PREFS: &str = "prefs";
 /// Which files of which pull requests have been marked read, as JSON.
 pub const VIEWED: &str = "viewed";
 

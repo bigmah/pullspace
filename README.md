@@ -23,7 +23,10 @@ Two panes, like a traditional IDE but without the weight:
 
 A third pane holds the **conversation**: the description, the discussion, the
 review summaries and the comments left on lines of the diff, merged into one
-list in the order they were written.
+list in the order they were written. Bodies are drawn as the markdown they are
+— headings, lists, tables, and fenced code with the same highlighter the viewer
+uses — through the renderer described under [Markdown](#markdown), so nothing
+anybody wrote on the pull request is ever handed to this page as markup.
 
 A panel across the bottom of the code holds the answer to "where else is this?"
 — search hits, references, definitions — and closes again once it has been read.
@@ -126,14 +129,31 @@ unticked, for another look. The marks are kept in `localStorage`, per pull
 request, for the last two dozen you have opened.
 
 The address bar follows what is open — `#/owner/repo/pull/123` for a pull
-request, `#/owner/repo` for a repository being read on its own. A review is
-therefore a link: one to send to somebody, one to bookmark, and one this tab
-comes back to on reload. The browser's own Back and Forward walk the pull
-requests you have opened, and a link pasted into a tab that is already open
-loads it. It routes after the `#` because there is no server here to teach
-about routes — the fragment is the one part of a URL no host ever sees, so a
-deep link works on GitHub Pages, under a `base_path`, and out of a bare
-directory, with nothing to configure anywhere.
+request, `#/owner/repo` for a repository being read on its own — and it follows
+the file being read with it:
+
+```
+#/owner/repo/pull/123/files/src/ui/app.rs:L420
+#/owner/repo/blob/README.md
+```
+
+**Clicking a line number** picks that line out and puts it in the bar; clicking
+it again puts it down. `Link` in the viewer's header copies whatever the bar
+says, so pointing somebody at the line you mean is two clicks. A link that
+arrives opens the pull request, then the file, then scrolls to the line and
+lights it up — and one pasted into a tab that already has that pull request
+open just goes there, without fetching anything.
+
+`files` and `blob` are the words github.com uses for the same two things, and
+the line is `:L420` rather than `#L420` because a URL has only one `#` and the
+whole route lives in it. Which is also the point: there is no server here to
+teach about routes, the fragment is the one part of a URL no host ever sees, and
+so a deep link works on GitHub Pages, under a `base_path`, and out of a bare
+directory with nothing to configure anywhere.
+
+The browser's own Back and Forward walk the pull requests you have opened, not
+every file you clicked inside one — moving around inside a review rewrites the
+current history entry rather than adding to it.
 
 Opening a PR **downloads the whole repository** into the browser's filesystem,
 twelve files at a time, starting with the ones the PR changes. The top bar
@@ -210,13 +230,36 @@ Following a definition three files away is only worth doing if getting back is
 one key. `⌘[` and `⌘]` — or `Alt`+`←`/`→` — walk back and forward through where
 you have been, and a diff you were reading comes back as the diff rather than as
 source. `Alt`+`↑`/`↓` walk the other axis: the changed files, in review order.
-`⌘P` puts the cursor in the explorer's filter box. `Esc` closes the panel, and
-then clears the selection.
+`⌘P` puts the cursor in the explorer's filter box. `⌘,` opens Appearance. `Esc`
+closes the panel, and then clears the selection.
 
 What is *not* read is what was never downloaded: files over 2 MB, the ones the
 clone leaves behind, and anything a clone that was interrupted never reached.
 The panel says how many, every time — a search that quietly misses a file is
 worse than one that admits to it.
+
+## Appearance
+
+`◐` in the top bar, or `⌘,`. Six things, and a sample of code underneath them
+that moves as you press them:
+
+| Setting | Choices |
+|---|---|
+| Theme | Dark, Midnight (the same thing on an OLED panel), or Light |
+| Accent | blue, violet, green, amber, rose — links, selections, highlights |
+| Code font | the system's own, and the other faces your machine already has |
+| Size | 10–18px, for the code panes |
+| Line spacing | tight, normal, loose |
+| Tab width | 2, 4 or 8 characters |
+
+The syntax colours follow the theme rather than being a seventh setting: dark
+keywords on a white page are not a preference, they are unreadable. Underneath,
+a theme is a `:root` block of custom properties generated from the choices and
+put after the stylesheet, so nothing in the app knows there is more than one
+palette — which is what keeps adding a colour to a two-line change rather than a
+second stylesheet to maintain.
+
+Kept in `localStorage` on this origin. `Reset` puts it all back.
 
 ## Markdown
 
@@ -234,6 +277,13 @@ What is *not* drawn is anything the file smuggles in as HTML. The bar says
 `raw HTML not drawn` when a file contained some. Images are not fetched either:
 their alt text is shown in their place.
 
+The conversation pane goes through the same renderer, at the size of the column
+it is in — which is the answer to the obvious worry about drawing text that
+anybody with a GitHub account can write on a pull request. There is no HTML
+path to attack: the parse produces blocks and styled runs, the viewer builds
+elements out of them, and a comment that was mostly a `<details>` block says
+`html not drawn` under it rather than quietly losing half of itself.
+
 HTML files get a **Preview** that is the real page, rendered in an `iframe` with
 an empty `sandbox` — no scripts, no forms, no navigation, and no same-origin
 access, so a previewed file cannot reach the token in local storage.
@@ -249,7 +299,9 @@ src/
     github.rs       GitHub REST: repo search, PR lists, PR files, trees, blobs
     auth.rs         the token, and localStorage
     store.rs        localStorage: what a desktop app would put in ~/.config
-    route.rs        what is open, as `#/owner/repo/pull/123`, and back again
+    route.rs        what is open, as `#/owner/repo/pull/123/files/x.rs:L42`
+    prefs.rs        theme, accent, font and size, as a `:root` stylesheet
+    clip.rs         the clipboard, for the link to a line
     viewed.rs       which files have been ticked off, by blob hash
     opfs.rs         the browser's filesystem, as bytes in and bytes out
     blobs.rs        the local copy: blobs by content hash, manifests, sweeping
@@ -274,13 +326,15 @@ src/
     nav.rs          the address bar read back: links, Back and Forward
     bottom.rs       the panel under the code: hits, definitions, a peek at one
     markdown.rs     markdown drawn as elements; link targets
-    conversation.rs the pull request's description and comments
+    conversation.rs the pull request's description and comments, drawn
+    prefs.rs        the appearance panel
+    page.rs         the browser tab: its name, and the icon on it
     panes.rs        draggable dividers
 ```
 
 One crate, one target, and no `#[cfg(target_arch)]` anywhere in it. Everything
-is pure except `http.rs`, `store.rs`, `opfs.rs`, `route.rs` and the
-`open_browser` in `auth.rs` — the five places that touch the browser at all.
+is pure except `http.rs`, `store.rs`, `opfs.rs`, `route.rs`, `clip.rs` and the
+`open_browser` in `auth.rs` — the six places that touch the browser at all.
 Nothing in the test suite reaches any of them, which is what keeps `cargo test`
 running on the host.
 
@@ -317,9 +371,14 @@ patterns, URL parsing — is pure.
 - The index waits for the download to finish before it starts, since both go
   through the same filesystem. On a large repository the first Go to Definition
   of a session may arrive a moment after the code does.
-- A link opens the pull request, not the file: `#/owner/repo/pull/123` and no
-  deeper. Which file you had open, and how, is where the tab left off rather
-  than something to send to anyone.
+- A link carries the file and the line, but not the mode: it opens as source at
+  that line, because that is the one form every file has. A line of a diff is
+  therefore two clicks away — `Inline` or `Split` keeps the line lit.
+- Appearance is per browser, like everything else here: a theme is `localStorage`
+  on this origin, not an account setting, and a fresh browser starts on Dark.
+  The code fonts on offer are the ones your operating system already ships, and
+  are named for it — a page cannot install a font, and none is bundled, so
+  offering one you do not have would be a button that changes nothing.
 - Viewed marks are per browser, like everything else here. They are yours, not
   the pull request's — nothing is written back to GitHub, so the boxes you tick
   are invisible to it and to everybody else on the review.

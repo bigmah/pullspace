@@ -127,6 +127,23 @@ pub fn render(st: St, rel: &Path, doc: &Doc) -> Element {
     }
 }
 
+/// A document drawn inside something that has a frame of its own already — a
+/// comment, a pull request's description — rather than as the page.
+///
+/// The same nodes as [`render`] and the same guarantee behind them: text out of
+/// somebody else's pull request becomes elements of this app, never markup. All
+/// that changes is the chrome, which the pane around it is already providing —
+/// no width cap, no bar above it, and type scaled to the column it sits in.
+pub fn render_body(st: St, rel: &Path, doc: &Doc) -> Element {
+    rsx! {
+        div { class: "mddoc mdsmall",
+            for b in doc.blocks.iter() {
+                {block(st, rel, b)}
+            }
+        }
+    }
+}
+
 fn block(st: St, rel: &Path, b: &Block) -> Element {
     match b {
         Block::Heading { level, spans } => {

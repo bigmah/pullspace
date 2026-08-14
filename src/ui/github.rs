@@ -358,7 +358,12 @@ fn PrSection() -> Element {
                     div { class: "ghlabel", "{items.len()} open in {repo}" }
                     div { class: "prlist",
                         for pr in items {
-                            PrRow { key: "{pr.number}", repo: repo.clone(), pr }
+                            // The clone looks removable — clippy says so — but
+                            // the key reads `pr` and whether that read lands
+                            // before or after the move into props is the rsx
+                            // macro's business, not ours. Seen to fail on
+                            // another machine; keep the clone.
+                            PrRow { key: "{pr.number}", repo: repo.clone(), pr: pr.clone() }
                         }
                     }
                     BrowseRow { repo, no_prs: false }

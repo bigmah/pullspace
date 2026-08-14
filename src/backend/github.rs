@@ -88,7 +88,7 @@ impl std::fmt::Display for RepoRef {
 /// `None` when there was none of that to strip, which is how the caller tells
 /// something pasted from a browser from something typed by hand — the two do
 /// not mean quite the same thing once the host is off the front.
-fn strip_host(s: &str) -> Option<&str> {
+pub(crate) fn strip_host(s: &str) -> Option<&str> {
     s.strip_prefix("https://")
         .or_else(|| s.strip_prefix("http://"))
         .map(|r| r.trim_start_matches("www."))

@@ -44,6 +44,12 @@ web-sys = { version = "0.3", features = [
     "Window",
     "Storage",
     "Location",
+    # `replaceState`, so that reading four files of one pull request is one
+    # entry in the browser's history rather than four — see `backend::route`.
+    "History",
+    # `navigator.clipboard`, which is how the link to a line gets somewhere it
+    # can be pasted.
+    "Clipboard",
     "Navigator",
     "StorageManager",
     "Blob",

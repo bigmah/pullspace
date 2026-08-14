@@ -23,6 +23,7 @@ pub fn size_label(bytes: u64) -> String {
 pub fn TopBar() -> Element {
     let st = use_context::<St>();
     let mut gh_open = st.gh_open;
+    let mut prefs_open = st.prefs_open;
 
     // One read of the workspace, and only the crumbs leave it. The whole
     // workspace — two tree snapshots and every changed file — is not something
@@ -231,6 +232,12 @@ pub fn TopBar() -> Element {
                 title: "GitHub pull requests",
                 onclick: move |_| gh_open.set(true),
                 "{account_label}"
+            }
+            button {
+                class: "iconbtn lg",
+                title: "Appearance — theme, accent, font  (⌘,)",
+                onclick: move |_| prefs_open.set(true),
+                span { class: "glyph", "◐" }
             }
             RefreshButton {
                 pr_target,

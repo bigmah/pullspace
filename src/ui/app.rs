@@ -29,6 +29,7 @@ use super::conversation::ConvPane;
 use super::filetree::FileTreePane;
 use super::github::GhPanel;
 use super::ide::{Index, Panel};
+use super::landing::Landing;
 use super::page::Tab;
 use super::panes::{self, Drag, DragMask, Edge};
 use super::prefs::PrefsPanel;
@@ -53,8 +54,8 @@ pub enum ViewMode {
 /// changed, and browsing is the same thing with nothing marked.
 #[derive(Clone, PartialEq)]
 pub enum Workspace {
-    /// Nothing opened yet. The picker is up, because choosing something is the
-    /// only thing there is to do.
+    /// Nothing opened yet. The landing page is up in place of the IDE, because
+    /// choosing something is the only thing there is to do.
     Empty,
     Pr(Box<PrDetail>),
     /// A repository with no pull request in view — because it has none open,
@@ -786,8 +787,8 @@ impl St {
         at.set((now != Some(line)).then_some(line));
     }
 
-    /// Close whatever is open, back to nothing — which puts the picker up,
-    /// since that is the only thing left to do.
+    /// Close whatever is open, back to nothing — which puts the landing page
+    /// up, since choosing something is the only thing left to do.
     pub fn close_workspace(&self) {
         let mut w = self.workspace;
         w.set(Workspace::Empty);
@@ -805,8 +806,11 @@ impl St {
         // this the address bar would go on naming a pull request that is no
         // longer on screen, and reloading would open it again.
         route::show(&Route::home());
+        // The overlay was for switching away from something open. With nothing
+        // open the landing page is the picker, and it is up by virtue of the
+        // workspace being empty.
         let mut gh = self.gh_open;
-        gh.set(true);
+        gh.set(false);
         self.bump_tick();
     }
 
@@ -1204,8 +1208,10 @@ pub fn App() -> Element {
 
             token: root(None),
             account: root(Account::Checking),
-            // Nothing is open at launch, so the picker is where to start.
-            gh_open: root(true),
+            // The overlay is asked for, never assumed: with nothing open the
+            // landing page is the picker, and it is up because the workspace
+            // is empty rather than because this is set.
+            gh_open: root(false),
             repo_input: root(String::new()),
             prs: root(None),
             pr_state: root(PrState::default()),
@@ -1473,30 +1479,39 @@ pub fn App() -> Element {
         style { dangerous_inner_html: look }
         Tab {}
         div { class: "app", style: "{panes}",
-            TopBar {}
-            div {
-                class: "main",
-                // What the dividers are allowed to give away — and, when the
-                // window has just given away some of it, the moment the panes
-                // are moved back inside what is left. The panes are `flex:
-                // none`, so this is the only thing that resizes them, which is
-                // what makes the sizes here the sizes on screen.
-                onresize: move |e| {
-                    if let Ok(size) = e.get_content_box_size() {
-                        let mut area = st.main_size;
-                        area.set((size.width, size.height));
-                        panes::refit(&st);
+            // The IDE is for something being open. With nothing open it would
+            // be three empty panes under a modal, so the landing page stands
+            // in for the lot — including the top bar, whose every control is
+            // about what is open.
+            if st.workspace.read().is_open() {
+                TopBar {}
+                div {
+                    class: "main",
+                    // What the dividers are allowed to give away — and, when
+                    // the window has just given away some of it, the moment
+                    // the panes are moved back inside what is left. The panes
+                    // are `flex: none`, so this is the only thing that resizes
+                    // them, which is what makes the sizes here the sizes on
+                    // screen.
+                    onresize: move |e| {
+                        if let Ok(size) = e.get_content_box_size() {
+                            let mut area = st.main_size;
+                            area.set((size.width, size.height));
+                            panes::refit(&st);
+                        }
+                    },
+                    FileTreePane {}
+                    div { class: "rightcol",
+                        Viewer {}
+                        Bottom {}
                     }
-                },
-                FileTreePane {}
-                div { class: "rightcol",
-                    Viewer {}
-                    Bottom {}
+                    ConvPane {}
                 }
-                ConvPane {}
-            }
-            if *st.gh_open.read() {
-                GhPanel {}
+                if *st.gh_open.read() {
+                    GhPanel {}
+                }
+            } else {
+                Landing {}
             }
             if *st.prefs_open.read() {
                 PrefsPanel {}

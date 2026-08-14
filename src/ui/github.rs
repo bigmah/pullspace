@@ -1,11 +1,18 @@
-//! The GitHub overlay: pick a repository, pick a pull request, and — if a
+//! The GitHub picker: find a repository, pick a pull request, and — if a
 //! private repository is wanted — sign in.
 //!
-//! The picker is up in every state, signed in or not. GitHub serves public
-//! repositories to anyone, `api.github.com` answers cross-origin, and file
-//! bytes come off the CDN unmetered — so a token buys private repositories and
-//! a rate limit of 5000 an hour instead of 60, and nothing else. Asking for one
-//! before showing the box would be charging entry to a public building.
+//! It wears two frames. Over an open workspace it is [`GhPanel`], the overlay
+//! the top bar summons; with nothing open the same controls are the landing
+//! page — see [`super::landing`]. Both are built from the pieces here: the
+//! search box and the pull request list carry the show, and the account and
+//! the local store sit under them as one quiet strip, because both matter and
+//! neither is what anyone came to do.
+//!
+//! The picker works signed in or not. GitHub serves public repositories to
+//! anyone, `api.github.com` answers cross-origin, and file bytes come off the
+//! CDN unmetered — so a token buys private repositories and a rate limit of
+//! 5000 an hour instead of 60, and nothing else. Asking for one before showing
+//! the box would be charging entry to a public building.
 
 use std::collections::HashMap;
 use std::time::Duration;
@@ -52,7 +59,7 @@ pub fn GhPanel() -> Element {
                 class: "ghpanel",
                 onclick: move |e| e.stop_propagation(),
                 div { class: "ghhdr",
-                    span { class: "ghtitle", "GitHub" }
+                    span { class: "ghtitle", "Open from GitHub" }
                     span { class: "spacer" }
                     button {
                         class: "iconbtn",
@@ -62,33 +69,70 @@ pub fn GhPanel() -> Element {
                     }
                 }
                 div { class: "ghbody",
-                    match account.clone() {
-                        Account::Checking => rsx! {
-                            div { class: "ghnote", "Looking for a saved sign-in…" }
-                        },
-                        Account::SignedOut => rsx! {
-                            Anonymous { form: token_form, showing, error: None }
-                        },
-                        Account::Failed(e) => rsx! {
-                            Anonymous { form: token_form, showing, error: Some(e) }
-                        },
-                        Account::SignedIn { login } => rsx! { SignedIn { login } },
-                    }
-                    // Everything below is the same whether or not there is a
-                    // token — it is only *which* repositories answer that
-                    // changes. Held back while the saved token is being
-                    // checked, so a search started in that half-second does not
-                    // go out anonymously and come back rate-limited.
-                    if !matches!(account, Account::Checking) {
-                        // Whichever box the reader came to type in gets the
-                        // caret. The token form is only up because something
-                        // wants a token, so when it is up, it is that one.
-                        RepoPicker { autofocus: !showing }
-                        PrSection {}
-                    }
-                    LocalCopy {}
+                    PickerBody { autofocus: !showing }
                 }
+                PickerFoot { form: token_form, showing }
             }
+        }
+    }
+}
+
+/// The picker itself: the search box, and the pull requests of whatever it
+/// last named. What the overlay and the landing page have in common, which is
+/// everything except the frame.
+#[component]
+pub(super) fn PickerBody(autofocus: bool) -> Element {
+    let st = use_context::<St>();
+    // Held back while the saved token is being checked, so a search started in
+    // that half-second does not go out anonymously and come back rate-limited.
+    // It is only *which* repositories answer that a token changes — the
+    // controls are the same either way.
+    if matches!(&*st.account.read(), Account::Checking) {
+        return rsx! {
+            div { class: "ghsection",
+                div { class: "ghnote", "Looking for a saved sign-in…" }
+            }
+        };
+    }
+    rsx! {
+        // Whichever box the reader came to type in gets the caret. The token
+        // form is only up because something wants a token, so when it is up,
+        // it is that one.
+        RepoPicker { autofocus }
+        PrSection {}
+    }
+}
+
+/// The strip under the picker: who is asking, and what is kept on the disk.
+///
+/// One quiet row each. The token form unfolds out of the first on request, and
+/// is up unasked only when a saved token has been rejected and needs replacing.
+#[component]
+pub(super) fn PickerFoot(form: Signal<Option<bool>>, showing: bool) -> Element {
+    let st = use_context::<St>();
+    let account = st.account.read().clone();
+    // The body already says the check is running, and a footer with no rows
+    // yet would be a bordered strip of nothing.
+    if matches!(account, Account::Checking) {
+        return rsx! {};
+    }
+
+    rsx! {
+        div { class: "ghfoot",
+            match account {
+                Account::SignedOut => rsx! {
+                    AccountLine { form, showing, error: None }
+                },
+                Account::Failed(e) => rsx! {
+                    AccountLine { form, showing, error: Some(e) }
+                },
+                Account::SignedIn { login } => rsx! { SignedIn { login } },
+                Account::Checking => rsx! {},
+            }
+            if showing {
+                SignIn {}
+            }
+            LocalCopy {}
         }
     }
 }
@@ -97,10 +141,10 @@ pub fn GhPanel() -> Element {
 
 /// What is on the disk, and the one button for getting rid of it.
 ///
-/// Worth a panel of its own because it is the one thing pullspace leaves
-/// behind. Everything else about the app is a page that forgets you: this keeps
-/// entire repositories, and somebody who wants that space back should not have
-/// to go looking through browser settings for it.
+/// One row of the footer, and only once there is something to report — it is
+/// the one thing pullspace leaves behind, so somebody who wants the space back
+/// should not have to go looking through browser settings for it, but a store
+/// with nothing in it is not worth a paragraph to a first-time visitor.
 #[component]
 fn LocalCopy() -> Element {
     let st = use_context::<St>();
@@ -115,6 +159,9 @@ fn LocalCopy() -> Element {
     });
 
     let (files, used) = stored.cloned().unwrap_or((0, None));
+    if files == 0 {
+        return rsx! {};
+    }
     let size = match used {
         Some((used, quota)) if quota > 0.0 => format!(
             " · {} of {} used",
@@ -125,38 +172,31 @@ fn LocalCopy() -> Element {
     };
 
     rsx! {
-        div { class: "ghsection",
-            div { class: "ghrow",
-                div { class: "ghlabel", "Local copy" }
-                span { class: "spacer" }
-                if files > 0 {
-                    button {
-                        class: "linkbtn",
-                        title: "Delete every repository kept in this browser",
-                        // Root scope: emptying the store means deleting every
-                        // file in it, and closing the panel part way through
-                        // must not leave that half done.
-                        onclick: move |_| {
-                            spawn_forever(async move {
-                                blobs::clear().await;
-                                // The decoded copies search reads from are a
-                                // copy of what has just been deleted.
-                                crate::backend::scan::forget();
-                                st.store_changed();
-                            });
-                        },
-                        "Clear"
-                    }
-                }
+        div { class: "ghrow",
+            span {
+                class: "ghwho",
+                title: "Repositories you open are kept in this browser's own filesystem, \
+                        so a repository opened before comes back instantly, and a pull \
+                        request on it downloads only what changed.",
+                "{files} files kept in this browser{size}"
             }
-            div { class: "ghhelp",
-                if files == 0 {
-                    "Repositories you open are kept in this browser's own filesystem, so the \
-                     next pull request on one of them opens without downloading it again."
-                } else {
-                    "{files} files kept{size} — so a repository opened before comes back \
-                     instantly, and a pull request on it downloads only what changed."
-                }
+            span { class: "spacer" }
+            button {
+                class: "linkbtn",
+                title: "Delete every repository kept in this browser",
+                // Root scope: emptying the store means deleting every file in
+                // it, and closing the panel part way through must not leave
+                // that half done.
+                onclick: move |_| {
+                    spawn_forever(async move {
+                        blobs::clear().await;
+                        // The decoded copies search reads from are a copy of
+                        // what has just been deleted.
+                        crate::backend::scan::forget();
+                        st.store_changed();
+                    });
+                },
+                "Clear"
             }
         }
     }
@@ -173,42 +213,35 @@ const NEW_TOKEN_URL: &str = "https://github.com/settings/personal-access-tokens/
 /// there is a token that needs fixing. It cannot be settled at mount: the panel
 /// is up from the first frame, while the saved token is still being checked, so
 /// a rejection arrives after whatever was decided on the way in.
-fn form_open(form: &Signal<Option<bool>>, account: &Account) -> bool {
+pub(super) fn form_open(form: &Signal<Option<bool>>, account: &Account) -> bool {
     form.read().unwrap_or(matches!(account, Account::Failed(_)))
 }
 
-/// Signed out: say what that costs, and offer the token form to anyone it costs
-/// something.
+/// Signed out: one line saying so and what it costs, and the way to change it.
 ///
-/// It costs two things and no others — private repositories, and the difference
-/// between sixty requests an hour and five thousand — so both are named here,
-/// next to the button that fixes them. The picker below this is live either way.
+/// It costs two things and no others — private repositories, and the
+/// difference between sixty API requests an hour and five thousand — so the
+/// line names them, and the form that fixes them unfolds beneath. The picker
+/// above is live either way.
 #[component]
-fn Anonymous(form: Signal<Option<bool>>, showing: bool, error: Option<String>) -> Element {
+fn AccountLine(form: Signal<Option<bool>>, showing: bool, error: Option<String>) -> Element {
     let mut form = form;
 
     rsx! {
-        div { class: "ghsection ghaccount",
-            span { class: "ghwho", "Browsing " b { "anonymously" } }
+        if let Some(e) = error {
+            div { class: "gherror", "{e}" }
+        }
+        div { class: "ghrow",
+            span { class: "ghwho",
+                "Browsing "
+                b { "anonymously" }
+                " — public repositories, 60 API requests an hour"
+            }
             span { class: "spacer" }
             button {
                 class: "linkbtn",
                 onclick: move |_| form.set(Some(!showing)),
                 if showing { "Cancel" } else { "Add a token" }
-            }
-        }
-        if let Some(e) = error {
-            div { class: "gherror", "{e}" }
-        }
-        if showing {
-            SignIn {}
-        } else {
-            div { class: "ghsection",
-                div { class: "ghhelp",
-                    "Public repositories and their pull requests need no sign-in. A token adds "
-                    "private repositories, and raises GitHub's limit of 60 API requests an hour "
-                    "to 5000 — file contents come off the CDN and count against neither."
-                }
             }
         }
     }
@@ -235,6 +268,11 @@ fn SignIn() -> Element {
     rsx! {
         div { class: "ghsection",
             div { class: "ghlabel", "GitHub token" }
+            div { class: "ghhelp",
+                "A token adds private repositories, and raises GitHub's limit of 60 API "
+                "requests an hour to 5000 — file contents come off the CDN and count "
+                "against neither."
+            }
             input {
                 class: "ghinput",
                 // A bearer token is a password, and shoulder-surfing is real.
@@ -322,7 +360,7 @@ fn SignedIn(login: String) -> Element {
     let st = use_context::<St>();
 
     rsx! {
-        div { class: "ghsection ghaccount",
+        div { class: "ghrow",
             span { class: "ghwho", "Signed in as " b { "{login}" } }
             span { class: "spacer" }
             button {
@@ -348,14 +386,27 @@ fn PrSection() -> Element {
     let current = st.workspace.read().pr_number();
     let fetching = st.fetch.read().clone();
 
+    // A load on its way, or the report of the one that failed — both shown
+    // here rather than nowhere, because this picker is where the thing being
+    // fetched was asked for.
+    let status: Option<Element> = match &fetching {
+        Fetch::Working(note) => Some(rsx! {
+            div { class: "ghnote busy", "{note}" }
+        }),
+        Fetch::Failed(e) => Some(rsx! {
+            div { class: "gherror", "{e}" }
+        }),
+        Fetch::Idle => None,
+    };
+
     let Some(list) = held else {
+        // Nothing named yet. The box above already says what to type, so the
+        // section stays out of the way until it has news to report.
+        if status.is_none() {
+            return rsx! {};
+        }
         return rsx! {
-            div { class: "ghsection prsection",
-                if let Fetch::Failed(e) = fetching {
-                    div { class: "gherror", "{e}" }
-                }
-                div { class: "ghnote", "Pick a repository to list its pull requests." }
-            }
+            div { class: "ghsection prsection", {status} }
         };
     };
     let repo = list.repo.clone();
@@ -365,11 +416,7 @@ fn PrSection() -> Element {
 
     rsx! {
         div { class: "ghsection prsection",
-            // A failed load is reported here rather than nowhere: the panel is
-            // where the thing that failed was asked for.
-            if let Fetch::Failed(e) = fetching {
-                div { class: "gherror", "{e}" }
-            }
+            {status}
             div { class: "ghrow",
                 if ready && count > 0 {
                     div { class: "ghlabel", "{count} {word}in {repo}" }
@@ -763,7 +810,7 @@ fn drill(st: St, mut highlight: Signal<usize>, login: &str) {
     highlight.set(0);
 }
 
-/// Enter, or Load: open whatever is typed.
+/// Enter, or the Open button: open whatever is typed.
 ///
 /// Unless what is typed is an account, which has nothing to open — a person is
 /// not a pull request. Stepping into it is what was meant, and it is what the
@@ -856,12 +903,11 @@ fn RepoPicker(autofocus: bool) -> Element {
 
     rsx! {
         div { class: "ghsection",
-            div { class: "ghlabel", "Repository, owner, pull request or commit" }
             div { class: "ghrow",
                 input {
                     class: "ghinput",
                     r#type: "text",
-                    placeholder: "search repos, orgs and users · owner/repo · or a link to a pull request or commit",
+                    placeholder: "Search GitHub · owner/repo · or paste a link to a PR or commit",
                     spellcheck: "false",
                     autocomplete: "off",
                     value: "{typed}",
@@ -916,7 +962,7 @@ fn RepoPicker(autofocus: bool) -> Element {
                 button {
                     class: "primarybtn",
                     onclick: move |_| go(st, open, highlight),
-                    "Load"
+                    "Open"
                 }
             }
             if showing {

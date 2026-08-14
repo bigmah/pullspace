@@ -601,14 +601,13 @@ fn SymBar(name: String) -> Element {
     }
 }
 
-/// Nothing open. Which means one of two quite different things: the app has
-/// just started, or something is on screen and no file in it has been picked
-/// yet — a repository whose README could not be found, or a comparison.
-/// Offering to go and find a pull request is only an answer to the first.
+/// No file open: something is on screen and no file in it has been picked yet
+/// — a repository whose README could not be found, a commit, a merge. Say what
+/// is open and where its files are. (Nothing open at all never lands here: the
+/// landing page stands in for the whole IDE then.)
 #[component]
 fn Welcome() -> Element {
     let st = use_context::<St>();
-    let mut gh_open = st.gh_open;
     let showing = match &*st.workspace.read() {
         Workspace::Pr(pr) => Some((
             format!("{} #{}", pr.repo, pr.number),
@@ -635,27 +634,18 @@ fn Welcome() -> Element {
         )),
         _ => None,
     };
-    if let Some((title, hint)) = showing {
+    let Some((title, hint)) = showing else {
+        // Unreachable while the landing page owns the empty workspace, and
+        // nothing worth drawing if that ever changes.
         return rsx! {
-            div { class: "viewer",
-                div { class: "welcome",
-                    div { class: "welcome-title", "{title}" }
-                    div { class: "welcome-hint", "{hint}" }
-                }
-            }
+            div { class: "viewer" }
         };
-    }
+    };
     rsx! {
         div { class: "viewer",
             div { class: "welcome",
-                div { class: "welcome-logo", "pullspace" }
-                div { class: "welcome-sub", "a lightweight diff viewer" }
-                div { class: "welcome-hint", "Pick a file on the left — changed files open as diffs." }
-                button {
-                    class: "primarybtn",
-                    onclick: move |_| gh_open.set(true),
-                    "View a pull request"
-                }
+                div { class: "welcome-title", "{title}" }
+                div { class: "welcome-hint", "{hint}" }
             }
         }
     }

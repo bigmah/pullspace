@@ -80,8 +80,8 @@ pub async fn landing(st: St) {
     // Read now rather than at mount: nothing writes the bar before this runs,
     // and reading it here is one less thing to keep in step.
     let asked = route::current();
-    // Nothing linked to. The picker is already up, which is the whole of what
-    // "home" means here.
+    // Nothing linked to. The landing page is already up, which is the whole of
+    // what "home" means here.
     if asked.at != Target::Home {
         go(st, asked);
     }

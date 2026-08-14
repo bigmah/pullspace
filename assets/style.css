@@ -961,18 +961,8 @@ button { font-family: inherit; user-select: none; }
   text-align: center;
 }
 
-.welcome-logo {
-  font-family: var(--mono);
-  font-size: 34px;
-  font-weight: 700;
-  color: var(--accent);
-  letter-spacing: -0.5px;
-}
-
-.welcome-sub { color: var(--fg-dim); margin-bottom: 16px; }
-
-/* The same pane, when something *is* open and no file in it has been picked —
-   so it says what is on screen rather than what the app is called. */
+/* What is on screen — the pull request, the branch, the commit — said in the
+   pane that will hold its files once one is picked. */
 .welcome-title {
   font-family: var(--mono);
   font-size: 15px;
@@ -981,7 +971,6 @@ button { font-family: inherit; user-select: none; }
 }
 
 .welcome-hint { color: var(--fg-faint); font-size: 12px; line-height: 1.7; }
-.welcome .primarybtn { margin-top: 22px; }
 
 .notice { color: var(--fg-dim); padding: 24px; font-family: var(--mono); font-size: 12px; }
 
@@ -1864,8 +1853,25 @@ button { font-family: inherit; user-select: none; }
 
 .ghsection:last-child { border-bottom: none; }
 
-.ghaccount { flex-direction: row; align-items: center; gap: 8px; }
-.ghcache { flex-direction: row; align-items: center; gap: 8px; }
+/* The quiet strip under the picker: the account and the local store, one row
+   each. Set a shade back from the body — both matter, neither is why the
+   panel is up. */
+.ghfoot {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 16px;
+  border-top: 1px solid var(--border);
+  background: var(--bg);
+}
+
+.ghfoot .ghwho { font-size: 11.5px; color: var(--fg-dim); }
+.ghfoot .ghwho b { color: var(--fg); font-weight: 600; }
+
+/* The token form, unfolded into the footer: the section chrome minus the
+   ruled line, which the footer's own border already draws. */
+.ghfoot .ghsection { padding: 8px 0; border-bottom: none; }
 
 .ghwho { font-size: 12.5px; color: var(--fg); }
 .ghsrc {
@@ -1895,6 +1901,11 @@ button { font-family: inherit; user-select: none; }
 }
 
 .ghnote { font-size: 12px; color: var(--fg-dim); }
+
+/* A fetch in flight — "Loading pull request…" while the panel is still up.
+   The same gentle pulse as the top bar's status, for the same reason: it sits
+   there for as long as the network takes. */
+.ghnote.busy { animation: warmpulse 2.4s ease-in-out infinite; }
 
 .gherror {
   font-size: 12px;
@@ -2184,6 +2195,95 @@ button { font-family: inherit; user-select: none; }
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* ---------- landing ---------- */
+
+/* The empty workspace as a page rather than an empty IDE under a modal: the
+   name, the search, and — for whoever is new here — what this is. */
+.landing {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  justify-content: center;
+}
+
+.landing-prefs { position: fixed; top: 10px; right: 12px; z-index: 10; }
+
+/* Stretched to the page by the flex row above, so the footer's `margin-top:
+   auto` has somewhere to push against when the column runs short. */
+.landing-col {
+  width: 640px;
+  max-width: calc(100vw - 48px);
+  display: flex;
+  flex-direction: column;
+  padding: 11vh 0 20px;
+}
+
+.landing-hero { text-align: center; margin-bottom: 16px; }
+
+.landing-logo {
+  font-family: var(--mono);
+  font-size: 40px;
+  font-weight: 700;
+  color: var(--accent);
+  letter-spacing: -1px;
+}
+
+.landing-tag { color: var(--fg-dim); font-size: 14px; margin-top: 8px; }
+
+/* The picker at page scale. The section chrome is the panel's; here the page
+   is the panel, so the ruled lines go and the box grows into a marquee. */
+.landing-col .ghsection { border-bottom: none; padding: 10px 0; }
+
+.landing-col .ghinput {
+  height: 40px;
+  font-size: 13px;
+  padding: 0 14px;
+  border-radius: var(--r-lg);
+}
+
+.landing-col .ghrow > .primarybtn {
+  height: 40px;
+  padding: 0 20px;
+  border-radius: var(--r-lg);
+  font-size: 12.5px;
+}
+
+.landing-points {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 20px;
+  margin: 22px 0 28px;
+  padding-top: 22px;
+  border-top: 1px solid var(--border-soft);
+}
+
+.landing-point-title {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 1.1px;
+  text-transform: uppercase;
+  color: var(--fg-faint);
+  margin-bottom: 6px;
+}
+
+.landing-point-body { font-size: 11.5px; color: var(--fg-dim); line-height: 1.6; }
+
+/* Three abreast needs the width of three. Stacked, the points read fine. */
+@media (max-width: 720px) {
+  .landing-points { grid-template-columns: 1fr; gap: 14px; }
+}
+
+/* On the page the footer keeps its rows but loses the panel's inset: the page
+   background is already the recessed shade, and the bottom of a column is not
+   a box to close. */
+.landing-col .ghfoot {
+  background: transparent;
+  border-top: 1px solid var(--border-soft);
+  padding: 14px 0 0;
+  margin-top: auto;
 }
 
 /* ---------- branches ---------- */

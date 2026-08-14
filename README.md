@@ -6,7 +6,7 @@ It is a **static page**. An `index.html`, a `.wasm` and a `.js` — no server, n
 backend, no account with anyone. The page talks to `api.github.com` from the tab
 it is open in, because GitHub answers cross-origin requests.
 
-
+![pullspace showing a pull request diff side-by-side](diff.png)
 
 
 Two panes, like a traditional IDE but without the weight:

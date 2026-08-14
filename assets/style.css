@@ -23,7 +23,6 @@
   --added: #4fbf7a;
   --modified: #e2b34c;
   --deleted: #e06c75;
-  --conflict: #d858c8;
   --add-bg: rgba(79, 191, 122, 0.13);
   --add-emph: rgba(79, 191, 122, 0.34);
   --del-bg: rgba(224, 108, 117, 0.13);
@@ -201,32 +200,6 @@ button { font-family: inherit; user-select: none; }
   box-shadow: inset 0 0 0 1px rgba(226, 179, 76, 0.4);
 }
 
-/* How much is on each side of `git add`. Green for what a commit would take,
-   amber for what it would leave — the same two colours the badges use. */
-.stgcount {
-  font-family: var(--mono);
-  font-size: 10.5px;
-  border-radius: 3px;
-  padding: 2px 6px;
-  flex: none;
-  white-space: nowrap;
-  font-variant-numeric: tabular-nums;
-}
-
-.stgcount.stg { color: var(--added); background: rgba(79, 191, 122, 0.14); }
-.stgcount.unstg { color: var(--modified); background: rgba(226, 179, 76, 0.14); }
-.stgcount.clean { color: var(--fg-faint); }
-
-.repopath {
-  color: var(--fg-faint);
-  font-family: var(--mono);
-  font-size: 11px;
-  max-width: 380px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
 .searchbox {
   flex: 1 1 260px;
   max-width: 460px;
@@ -289,7 +262,6 @@ button { font-family: inherit; user-select: none; }
 
 .iconbtn:hover:enabled { background: var(--bg-3); color: var(--fg); }
 .iconbtn:active:enabled { background: var(--bg-4); }
-.iconbtn:disabled { opacity: 0.4; cursor: default; }
 
 .iconbtn.lg { width: 32px; height: 32px; font-size: 18px; }
 .iconbtn.sm { width: 24px; height: 24px; font-size: 13px; border-radius: var(--r-sm); }
@@ -672,12 +644,10 @@ button { font-family: inherit; user-select: none; }
 .st-added { color: var(--added); }
 .st-modified { color: var(--modified); }
 .st-deleted { color: var(--deleted); text-decoration: line-through; }
-.st-conflict { color: var(--conflict); }
 
 .badge.st-added { background: rgba(79, 191, 122, 0.15); }
 .badge.st-modified { background: rgba(226, 179, 76, 0.15); }
 .badge.st-deleted { background: rgba(224, 108, 117, 0.15); text-decoration: none; }
-.badge.st-conflict { background: rgba(216, 88, 200, 0.15); }
 
 /* A file that has been read steps back: what is left to review is what the eye
    should land on going down the list. It is the name and the badge that fade,
@@ -695,14 +665,6 @@ button { font-family: inherit; user-select: none; }
   font-size: 10px;
   line-height: 1;
 }
-
-/* Which side of `git add` the file is on, in the chip that is already there
-   rather than in a second mark beside it. Staged is boxed — it is settled, one
-   commit from being history. Unstaged is the loose tinted chip it always was.
-   Partly staged gets the left edge of the box only, because that is what it
-   is: half in. */
-.badge.stg { box-shadow: inset 0 0 0 1px currentColor; }
-.badge.half { box-shadow: inset 2px 0 0 0 currentColor; }
 
 /* ---------- viewer ---------- */
 
@@ -729,26 +691,6 @@ button { font-family: inherit; user-select: none; }
 }
 
 .delnote { color: var(--deleted); font-size: 11px; flex: none; }
-
-/* Where this file stands with `git add`, next to the counts of what changed in
-   it. The buttons on the right say which diff is being shown; this says which
-   ones there are to show. */
-.stgnote {
-  font-family: var(--mono);
-  font-size: 10px;
-  border-radius: 3px;
-  padding: 1px 5px;
-  flex: none;
-  white-space: nowrap;
-}
-
-.stgnote.stg { color: var(--added); background: rgba(79, 191, 122, 0.14); }
-.stgnote.unstg { color: var(--modified); background: rgba(226, 179, 76, 0.14); }
-.stgnote.half {
-  color: var(--modified);
-  background: rgba(226, 179, 76, 0.14);
-  box-shadow: inset 2px 0 0 0 var(--added);
-}
 
 .dstat { font-family: var(--mono); font-size: 11px; font-weight: 700; flex: none; }
 .dstat.add { color: var(--added); }
@@ -1255,15 +1197,6 @@ button { font-family: inherit; user-select: none; }
 
 /* The page is drawn at twice its CSS size for sharpness; the width it is shown
    at comes from the render itself. Never wider than the pane. */
-.previewimg {
-  display: block;
-  max-width: calc(100% - 24px);
-  height: auto;
-  margin: 0 12px 24px;
-  border: 1px solid var(--border);
-  border-radius: 4px;
-}
-
 /* The browser build renders the page for real, in a sandboxed frame. It fills
    the pane rather than sizing to the content: a frame cannot be measured from
    the outside once it has an opaque origin, so there is no height to fit to. */
@@ -1874,14 +1807,6 @@ button { font-family: inherit; user-select: none; }
 .ghfoot .ghsection { padding: 8px 0; border-bottom: none; }
 
 .ghwho { font-size: 12.5px; color: var(--fg); }
-.ghsrc {
-  font-family: var(--mono);
-  font-size: 10px;
-  color: var(--fg-faint);
-  border: 1px solid var(--line);
-  border-radius: 3px;
-  padding: 1px 6px;
-}
 
 .ghlabel {
   font-size: 10px;
@@ -1960,7 +1885,9 @@ button { font-family: inherit; user-select: none; }
 .primarybtn:active:enabled { filter: brightness(0.94); }
 .primarybtn:disabled { opacity: 0.4; cursor: default; }
 
-.linkbtn {
+/* The GitHub panel's text links — `.linkbtn`, further up, is the viewer's
+   "Link/Copied" chip, which is a different thing wearing a similar name. */
+.textlink {
   background: transparent;
   border: none;
   color: var(--accent);
@@ -1970,75 +1897,13 @@ button { font-family: inherit; user-select: none; }
   flex: none;
 }
 
-.linkbtn:hover { text-decoration: underline; }
-
-/* Deleting every mirror and checkout on disk is not a link. It reads as a
-   quiet button until the pointer is on it, at which point it says what it is. */
-.dangerbtn {
-  display: inline-flex;
-  align-items: center;
-  height: 26px;
-  padding: 0 11px;
-  background: transparent;
-  border: 1px solid var(--line);
-  border-radius: var(--r-sm);
-  color: var(--fg-dim);
-  cursor: pointer;
-  font-size: 11.5px;
-  flex: none;
-  transition: background-color var(--quick) var(--ease), color var(--quick) var(--ease),
-    border-color var(--quick) var(--ease);
-}
-
-.dangerbtn:hover {
-  color: var(--deleted);
-  border-color: rgba(224, 108, 117, 0.5);
-  background: var(--del-bg);
-}
+.textlink:hover { text-decoration: underline; }
 
 /* `flex-start` here means "do not stretch across the column", which is only
    ever true inside a `.ghsection`. Left on the base rule it also meant "sit
    above the centre line" in every row these are used in. */
-.ghsection > .linkbtn,
+.ghsection > .textlink,
 .ghsection > .primarybtn { align-self: flex-start; }
-
-/* The device-flow code the user types into github.com. */
-.ghcoderow {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 6px;
-}
-
-.ghcoderow .ghcode { align-self: stretch; }
-
-.copybtn {
-  background: transparent;
-  border: 1px solid var(--line);
-  border-radius: var(--r-sm);
-  color: var(--fg-dim);
-  cursor: pointer;
-  font-size: 11.5px;
-  height: 24px;
-  padding: 0 10px;
-  transition: background-color var(--quick) var(--ease), color var(--quick) var(--ease);
-}
-
-.copybtn:hover { background: var(--bg-2); color: var(--fg); }
-
-.ghcode {
-  font-family: var(--mono);
-  font-size: 26px;
-  font-weight: 700;
-  letter-spacing: 5px;
-  color: var(--fg);
-  background: var(--bg-3);
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  padding: 12px;
-  text-align: center;
-  user-select: all;
-}
 
 /* ---------- github: repository suggestions ---------- */
 
@@ -2298,84 +2163,6 @@ button { font-family: inherit; user-select: none; }
   padding: 14px 0 0;
   margin-top: auto;
 }
-
-/* ---------- branches ---------- */
-
-/* Which branch this is, in the top bar. A chip rather than more grey text
-   beside the path: it is the one piece of state up there you can act on. */
-.branchchip {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  height: var(--ctl);
-  padding: 0 10px;
-  background: transparent;
-  border: 1px solid var(--line);
-  border-radius: var(--r);
-  color: var(--fg-dim);
-  cursor: pointer;
-  font-size: 11.5px;
-  flex: none;
-  max-width: 240px;
-  transition: background-color var(--quick) var(--ease), color var(--quick) var(--ease),
-    border-color var(--quick) var(--ease);
-}
-
-.branchchip:hover { color: var(--fg); border-color: var(--fg-faint); background: var(--bg-3); }
-
-/* Detached: not on a branch, which is worth noticing before you compare
-   something against it. */
-.branchchip.loose { color: var(--modified); border-color: rgba(226, 179, 76, 0.4); }
-
-.branchglyph { font-size: 12px; opacity: 0.8; flex: none; }
-
-.branchlabel {
-  font-family: var(--mono);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.branchnow { display: flex; align-items: center; gap: 8px; }
-
-.branchname {
-  font-family: var(--mono);
-  font-size: 12.5px;
-  color: var(--accent);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-/* Two of these and a button share one row, so neither end is allowed to grow
-   past its half of it however long a branch name gets. */
-.branchrow { flex-wrap: wrap; }
-
-.branchsel {
-  flex: 1 1 160px;
-  min-width: 0;
-  height: 32px;
-  background: var(--bg-2);
-  border: 1px solid var(--line);
-  border-radius: var(--r);
-  color: var(--fg);
-  font-family: var(--mono);
-  font-size: 12px;
-  padding: 0 28px 0 10px;
-  cursor: pointer;
-  /* The platform's own arrow is a lozenge in the middle of a light grey box;
-     this is the same chevron the rest of the app draws. */
-  appearance: none;
-  background-image: linear-gradient(45deg, transparent 50%, var(--fg-faint) 50%),
-    linear-gradient(135deg, var(--fg-faint) 50%, transparent 50%);
-  background-position: calc(100% - 15px) 14px, calc(100% - 10px) 14px;
-  background-size: 5px 5px, 5px 5px;
-  background-repeat: no-repeat;
-  transition: border-color var(--quick) var(--ease), box-shadow var(--quick) var(--ease);
-}
-
-.branchsel:hover { border-color: var(--bg-4); }
-.branchsel:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
 
 /* ---------- markdown ---------- */
 

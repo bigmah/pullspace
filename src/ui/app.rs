@@ -332,12 +332,16 @@ pub struct Spot {
 const TRAIL: usize = 60;
 
 /// Both sides of one file, fetched on demand.
+///
+/// The sides are `Rc` because every write to the cache re-runs the viewer's
+/// memo over the open file: shared, that is a pointer bump and a pointer
+/// compare, not a copy of the file.
 #[derive(Clone, PartialEq)]
 pub enum PrFileState {
     Loading,
     Ready {
-        base: FileContent,
-        head: FileContent,
+        base: Rc<FileContent>,
+        head: Rc<FileContent>,
     },
     Failed(String),
 }
@@ -1471,12 +1475,14 @@ pub fn App() -> Element {
 
     // The chosen palette, font and size, as the stylesheet that applies them.
     // After the app's own, so it wins — and nowhere near it, so the defaults
-    // stay readable as the defaults.
-    let look = st.prefs.read().css();
+    // stay readable as the defaults. Memoised because `App` re-renders on
+    // every divider-drag frame, and thirty format'd properties per mousemove
+    // is not what a drag should cost.
+    let look = use_memo(move || st.prefs.read().css());
 
     rsx! {
         style { dangerous_inner_html: CSS }
-        style { dangerous_inner_html: look }
+        style { dangerous_inner_html: "{look}" }
         Tab {}
         div { class: "app", style: "{panes}",
             // The IDE is for something being open. With nothing open it would

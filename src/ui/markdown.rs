@@ -15,6 +15,7 @@ use dioxus::prelude::*;
 use crate::backend::auth::open_browser;
 use crate::backend::highlight::highlight_lang;
 use crate::backend::markdown::{Block, Doc, Item, Span};
+use crate::backend::route::decoded;
 
 use super::app::St;
 
@@ -63,7 +64,7 @@ fn resolve(from: &Path, href: &str) -> Target {
                     return Target::Nowhere;
                 }
             }
-            other => out.push(percent_decoded(other)),
+            other => out.push(decoded(other)),
         }
     }
     if out.as_os_str().is_empty() {
@@ -71,35 +72,6 @@ fn resolve(from: &Path, href: &str) -> Target {
     } else {
         Target::File(out)
     }
-}
-
-/// `docs/getting%20started.md` is a path with a space in it. Only the escapes
-/// are undone — everything else in the segment is already the name it is.
-fn percent_decoded(seg: &str) -> String {
-    if !seg.contains('%') {
-        return seg.to_string();
-    }
-    let bytes = seg.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        let hex = (i + 2 < bytes.len())
-            .then(|| std::str::from_utf8(&bytes[i + 1..i + 3]).ok())
-            .flatten()
-            .filter(|_| bytes[i] == b'%')
-            .and_then(|h| u8::from_str_radix(h, 16).ok());
-        match hex {
-            Some(byte) => {
-                out.push(byte);
-                i += 3;
-            }
-            None => {
-                out.push(bytes[i]);
-                i += 1;
-            }
-        }
-    }
-    String::from_utf8_lossy(&out).into_owned()
 }
 
 /// A whole document.
@@ -342,13 +314,5 @@ mod tests {
         // Out of the repository, either upwards or from the filesystem root.
         assert_eq!(target("README.md", "../secrets"), "nowhere");
         assert_eq!(target("README.md", "/etc/passwd"), "nowhere");
-    }
-
-    #[test]
-    fn percent_escapes_are_undone_and_the_rest_is_left_alone() {
-        assert_eq!(percent_decoded("plain.md"), "plain.md");
-        assert_eq!(percent_decoded("a%20b"), "a b");
-        assert_eq!(percent_decoded("100%"), "100%");
-        assert_eq!(percent_decoded("%zz"), "%zz");
     }
 }

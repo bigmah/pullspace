@@ -7,8 +7,6 @@ pub enum ChangeKind {
     Modified,
     Deleted,
     Renamed,
-    Untracked,
-    Conflicted,
 }
 
 impl ChangeKind {
@@ -18,17 +16,14 @@ impl ChangeKind {
             ChangeKind::Modified => "M",
             ChangeKind::Deleted => "D",
             ChangeKind::Renamed => "R",
-            ChangeKind::Untracked => "U",
-            ChangeKind::Conflicted => "!",
         }
     }
 
     pub fn css(&self) -> &'static str {
         match self {
-            ChangeKind::Added | ChangeKind::Untracked => "st-added",
+            ChangeKind::Added => "st-added",
             ChangeKind::Modified | ChangeKind::Renamed => "st-modified",
             ChangeKind::Deleted => "st-deleted",
-            ChangeKind::Conflicted => "st-conflict",
         }
     }
 }
@@ -132,10 +127,9 @@ impl DirTmp {
 /// there is no working directory to walk — `paths` is the repository tree at
 /// the PR's head.
 ///
-/// Status paths are merged in the same way [`build_tree`] merges them over the
-/// worktree: a file deleted by the PR is absent from the head tree but still
-/// belongs in the explorer. Passing an empty `paths` degrades to a
-/// changed-files-only tree.
+/// Status paths are merged into the listing as well: a file deleted by the PR
+/// is absent from the head tree but still belongs in the explorer. Passing an
+/// empty `paths` degrades to a changed-files-only tree.
 pub fn build_tree_from_paths<'a>(
     label: &str,
     paths: impl IntoIterator<Item = &'a Path>,
@@ -361,9 +355,16 @@ pub fn filter_changed(node: &FileNode) -> Option<FileNode> {
         if children.is_empty() {
             return None;
         }
-        let mut out = node.clone();
-        out.children = children;
-        Some(out)
+        // Rebuilt rather than `node.clone()`, which would deep-copy the full
+        // unfiltered subtree only to throw it away.
+        Some(FileNode {
+            name: node.name.clone(),
+            path: node.path.clone(),
+            is_dir: true,
+            children,
+            status: node.status,
+            changed: node.changed,
+        })
     } else if node.status.is_some() {
         Some(node.clone())
     } else {

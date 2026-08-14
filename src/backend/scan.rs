@@ -162,8 +162,6 @@ pub struct Walked {
     /// Named by the tree but not in the local store: too large for the clone,
     /// nothing it would fetch, or a fetch that failed.
     pub missing: usize,
-    /// Read, and not text.
-    pub binary: usize,
     /// The visitor asked to stop — so `read` is not the whole repository even
     /// counting the misses.
     pub stopped: bool,
@@ -246,7 +244,9 @@ pub async fn walk(
                     break;
                 }
             }
-            Read::Binary => at.binary += 1,
+            // Read, and not text. Not a shortfall — the walk did look at it,
+            // there was just nothing searchable inside.
+            Read::Binary => {}
             // On disk a moment ago and not now — swept by another tab, or a
             // short write thrown out on the way past. Either way it is a file
             // this scan did not cover.

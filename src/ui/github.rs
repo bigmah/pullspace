@@ -182,7 +182,7 @@ fn LocalCopy() -> Element {
             }
             span { class: "spacer" }
             button {
-                class: "linkbtn",
+                class: "textlink",
                 title: "Delete every repository kept in this browser",
                 // Root scope: emptying the store means deleting every file in
                 // it, and closing the panel part way through must not leave
@@ -239,7 +239,7 @@ fn AccountLine(form: Signal<Option<bool>>, showing: bool, error: Option<String>)
             }
             span { class: "spacer" }
             button {
-                class: "linkbtn",
+                class: "textlink",
                 onclick: move |_| form.set(Some(!showing)),
                 if showing { "Cancel" } else { "Add a token" }
             }
@@ -309,7 +309,7 @@ fn SignIn() -> Element {
                 "."
             }
             button {
-                class: "linkbtn",
+                class: "textlink",
                 onclick: move |_| open_browser(NEW_TOKEN_URL),
                 "Create a token on GitHub →"
             }
@@ -364,7 +364,7 @@ fn SignedIn(login: String) -> Element {
             span { class: "ghwho", "Signed in as " b { "{login}" } }
             span { class: "spacer" }
             button {
-                class: "linkbtn",
+                class: "textlink",
                 onclick: move |_| do_sign_out(st),
                 "Sign out"
             }
@@ -490,7 +490,7 @@ pub(super) fn PrListBody(current: Option<u64>) -> Element {
         Got::Failed(e) => rsx! {
             div { class: "gherror", "{e}" }
             button {
-                class: "linkbtn",
+                class: "textlink",
                 // Root scope: the note this button is in is replaced by the
                 // load it starts.
                 onclick: move |_| {
@@ -1126,7 +1126,7 @@ fn RepoRow(
 #[component]
 fn BrowseRow(repo: RepoRef, no_prs: bool) -> Element {
     let st = use_context::<St>();
-    let class = if no_prs { "primarybtn" } else { "linkbtn" };
+    let class = if no_prs { "primarybtn" } else { "textlink" };
     let label = if no_prs {
         format!("Browse {repo}")
     } else {

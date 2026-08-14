@@ -61,7 +61,9 @@ fn push_encoded(out: &mut String, seg: &str) {
     }
 }
 
-fn encode_segment(seg: &str) -> String {
+/// Also the encoder behind `backend::route`'s share links — the unreserved set
+/// is the same on both sides of the address bar.
+pub(crate) fn encode_segment(seg: &str) -> String {
     let mut out = String::with_capacity(seg.len());
     push_encoded(&mut out, seg);
     out
@@ -758,10 +760,6 @@ struct RawFile {
     filename: String,
     status: String,
     #[serde(default)]
-    additions: usize,
-    #[serde(default)]
-    deletions: usize,
-    #[serde(default)]
     previous_filename: Option<String>,
 }
 
@@ -782,8 +780,6 @@ fn file_of(f: &RawFile) -> PrFile {
         path: PathBuf::from(&f.filename),
         previous_path: f.previous_filename.as_deref().map(PathBuf::from),
         status: change_kind(&f.status),
-        additions: f.additions,
-        deletions: f.deletions,
     }
 }
 
@@ -793,8 +789,6 @@ pub struct PrFile {
     /// Set for renames — the path to read on the base side.
     pub previous_path: Option<PathBuf>,
     pub status: ChangeKind,
-    pub additions: usize,
-    pub deletions: usize,
 }
 
 impl PrFile {
@@ -1745,8 +1739,6 @@ mod tests {
             path: PathBuf::from(path),
             previous_path: None,
             status,
-            additions: 0,
-            deletions: 0,
         }
     }
 
@@ -2147,8 +2139,6 @@ mod tests {
             path: PathBuf::from("new.rs"),
             previous_path: Some(PathBuf::from("old.rs")),
             status: ChangeKind::Renamed,
-            additions: 1,
-            deletions: 1,
         };
         assert_eq!(f.base_path(), &PathBuf::from("old.rs"));
 
@@ -2156,8 +2146,6 @@ mod tests {
             path: PathBuf::from("same.rs"),
             previous_path: None,
             status: ChangeKind::Modified,
-            additions: 0,
-            deletions: 0,
         };
         assert_eq!(plain.base_path(), &PathBuf::from("same.rs"));
     }
@@ -2300,15 +2288,11 @@ mod tests {
                 path: PathBuf::from("a.rs"),
                 previous_path: None,
                 status: ChangeKind::Added,
-                additions: 3,
-                deletions: 0,
             },
             PrFile {
                 path: PathBuf::from("b.rs"),
                 previous_path: None,
                 status: ChangeKind::Deleted,
-                additions: 0,
-                deletions: 7,
             },
         ];
         let map = statuses_of(&files);

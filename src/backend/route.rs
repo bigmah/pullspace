@@ -25,7 +25,7 @@
 
 use std::path::{Path, PathBuf};
 
-use super::github::{RepoRef, parse_commit_target, parse_target, strip_host};
+use super::github::{RepoRef, encode_segment, parse_commit_target, parse_target, strip_host};
 
 /// Which pull request, commit or repository is open.
 #[derive(Clone, Default, PartialEq, Eq, Debug)]
@@ -181,30 +181,16 @@ fn place_of(tail: &str) -> Option<Place> {
     (!path.as_os_str().is_empty()).then_some(Place { path, line })
 }
 
-/// One path segment, as it can be written in a URL.
-///
-/// Everything outside the unreserved set goes to `%XX`, including the two that
+/// A whole path, segment by segment — the separators are the one thing not
+/// escaped, since they are what makes it a path. [`encode_segment`] sends
+/// everything outside the unreserved set to `%XX`, including the two that
 /// would otherwise be read as structure: `%` itself, and the `:` this module
 /// separates a line number with.
-fn encode_seg(seg: &str) -> String {
-    let mut out = String::with_capacity(seg.len());
-    for byte in seg.bytes() {
-        match byte {
-            b if b.is_ascii_alphanumeric() => out.push(b as char),
-            b'-' | b'_' | b'.' | b'~' => out.push(byte as char),
-            b => out.push_str(&format!("%{b:02X}")),
-        }
-    }
-    out
-}
-
-/// A whole path, segment by segment — the separators are the one thing not
-/// escaped, since they are what makes it a path.
 fn encoded(path: &Path) -> String {
     path.to_string_lossy()
         .split('/')
         .filter(|s| !s.is_empty())
-        .map(encode_seg)
+        .map(encode_segment)
         .collect::<Vec<_>>()
         .join("/")
 }

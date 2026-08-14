@@ -535,6 +535,7 @@ const KEYS: &str = r#"
     var what = null;
     if (mod && key === 'f') what = 'find';
     else if (mod && key === 'p') what = 'filter';
+    else if (mod && key === ',') what = 'prefs';
     else if (key === 'f12') what = e.shiftKey ? 'refs' : 'def';
     else if (key === 'escape') what = 'escape';
     else if ((e.altKey && key === 'arrowleft') || (mod && key === '[')) what = 'back';
@@ -565,6 +566,11 @@ pub async fn keys(st: St) {
         match (what.as_str(), selected) {
             ("find", _) => focus_search(),
             ("filter", _) => focus_filter(),
+            ("prefs", _) => {
+                let mut open = st.prefs_open;
+                let showing = *open.peek();
+                open.set(!showing);
+            }
             ("def", Some(name)) => goto_def(st, &name),
             ("refs", Some(name)) => find_refs(st, &name),
             // Nothing picked out to look up. Saying so beats a key that

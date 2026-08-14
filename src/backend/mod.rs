@@ -1,5 +1,6 @@
 pub mod auth;
 pub mod blobs;
+pub mod clip;
 pub mod clone;
 pub mod difftool;
 pub mod github;
@@ -8,6 +9,7 @@ pub mod http;
 pub mod layout;
 pub mod markdown;
 pub mod opfs;
+pub mod prefs;
 pub mod route;
 pub mod scan;
 pub mod search;

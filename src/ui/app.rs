@@ -13,8 +13,10 @@ use crate::backend::difftool::Expansion;
 use crate::backend::github::{
     PrDetail, PrSummary, RepoRef, RepoView, Snapshot, Thread, statuses_of,
 };
+use crate::backend::highlight;
 use crate::backend::markdown;
-use crate::backend::route::{self, Route};
+use crate::backend::prefs::{self, Prefs};
+use crate::backend::route::{self, Place, Route, Target};
 use crate::backend::search::Options;
 use crate::backend::tree::{
     ChangeKind, FileNode, build_tree_from_paths, changed_paths, filter_changed,
@@ -26,7 +28,9 @@ use super::conversation::ConvPane;
 use super::filetree::FileTreePane;
 use super::github::GhPanel;
 use super::ide::{Index, Panel};
+use super::page::Tab;
 use super::panes::{self, Drag, DragMask, Edge};
+use super::prefs::PrefsPanel;
 use super::topbar::TopBar;
 use super::viewer::Viewer;
 
@@ -91,13 +95,14 @@ impl Workspace {
         }
     }
 
-    /// This, as a link — what the address bar is made to say, and what a link
-    /// pasted into it opens.
-    pub fn route(&self) -> Route {
+    /// This, as the half of a link that names what is open — what the address
+    /// bar is made to say, and what a link pasted into it opens. The file being
+    /// read is the other half: see [`St::route`].
+    pub fn target(&self) -> Target {
         match self {
-            Workspace::Empty => Route::Home,
-            Workspace::Pr(pr) => Route::Pr(pr.repo.clone(), pr.number),
-            Workspace::Repo(view) => Route::Repo(view.repo.clone()),
+            Workspace::Empty => Target::Home,
+            Workspace::Pr(pr) => Target::Pr(pr.repo.clone(), pr.number),
+            Workspace::Repo(view) => Target::Repo(view.repo.clone()),
         }
     }
 
@@ -294,6 +299,17 @@ pub struct St {
     pub conv: Signal<Conversation>,
     pub conv_open: Signal<bool>,
 
+    /// A file — and perhaps a line of it — named by a link that arrived before
+    /// there was anything open to find it in. Set on the way to a fetch and
+    /// taken by [`St::enter`] once the tree is there to look it up in.
+    pub pending: Signal<Option<Place>>,
+
+    // --- appearance ---
+    /// Theme, accent, font, size. Read at the top of the tree and published to
+    /// the page as a stylesheet — see [`Prefs::css`].
+    pub prefs: Signal<Prefs>,
+    pub prefs_open: Signal<bool>,
+
     // --- layout ---
     /// Pane sizes in CSS pixels, published to the stylesheet as custom
     /// properties. Read at the very top of the tree and nowhere else, so
@@ -336,6 +352,19 @@ impl St {
         let mut tick = self.refresh_tick;
         let v = *tick.peek();
         tick.set(v + 1);
+    }
+
+    /// Change how the app looks, and keep it that way.
+    ///
+    /// The syntax theme is told first, and told outside the signal system on
+    /// purpose: everything that re-colours code does so in response to the
+    /// write below, and a highlighter still set to the old theme would hand
+    /// back dark keywords for a light page.
+    pub fn set_prefs(&self, next: Prefs) {
+        highlight::use_light(next.theme.is_light());
+        let mut prefs = self.prefs;
+        prefs.set(next);
+        prefs::save(next);
     }
 
     /// Say that the local store is not what it was.
@@ -428,10 +457,15 @@ impl St {
             .repo()
             .is_some_and(|open| open.repo == view.repo);
         let readme = markdown::readme_of(view.tree.paths());
-        self.enter(Workspace::Repo(Box::new(view)), reload);
+        let linked = self.enter(Workspace::Repo(Box::new(view)), reload);
         // Not on a reload: that keeps whatever was being read, and coming back
-        // to the README is a click on the tree away.
-        if !reload && let Some(readme) = readme {
+        // to the README is a click on the tree away. Nor when the link that
+        // brought us here named a file — that file is the front page it asked
+        // for.
+        if !reload
+            && !linked
+            && let Some(readme) = readme
+        {
             self.open_file(readme);
         }
     }
@@ -442,7 +476,11 @@ impl St {
     /// and the tree as it was expanded are kept — resetting the view out from
     /// under someone who asked for fresh data is not what they asked for. Only
     /// what describes the old commit is dropped.
-    fn enter(&self, ws: Workspace, reload: bool) {
+    ///
+    /// Answers whether a file named by the link that brought us here was
+    /// opened, which is the one thing the caller may still have to decide about
+    /// — see [`St::enter_repo`].
+    fn enter(&self, ws: Workspace, reload: bool) -> bool {
         if !reload {
             self.clear_view();
         } else {
@@ -471,7 +509,7 @@ impl St {
                 .map(|pr| viewed::load(&viewed::pr_key(&pr.repo, pr.number)))
                 .unwrap_or_default(),
         );
-        let link = ws.route();
+        let link = Route::to(ws.target());
         let mut w = self.workspace;
         w.set(ws);
         // The address bar follows whatever is open, so every review has a link:
@@ -484,6 +522,63 @@ impl St {
         let mut gh = self.gh_open;
         gh.set(false);
         self.bump_tick();
+        // And now that there is a tree to look a path up in, whatever the link
+        // named inside it.
+        self.take_pending()
+    }
+
+    /// Open the file a link named, if it named one and it is still there.
+    ///
+    /// A path that has moved since the link was written is not an error worth
+    /// showing: the pull request it points into is open, which is most of what
+    /// was being asked for.
+    fn take_pending(&self) -> bool {
+        let mut pending = self.pending;
+        let Some(place) = pending.write().take() else {
+            return false;
+        };
+        self.open_place(place)
+    }
+
+    /// Go where a link points, inside what is already open.
+    pub fn open_place(&self, place: Place) -> bool {
+        if !self.has_file(&place.path) {
+            return false;
+        }
+        match place.line {
+            Some(line) => self.open_at(place.path, line),
+            None => self.open_file(place.path),
+        }
+        true
+    }
+
+    /// Where the reader is, as a link — what is open, the file being read, and
+    /// the line they picked out of it.
+    ///
+    /// Reactive: this is what the address bar is kept in step with, so it has
+    /// to be re-answered when any of the three moves.
+    pub fn route(&self) -> Route {
+        Route {
+            at: self.workspace.read().target(),
+            place: self.open.read().clone().map(|path| Place {
+                path,
+                line: *self.at_line.read(),
+            }),
+        }
+    }
+
+    /// Pick a line out of the open file, or put it down again.
+    ///
+    /// It is not a jump — the reader is looking at the line already. All it
+    /// changes is what the address bar says, which is what makes the link in it
+    /// a link to *here*.
+    pub fn mark_line(&self, line: usize) {
+        if self.open.peek().is_none() {
+            return;
+        }
+        let mut at = self.at_line;
+        let now = *at.peek();
+        at.set((now != Some(line)).then_some(line));
     }
 
     /// Close whatever is open, back to nothing — which puts the picker up,
@@ -502,7 +597,7 @@ impl St {
         // Closing is a place to come back to as much as opening is: without
         // this the address bar would go on naming a pull request that is no
         // longer on screen, and reloading would open it again.
-        route::show(&Route::Home);
+        route::show(&Route::home());
         let mut gh = self.gh_open;
         gh.set(true);
         self.bump_tick();
@@ -843,6 +938,10 @@ pub fn App() -> Element {
         // The panes come back the width they were left, which is the whole
         // point of being able to drag them.
         let saved = layout::load();
+        // And so does the look of the place. Before the first render, so the
+        // app is never briefly drawn in a theme nobody chose.
+        let look = prefs::load();
+        highlight::use_light(look.theme.is_light());
         St {
             statuses: root(HashMap::new()),
             open: root(None),
@@ -881,6 +980,11 @@ pub fn App() -> Element {
             store_gen: root(0),
             conv: root(Conversation::Loading),
             conv_open: root(true),
+
+            pending: root(None),
+
+            prefs: root(look),
+            prefs_open: root(false),
 
             side_w: root(saved.side_w),
             conv_w: root(saved.conv_w),
@@ -947,6 +1051,19 @@ pub fn App() -> Element {
     // what is written back into it once something is open.
     use_future(move || super::nav::watch(st));
     use_future(move || super::nav::landing(st));
+
+    // And the third thing the bar has to follow: the file being read, and the
+    // line picked out of it. Written in place rather than pushed — see
+    // `route::replace` — so that Back walks the pull requests somebody opened
+    // and not every file they clicked inside one.
+    use_effect(move || {
+        let here = st.route();
+        // Nothing open writes `#/` already, from `close_workspace`. Doing it
+        // again here would fight the picker on the way in.
+        if here.at != Target::Home {
+            route::replace(&here);
+        }
+    });
 
     // Pick up a saved token once at startup. Verifying it costs one API call
     // and tells us the login.
@@ -1021,6 +1138,10 @@ pub fn App() -> Element {
     // in this tree could be attached to.
     use_future(move || super::ide::keys(st));
 
+    // And the other thing listened for on the document: a click on a line
+    // number, which is how a line gets picked out to link to.
+    use_future(move || super::viewer::lines(st));
+
     // Pull the conversation as soon as a pull request opens — three requests,
     // next to the tree and every changed file, and the pane is the first thing
     // read on a review. Re-runs on `⟳`, which is how a reply written since
@@ -1056,8 +1177,15 @@ pub fn App() -> Element {
         *st.bottom_h.read(),
     );
 
+    // The chosen palette, font and size, as the stylesheet that applies them.
+    // After the app's own, so it wins — and nowhere near it, so the defaults
+    // stay readable as the defaults.
+    let look = st.prefs.read().css();
+
     rsx! {
         style { dangerous_inner_html: CSS }
+        style { dangerous_inner_html: look }
+        Tab {}
         div { class: "app", style: "{panes}",
             TopBar {}
             div {
@@ -1083,6 +1211,9 @@ pub fn App() -> Element {
             }
             if *st.gh_open.read() {
                 GhPanel {}
+            }
+            if *st.prefs_open.read() {
+                PrefsPanel {}
             }
             DragMask {}
         }

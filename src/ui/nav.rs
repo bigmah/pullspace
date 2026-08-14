@@ -15,7 +15,7 @@ use std::time::Duration;
 use dioxus::prelude::*;
 
 use crate::backend::github::RepoRef;
-use crate::backend::route::{self, Route};
+use crate::backend::route::{self, Route, Target};
 
 use super::app::{Account, St};
 use super::compat;
@@ -48,10 +48,20 @@ pub async fn watch(st: St) {
     let mut eval = document::eval(HASH_JS);
     while let Ok(hash) = eval.recv::<String>().await {
         let asked = route::parse(&hash);
+        let here = st.route();
         // Our own writes come back through here. What is already on screen is
         // nothing to go and fetch — and reloading it under somebody would throw
         // away the file they were reading.
-        if asked == st.workspace.peek().route() {
+        if asked == here {
+            continue;
+        }
+        // The same pull request, a different file or line of it: a link
+        // somebody sent, pasted into the tab that already has it open. Nothing
+        // to fetch — everything it names is here.
+        if asked.at == here.at && here.at != Target::Home {
+            if let Some(place) = asked.place {
+                st.open_place(place);
+            }
             continue;
         }
         go(st, asked);
@@ -69,25 +79,29 @@ pub async fn landing(st: St) {
     }
     // Read now rather than at mount: nothing writes the bar before this runs,
     // and reading it here is one less thing to keep in step.
-    match route::current() {
-        // Nothing linked to. The picker is already up, which is the whole of
-        // what "home" means here.
-        Route::Home => {}
-        asked => go(st, asked),
+    let asked = route::current();
+    // Nothing linked to. The picker is already up, which is the whole of what
+    // "home" means here.
+    if asked.at != Target::Home {
+        go(st, asked);
     }
 }
 
 /// Go where the address bar says.
 fn go(st: St, asked: Route) {
-    match asked {
-        Route::Home => st.close_workspace(),
-        Route::Repo(repo) => {
+    // The file it names, if it names one, kept for the moment there is a tree
+    // to find it in — which is several requests away.
+    let mut pending = st.pending;
+    pending.set(asked.place);
+    match asked.at {
+        Target::Home => st.close_workspace(),
+        Target::Repo(repo) => {
             name_it(st, &repo);
             // Root scope: a load outlives whatever component happens to be on
             // screen when the URL changes.
             spawn_forever(browse_repo(st, repo));
         }
-        Route::Pr(repo, number) => {
+        Target::Pr(repo, number) => {
             name_it(st, &repo);
             spawn_forever(open_pr(st, repo, number));
         }

@@ -1,19 +1,22 @@
 use std::path::PathBuf;
+use std::time::Duration;
 
 use dioxus::prelude::*;
 
 use std::collections::HashMap;
 
-use crate::backend::FileContent;
 use crate::backend::difftool::{
     Block, Expansion, FileDiff, Line, LineKind, STEP, blocks, diff_file, stats, to_rows,
 };
 use crate::backend::highlight::{Span, highlight};
 use crate::backend::markdown;
+use crate::backend::route;
 use crate::backend::search::split_word;
 use crate::backend::tree::ChangeKind;
+use crate::backend::{FileContent, clip};
 
 use super::app::{PrFileState, St, ViewMode, Workspace};
+use super::compat;
 use super::ide;
 use super::prcache::ensure_path;
 
@@ -50,6 +53,46 @@ enum Pane {
     },
 }
 
+/// Clicking a line number picks that line out — which is what puts it in the
+/// address bar, and so into the link the button beside it copies.
+///
+/// One listener on the document rather than a handler per line: a six thousand
+/// line file is six thousand rows, and this is the difference between a
+/// closure on each of them and none. It reads the anchor the row already
+/// carries for jumping to, so the number it sends is the head commit's
+/// numbering in every view — which is the numbering a link is written in.
+const LINE_JS: &str = r#"
+(function () {
+  // A reload of this page's script should not leave the last listener behind.
+  if (window.__pullspace_lines) window.__pullspace_lines();
+  var on = function (e) {
+    if (!e.target || !e.target.closest) return;
+    var gutter = e.target.closest('.ln.lnk');
+    if (!gutter) return;
+    var row = gutter.closest('.cl, .scell');
+    if (!row) return;
+    var anchor = row.id || ((row.querySelector('.anchor') || {}).id || '');
+    if (anchor.charAt(0) !== 'L') return;
+    var line = parseInt(anchor.slice(1), 10);
+    if (!line) return;
+    e.preventDefault();
+    dioxus.send(line);
+  };
+  document.addEventListener('click', on);
+  window.__pullspace_lines = function () {
+    document.removeEventListener('click', on);
+  };
+})();
+"#;
+
+/// Listen for line numbers being clicked, for as long as the app is up.
+pub async fn lines(st: St) {
+    let mut eval = document::eval(LINE_JS);
+    while let Ok(line) = eval.recv::<usize>().await {
+        st.mark_line(line);
+    }
+}
+
 fn scroll_js(line: usize) -> String {
     format!(
         r#"(function(){{var n=0;function go(){{var e=document.getElementById('L{line}');if(e){{var t=e.classList.contains('anchor')?e.parentElement:e;t.scrollIntoView({{block:'center'}});t.classList.add('flash');setTimeout(function(){{t.classList.remove('flash')}},1400);}}else if(n++<25){{setTimeout(go,60);}}}}go();}})();"#
@@ -59,15 +102,6 @@ fn scroll_js(line: usize) -> String {
 #[component]
 pub fn Viewer() -> Element {
     let st = use_context::<St>();
-
-    // Jump-to-line requests (definitions, references, search hits). The
-    // request is not consumed — see `St::scroll_to`; this fires on the write,
-    // and what the signal holds afterwards is nobody's business.
-    use_effect(move || {
-        if let Some(line) = *st.scroll_to.read() {
-            document::eval(&scroll_js(line));
-        }
-    });
 
     // On a pull request the open file usually arrives already warmed, from the
     // background prefetch or the tree's hover handler. This covers the rest —
@@ -96,6 +130,26 @@ pub fn Viewer() -> Element {
         }
     });
 
+    // Jump-to-line requests (definitions, references, search hits, and a link
+    // somebody was sent). The request is not consumed — see `St::scroll_to`;
+    // this fires on the write, and what the signal holds afterwards is nobody's
+    // business.
+    //
+    // It also fires when the file itself arrives, which is the case a link
+    // opened cold: the line was asked for while the pane still said "Loading…",
+    // and the retry loop in `scroll_js` gives up long before a fetch of a large
+    // file comes back. `at_line` is what tells this from the leftovers of the
+    // last jump — opening a file without one clears it.
+    use_effect(move || {
+        let _ = data.read();
+        let want = *st.scroll_to.read();
+        if let Some(line) = want
+            && *st.at_line.peek() == want
+        {
+            document::eval(&scroll_js(line));
+        }
+    });
+
     let diff = use_memo(move || {
         let guard = data.read();
         let Pane::Ready { rel, old, new } = &*guard else {
@@ -110,6 +164,10 @@ pub fn Viewer() -> Element {
     });
 
     let source_lines = use_memo(move || {
+        // Syntax colours follow the app's theme, and the highlighter is asked
+        // for them again when it moves. Subscribed to rather than used: what
+        // the theme *is* lives in `backend::highlight`.
+        let _ = st.prefs.read().theme;
         let guard = data.read();
         let Pane::Ready { rel, old, new } = &*guard else {
             return None;
@@ -182,6 +240,11 @@ pub fn Viewer() -> Element {
         document::eval("var e=document.querySelector('.codewrap'); if(e) e.scrollTop=0;");
     });
 
+    // Markdown's fenced blocks are highlighted where they are drawn, so the
+    // pane has to be redrawn when the theme moves — the memo above only covers
+    // the source view.
+    let _ = st.prefs.read().theme;
+
     let guard = data.read();
     // Loading and failure replace the file, not the window around it: a header
     // that blinks out and back every time an uncached file is clicked is worse
@@ -230,21 +293,24 @@ pub fn Viewer() -> Element {
     // rather than done in CSS: only the lines that match pay for it.
     let mark = st.selected.read().clone();
     let mark = mark.as_deref();
+    // The line a link points at, if one does. Every view that has line numbers
+    // lights it up, and clicking a number is what puts it there.
+    let at = *st.at_line.read();
 
     let body = match mode {
         ViewMode::Source => match source_lines.read().as_ref() {
-            Some(SourceLines::Colored(lines)) => render_colored(lines, mark),
-            Some(SourceLines::Plain(lines)) => render_plain(lines, mark),
+            Some(SourceLines::Colored(lines)) => render_colored(lines, mark, at),
+            Some(SourceLines::Plain(lines)) => render_plain(lines, mark, at),
             None => rsx! { div { class: "notice", "Binary file — no preview." } },
         },
         ViewMode::Inline => match diff.read().as_ref() {
             Some(d) if d.is_empty() => rsx! { div { class: "notice", "No differences." } },
-            Some(d) => render_inline(d, &open_gaps, mark),
+            Some(d) => render_inline(d, &open_gaps, mark, at),
             None => rsx! { div { class: "notice", "Binary file — cannot diff." } },
         },
         ViewMode::Split => match diff.read().as_ref() {
             Some(d) if d.is_empty() => rsx! { div { class: "notice", "No differences." } },
-            Some(d) => render_split(d, &open_gaps, mark),
+            Some(d) => render_split(d, &open_gaps, mark, at),
             None => rsx! { div { class: "notice", "Binary file — cannot diff." } },
         },
         ViewMode::Preview if prose => match doc.read().as_ref() {
@@ -333,6 +399,9 @@ pub fn Viewer() -> Element {
                     }
                 }
                 span { class: "spacer" }
+                if settled {
+                    LinkButton { line: at }
+                }
                 if markable {
                     ViewedBox { rel, viewed }
                 }
@@ -376,6 +445,44 @@ pub fn Viewer() -> Element {
                 ondoubleclick: move |_| ide::select_word(st),
                 {pending.unwrap_or(body)}
             }
+        }
+    }
+}
+
+/// A link to what is on screen, on the clipboard.
+///
+/// The address bar already says it — an effect at the root keeps it in step
+/// with the file and the line — so this is a button for not having to go up
+/// there and select it. Which is also why it copies `location.href` rather than
+/// building an address of its own: there is only one answer, and the bar is
+/// already showing it.
+#[component]
+fn LinkButton(line: Option<usize>) -> Element {
+    let mut copied = use_signal(|| false);
+    let done = *copied.read();
+    let why = match line {
+        Some(n) => format!("Copy a link to line {n} of this file"),
+        None => "Copy a link to this file — click a line number to point at a line".to_string(),
+    };
+    let cls = if done { "linkbtn done" } else { "linkbtn" };
+    rsx! {
+        button {
+            class: cls,
+            title: "{why}",
+            onclick: move |_| {
+                // Inside the click, not after an await: the permission to write
+                // the clipboard is the gesture, and a gesture does not survive
+                // being waited on.
+                if let Some(url) = route::href() {
+                    clip::copy(&url);
+                }
+                copied.set(true);
+                spawn(async move {
+                    compat::sleep(Duration::from_millis(1200)).await;
+                    copied.set(false);
+                });
+            },
+            if done { "Copied" } else { "Link" }
         }
     }
 }
@@ -570,12 +677,19 @@ fn marked(text: &str, color: Option<&str>, mark: Option<&str>) -> Element {
     }
 }
 
-fn render_colored(lines: &[Vec<Span>], mark: Option<&str>) -> Element {
+/// The class a row of code carries: the one the address bar is pointing at is
+/// the one a link brought somebody to, and it stays lit for as long as it is
+/// the answer.
+fn row_class(no: usize, at: Option<usize>) -> &'static str {
+    if at == Some(no) { "cl linked" } else { "cl" }
+}
+
+fn render_colored(lines: &[Vec<Span>], mark: Option<&str>, at: Option<usize>) -> Element {
     rsx! {
         div { class: "code",
             for (i, spans) in lines.iter().enumerate() {
-                div { class: "cl", id: "L{i + 1}",
-                    span { class: "ln", "{i + 1}" }
+                div { class: row_class(i + 1, at), id: "L{i + 1}",
+                    span { class: "ln lnk", "{i + 1}" }
                     span { class: "lc",
                         for sp in spans {
                             {marked(&sp.text, Some(&sp.color), mark)}
@@ -622,12 +736,12 @@ fn render_preview(html: &str) -> Element {
     }
 }
 
-fn render_plain(lines: &[String], mark: Option<&str>) -> Element {
+fn render_plain(lines: &[String], mark: Option<&str>, at: Option<usize>) -> Element {
     rsx! {
         div { class: "code",
             for (i, text) in lines.iter().enumerate() {
-                div { class: "cl", id: "L{i + 1}",
-                    span { class: "ln", "{i + 1}" }
+                div { class: row_class(i + 1, at), id: "L{i + 1}",
+                    span { class: "ln lnk", "{i + 1}" }
                     span { class: "lc", {marked(text, None, mark)} }
                 }
             }
@@ -664,19 +778,26 @@ fn segs_rsx(l: &Line, mark: Option<&str>) -> Element {
     }
 }
 
-fn inline_line(l: &Line, mark: Option<&str>) -> Element {
+fn inline_line(l: &Line, mark: Option<&str>, at: Option<usize>) -> Element {
     let (cls, sign) = match l.kind {
         LineKind::Ctx => ("cl", " "),
         LineKind::Add => ("cl dl-add", "+"),
         LineKind::Del => ("cl dl-del", "-"),
     };
+    let cls = match l.new_no.is_some() && l.new_no == at {
+        true => format!("{cls} linked"),
+        false => cls.to_string(),
+    };
     let old = num(l.old_no);
     let new = num(l.new_no);
+    // Only the head commit's numbering is linkable: a line that has been
+    // removed is not somewhere anyone can be sent to.
+    let new_cls = if l.new_no.is_some() { "ln lnk" } else { "ln" };
     rsx! {
         div { class: "{cls}",
             {anchor(l.new_no)}
             span { class: "ln", "{old}" }
-            span { class: "ln", "{new}" }
+            span { class: "{new_cls}", "{new}" }
             span { class: "dsign", "{sign}" }
             span { class: "lc", {segs_rsx(l, mark)} }
         }
@@ -766,17 +887,22 @@ fn plural(n: usize) -> &'static str {
     if n == 1 { "line" } else { "lines" }
 }
 
-fn render_inline(diff: &FileDiff, open: &HashMap<usize, Expansion>, mark: Option<&str>) -> Element {
+fn render_inline(
+    diff: &FileDiff,
+    open: &HashMap<usize, Expansion>,
+    mark: Option<&str>,
+    at: Option<usize>,
+) -> Element {
     rsx! {
         div { class: "code inline",
             for block in blocks(diff, open) {
-                {inline_block(diff, block, mark)}
+                {inline_block(diff, block, mark, at)}
             }
         }
     }
 }
 
-fn inline_block(diff: &FileDiff, block: Block, mark: Option<&str>) -> Element {
+fn inline_block(diff: &FileDiff, block: Block, mark: Option<&str>, at: Option<usize>) -> Element {
     match block {
         Block::Gap {
             index,
@@ -791,14 +917,14 @@ fn inline_block(diff: &FileDiff, block: Block, mark: Option<&str>) -> Element {
                     {hunk_header(&h)}
                 }
                 for l in diff.lines[from..to].iter() {
-                    {inline_line(l, mark)}
+                    {inline_line(l, mark, at)}
                 }
             }
         },
     }
 }
 
-fn split_cell(l: Option<&Line>, right: bool, mark: Option<&str>) -> Element {
+fn split_cell(l: Option<&Line>, right: bool, mark: Option<&str>, at: Option<usize>) -> Element {
     match l {
         None => rsx! { div { class: "scell s-empty" } },
         Some(l) => {
@@ -808,11 +934,19 @@ fn split_cell(l: Option<&Line>, right: bool, mark: Option<&str>) -> Element {
                 LineKind::Del => "scell dl-del",
             };
             let no = if right { num(l.new_no) } else { num(l.old_no) };
+            // The head commit's side carries the anchors, so it is the side a
+            // link can point into — and the side worth lighting up when one
+            // does.
             let anchor_no = if right { l.new_no } else { None };
+            let cls = match anchor_no.is_some() && anchor_no == at {
+                true => format!("{cls} linked"),
+                false => cls.to_string(),
+            };
+            let ln_cls = if anchor_no.is_some() { "ln lnk" } else { "ln" };
             rsx! {
                 div { class: "{cls}",
                     {anchor(anchor_no)}
-                    span { class: "ln", "{no}" }
+                    span { class: "{ln_cls}", "{no}" }
                     span { class: "lc", {segs_rsx(l, mark)} }
                 }
             }
@@ -820,17 +954,22 @@ fn split_cell(l: Option<&Line>, right: bool, mark: Option<&str>) -> Element {
     }
 }
 
-fn render_split(diff: &FileDiff, open: &HashMap<usize, Expansion>, mark: Option<&str>) -> Element {
+fn render_split(
+    diff: &FileDiff,
+    open: &HashMap<usize, Expansion>,
+    mark: Option<&str>,
+    at: Option<usize>,
+) -> Element {
     rsx! {
         div { class: "code split",
             for block in blocks(diff, open) {
-                {split_block(diff, block, mark)}
+                {split_block(diff, block, mark, at)}
             }
         }
     }
 }
 
-fn split_block(diff: &FileDiff, block: Block, mark: Option<&str>) -> Element {
+fn split_block(diff: &FileDiff, block: Block, mark: Option<&str>, at: Option<usize>) -> Element {
     match block {
         Block::Gap {
             index,
@@ -846,8 +985,8 @@ fn split_block(diff: &FileDiff, block: Block, mark: Option<&str>) -> Element {
                 }
                 for row in to_rows(&diff.lines[from..to]) {
                     div { class: "srow",
-                        {split_cell(row.left, false, mark)}
-                        {split_cell(row.right, true, mark)}
+                        {split_cell(row.left, false, mark, at)}
+                        {split_cell(row.right, true, mark, at)}
                     }
                 }
             }

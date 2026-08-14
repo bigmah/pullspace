@@ -47,9 +47,13 @@ pub fn TopBar() -> Element {
         ),
     };
 
-    let pr = workspace
-        .pr()
-        .map(|p| (format!("{} #{}", p.repo, p.number), p.title.clone(), p.html_url.clone()));
+    let pr = workspace.pr().map(|p| {
+        (
+            format!("{} #{}", p.repo, p.number),
+            p.title.clone(),
+            p.html_url.clone(),
+        )
+    });
     let browsing = workspace
         .repo()
         .map(|v| (v.repo.to_string(), v.branch.clone(), v.html_url()));
@@ -276,8 +280,7 @@ fn SearchBox() -> Element {
     } else {
         "searchbox"
     };
-    let why = error
-        .unwrap_or_else(|| "Search every file of this repository  (⌘F)".to_string());
+    let why = error.unwrap_or_else(|| "Search every file of this repository  (⌘F)".to_string());
     let index_label = st.index.read().label();
 
     rsx! {

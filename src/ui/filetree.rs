@@ -167,7 +167,11 @@ pub fn FileTreePane() -> Element {
                     }
                     RowKind::Dir { .. } => (false, false),
                 };
-                RowState { row, active, viewed }
+                RowState {
+                    row,
+                    active,
+                    viewed,
+                }
             })
             .collect();
         Listing { rows, hidden }

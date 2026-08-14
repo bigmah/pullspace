@@ -360,7 +360,6 @@ pub async fn sweep(limit: u64) {
     }
 }
 
-
 /// Delete every stored file. What the button in the GitHub panel calls — the
 /// only thing here anyone should have to think about.
 pub async fn clear() -> bool {

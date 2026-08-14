@@ -449,7 +449,6 @@ struct Palette {
     added: &'static str,
     modified: &'static str,
     deleted: &'static str,
-    conflict: &'static str,
     add_bg: &'static str,
     add_emph: &'static str,
     del_bg: &'static str,
@@ -476,7 +475,6 @@ const DARK: Palette = Palette {
     added: "#4fbf7a",
     modified: "#e2b34c",
     deleted: "#e06c75",
-    conflict: "#d858c8",
     add_bg: "rgba(79,191,122,0.13)",
     add_emph: "rgba(79,191,122,0.34)",
     del_bg: "rgba(224,108,117,0.13)",
@@ -520,7 +518,6 @@ const LIGHT: Palette = Palette {
     added: "#1f9254",
     modified: "#a3720f",
     deleted: "#cf3f4c",
-    conflict: "#a832a0",
     add_bg: "rgba(31,146,84,0.12)",
     add_emph: "rgba(31,146,84,0.28)",
     del_bg: "rgba(207,63,76,0.12)",
@@ -567,7 +564,7 @@ impl Prefs {
              --border:{border};--border-soft:{border_soft};--line:{line};\
              --fg:{fg};--fg-dim:{fg_dim};--fg-faint:{fg_faint};--fg-bright:{fg_bright};\
              --guide:{guide};--tint:{tint};--tint-soft:{tint_soft};--on-accent:{on_accent};\
-             --added:{added};--modified:{modified};--deleted:{deleted};--conflict:{conflict};\
+             --added:{added};--modified:{modified};--deleted:{deleted};\
              --add-bg:{add_bg};--add-emph:{add_emph};--del-bg:{del_bg};--del-emph:{del_emph};\
              --accent:#{r:02x}{g:02x}{b:02x};\
              --accent-soft:rgba({r},{g},{b},0.16);--accent-line:rgba({r},{g},{b},0.45);\
@@ -593,7 +590,6 @@ impl Prefs {
             added = p.added,
             modified = p.modified,
             deleted = p.deleted,
-            conflict = p.conflict,
             add_bg = p.add_bg,
             add_emph = p.add_emph,
             del_bg = p.del_bg,

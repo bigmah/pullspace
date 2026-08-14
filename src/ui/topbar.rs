@@ -1,12 +1,9 @@
-use std::time::Duration;
-
 use dioxus::prelude::*;
 
 use crate::backend::auth::open_browser;
 use crate::backend::github::{PrHeader, RepoRef};
 
 use super::app::{Account, Fetch, St, Workspace};
-use super::compat;
 use super::github::{PrListBody, PrStates, browse_repo, open_commit, open_pr};
 use super::ide;
 
@@ -137,11 +134,6 @@ pub fn TopBar() -> Element {
         Workspace::Repo(_) => "Reload this repository from GitHub",
         Workspace::Commit(_) => "Reload this commit from GitHub",
         Workspace::Empty => "Nothing open to reload",
-    };
-    let refresh_cls = if reloading {
-        "iconbtn lg spin"
-    } else {
-        "iconbtn lg"
     };
     // The progress line along the bottom of the bar is the one piece of a
     // reload visible with the GitHub panel closed — which is where `⟳` reloads
@@ -302,7 +294,6 @@ pub fn TopBar() -> Element {
                 commit_target,
                 reloading,
                 refresh_title,
-                refresh_cls,
             }
         }
     }
@@ -532,17 +523,12 @@ fn RefreshButton(
     commit_target: Option<(RepoRef, String, Option<PrHeader>)>,
     reloading: bool,
     refresh_title: &'static str,
-    refresh_cls: &'static str,
 ) -> Element {
     let st = use_context::<St>();
-    // Nothing open is nothing to reload, but a dead button that does not say so
-    // is a puzzle — hold the spin briefly so the click is acknowledged.
-    let mut nudged = use_signal(|| false);
-    let spinning = reloading || *nudged.read();
-    let cls = if spinning {
+    let cls = if reloading {
         "iconbtn lg spin"
     } else {
-        refresh_cls
+        "iconbtn lg"
     };
 
     rsx! {
@@ -566,13 +552,9 @@ fn RefreshButton(
                 (.., Some((repo, sha, pr))) => {
                     spawn_forever(open_commit(st, repo, sha, pr));
                 }
-                _ => {
-                    nudged.set(true);
-                    spawn(async move {
-                        compat::sleep(Duration::from_millis(550)).await;
-                        nudged.set(false);
-                    });
-                }
+                // The bar only exists while something is open, so one of the
+                // three targets above is always there to take the click.
+                _ => {}
             },
             // The glyph turns, not the button: a spinning hover square is not
             // what anyone means by "it is working".

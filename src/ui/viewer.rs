@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::rc::Rc;
 use std::time::Duration;
 
 use dioxus::prelude::*;
@@ -47,9 +48,9 @@ enum Pane {
     Ready {
         rel: PathBuf,
         /// Left-hand side: the PR's merge base.
-        old: FileContent,
+        old: Rc<FileContent>,
         /// Right-hand side: the PR's head commit.
-        new: FileContent,
+        new: Rc<FileContent>,
     },
 }
 
@@ -163,20 +164,25 @@ pub fn Viewer() -> Element {
         Some(diff_file(old_text, new.text()?))
     });
 
+    // A memo of its own rather than `st.prefs.read().theme` inside
+    // `source_lines`: reading `prefs` there subscribes to all of it, and a
+    // font-size nudge would re-highlight the whole file for nothing.
+    let theme = use_memo(move || st.prefs.read().theme);
     let source_lines = use_memo(move || {
         // Syntax colours follow the app's theme, and the highlighter is asked
         // for them again when it moves. Subscribed to rather than used: what
         // the theme *is* lives in `backend::highlight`.
-        let _ = st.prefs.read().theme;
+        theme.read();
         let guard = data.read();
         let Pane::Ready { rel, old, new } = &*guard else {
             return None;
         };
-        let text = match new {
-            FileContent::Text(t) => t.clone(),
+        // Borrowed, not cloned — `guard` holds the pane to the end of this.
+        let text: &str = match new.as_ref() {
+            FileContent::Text(t) => t,
             // Deleted: fall back to the old side so there is something to read.
-            FileContent::Absent => match old {
-                FileContent::Text(t) => t.clone(),
+            FileContent::Absent => match old.as_ref() {
+                FileContent::Text(t) => t,
                 _ => return None,
             },
             FileContent::Binary => return None,
@@ -185,7 +191,7 @@ pub fn Viewer() -> Element {
         if text.len() > BIG_FILE_BYTES || line_count > BIG_FILE_LINES {
             Some(SourceLines::Plain(text.lines().map(String::from).collect()))
         } else {
-            Some(SourceLines::Colored(highlight(rel, &text)))
+            Some(SourceLines::Colored(highlight(rel, text)))
         }
     });
 
@@ -201,7 +207,7 @@ pub fn Viewer() -> Element {
         if !wanted || !markdown::is_markdown(rel) {
             return None;
         }
-        let text = match (new, old) {
+        let text = match (new.as_ref(), old.as_ref()) {
             (FileContent::Text(t), _) => t,
             // Deleted: render the version that is going away.
             (FileContent::Absent, FileContent::Text(t)) => t,
@@ -216,12 +222,14 @@ pub fn Viewer() -> Element {
     let preview = use_memo(move || {
         let wanted = *st.view_mode.read() == ViewMode::Preview;
         match &*data.read() {
-            Pane::Ready { rel, old, new } if wanted && is_html(rel) => match (new, old) {
-                (FileContent::Text(t), _) => Some(t.clone()),
-                // Deleted by the PR: draw the version that is going away.
-                (FileContent::Absent, FileContent::Text(t)) => Some(t.clone()),
-                _ => None,
-            },
+            Pane::Ready { rel, old, new } if wanted && is_html(rel) => {
+                match (new.as_ref(), old.as_ref()) {
+                    (FileContent::Text(t), _) => Some(t.clone()),
+                    // Deleted by the PR: draw the version that is going away.
+                    (FileContent::Absent, FileContent::Text(t)) => Some(t.clone()),
+                    _ => None,
+                }
+            }
             _ => None,
         }
     });
@@ -265,7 +273,7 @@ pub fn Viewer() -> Element {
             true,
             Some(rsx! { div { class: "notice error", "{e}" } }),
         ),
-        Pane::Ready { rel, new, .. } => (rel.clone(), *new == FileContent::Absent, None),
+        Pane::Ready { rel, new, .. } => (rel.clone(), **new == FileContent::Absent, None),
     };
     let settled = pending.is_none();
 

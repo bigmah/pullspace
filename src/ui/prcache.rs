@@ -8,11 +8,12 @@
 //! actually looked at, since decoding forty thousand files into strings is not
 //! something to do to a browser tab.
 //!
-//! Three callers funnel through [`ensure_file`] — the clone's stragglers, the
-//! tree's hover handler, and the viewer opening a file — and it is cheap to
-//! call repeatedly, so none of them need to know about the others.
+//! Two callers funnel through [`ensure_file`] — the tree's hover handler, and
+//! the viewer opening a file — and it is cheap to call repeatedly, so neither
+//! needs to know about the other.
 
 use std::path::Path;
+use std::rc::Rc;
 
 use dioxus::prelude::*;
 
@@ -35,7 +36,10 @@ fn settle(
     result: anyhow::Result<(crate::backend::FileContent, crate::backend::FileContent)>,
 ) -> PrFileState {
     match result {
-        Ok((base, head)) => PrFileState::Ready { base, head },
+        Ok((base, head)) => PrFileState::Ready {
+            base: Rc::new(base),
+            head: Rc::new(head),
+        },
         Err(e) => PrFileState::Failed(format!("{e:#}")),
     }
 }
@@ -77,7 +81,7 @@ fn remember(st: &St, path: &Path, state: PrFileState) {
 /// Dioxus writes signals only from the UI thread, so the check and the claim
 /// below cannot interleave with another caller — `Loading` therefore always
 /// means genuinely in flight, and no file is ever read twice at once.
-pub fn ensure_file(st: St, job: FetchJob) {
+fn ensure_file(st: St, job: FetchJob) {
     if claimed(&st, &job.path) {
         return;
     }

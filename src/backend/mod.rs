@@ -21,7 +21,10 @@ pub mod viewed;
 /// One side of a diff. `Absent` covers "not in this commit" — the base side of
 /// an added file, the head side of a deleted one — which the viewer treats as
 /// an empty side either way.
-#[derive(Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+// `Eq` matters more than it looks: the viewer shares these behind `Rc`, and
+// with `Eq` the standard library answers `Rc == Rc` by pointer first — which
+// is what keeps re-checking an unchanged 400KB file from being a byte compare.
+#[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum FileContent {
     Text(String),
     Binary,

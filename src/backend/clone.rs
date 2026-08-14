@@ -288,7 +288,6 @@ pub struct Progress {
     pub done: usize,
     pub total: usize,
     pub cached: usize,
-    pub skipped: usize,
     /// Bytes actually downloaded so far, against what the tree said they would
     /// come to.
     pub bytes: u64,
@@ -334,14 +333,13 @@ pub async fn hydrate(
     let Plan {
         wanted: files,
         cached,
-        skipped,
         bytes: expected,
+        ..
     } = plan(&head, &base, &changed);
 
     let mut at = Progress {
         total: files.len(),
         cached,
-        skipped,
         expected,
         ..Default::default()
     };

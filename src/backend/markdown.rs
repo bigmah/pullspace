@@ -32,9 +32,11 @@ pub struct Span {
     pub style: Style,
     /// Where a click on this run goes — a URL, or a path inside the repository.
     pub link: Option<String>,
-    /// True for an image's alt text. Nothing is fetched, so the alt text is
-    /// what there is; saying it was an image is the honest way to show it.
-    pub image: bool,
+    /// The picture this run stands for, as the document named it. A path in the
+    /// repository is drawn; anything hosted elsewhere is not fetched, and the
+    /// text — the alt text — is what there is to show. See
+    /// [`crate::backend::images`] for why that line is drawn where it is.
+    pub image: Option<String>,
 }
 
 /// One entry in a list, which may hold blocks of its own — a nested list, or a
@@ -143,7 +145,10 @@ struct Inline {
     spans: Vec<Span>,
     style: Style,
     link: Option<String>,
-    image: bool,
+    image: Option<String>,
+    /// How many spans there were when the open image started, so that one with
+    /// no alt text at all can still be given a run of its own to be drawn as.
+    image_at: usize,
     /// Raw HTML passed through in the middle of the text.
     raw_html: bool,
 }
@@ -169,7 +174,7 @@ impl Inline {
                 text: text.to_string(),
                 style: self.style,
                 link: self.link.clone(),
-                image: self.image,
+                image: self.image.clone(),
             }),
         }
     }
@@ -194,15 +199,31 @@ impl Inline {
             Event::Start(Tag::Strong) => self.style.strong = true,
             Event::Start(Tag::Strikethrough) => self.style.strike = true,
             Event::Start(Tag::Link { dest_url, .. }) => self.link = Some(dest_url.to_string()),
-            // The alt text is what gets drawn, and a badge is usually a link
-            // wrapped around an image — so the enclosing link is left in place
-            // rather than replaced by the picture nobody is going to see.
-            Event::Start(Tag::Image { .. }) => self.image = true,
+            // A badge is a link wrapped around an image, so the enclosing link
+            // is left in place: whether the picture is drawn or stands as its
+            // alt text, clicking it goes where the link goes.
+            Event::Start(Tag::Image { dest_url, .. }) => {
+                self.image = Some(dest_url.to_string());
+                self.image_at = self.spans.len();
+            }
             Event::End(TagEnd::Emphasis) => self.style.em = false,
             Event::End(TagEnd::Strong) => self.style.strong = false,
             Event::End(TagEnd::Strikethrough) => self.style.strike = false,
             Event::End(TagEnd::Link) => self.link = None,
-            Event::End(TagEnd::Image) => self.image = false,
+            Event::End(TagEnd::Image) => {
+                // `![](diff.png)` — a picture with nothing written for the case
+                // where it cannot be shown. There is still a picture, so it
+                // gets an empty run to be drawn as rather than disappearing.
+                if self.spans.len() == self.image_at {
+                    self.spans.push(Span {
+                        text: String::new(),
+                        style: self.style,
+                        link: self.link.clone(),
+                        image: self.image.take(),
+                    });
+                }
+                self.image = None;
+            }
             Event::End(_) => return false,
             Event::Html(_) | Event::InlineHtml(_) => self.raw_html = true,
             // Anything else that is not text.
@@ -376,10 +397,14 @@ impl Reader<'_> {
 }
 
 /// Turn whatever inline text has piled up into a paragraph. Whitespace alone is
-/// the gap between two blocks, not a paragraph of its own.
+/// the gap between two blocks, not a paragraph of its own — but a picture with
+/// no alt text is nothing *written* and something to draw.
 fn flush(acc: &mut Inline, out: &mut Vec<Block>) {
     let spans = std::mem::take(&mut acc.spans);
-    if spans.iter().any(|s| !s.text.trim().is_empty()) {
+    if spans
+        .iter()
+        .any(|s| !s.text.trim().is_empty() || s.image.is_some())
+    {
         out.push(Block::Para(spans));
     }
 }
@@ -493,23 +518,52 @@ mod tests {
         };
         let link = spans.iter().find(|s| s.text == "docs").unwrap();
         assert_eq!(link.link.as_deref(), Some("https://example.com"));
-        assert!(!link.image);
+        assert_eq!(link.image, None);
 
         let img = spans.iter().find(|s| s.text == "a chart").unwrap();
-        assert!(img.image, "the alt text stands in for the picture");
+        assert_eq!(
+            img.image.as_deref(),
+            Some("chart.png"),
+            "the picture is named, and the run holds its alt text"
+        );
         assert_eq!(img.link, None);
     }
 
     #[test]
+    fn a_picture_with_no_alt_text_is_still_a_picture() {
+        // `![](diff.png)` produces no text event at all, so the run it is drawn
+        // as has to be made where the image closes or it is lost entirely.
+        let blocks = doc("![](diff.png)\n");
+        let Block::Para(spans) = &blocks[0] else {
+            panic!("expected a paragraph: {blocks:?}")
+        };
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0].image.as_deref(), Some("diff.png"));
+        assert_eq!(spans[0].text, "");
+
+        // The same inside a tight list item, which collects its text loosely.
+        let blocks = doc("- ![](a.png)\n");
+        let Block::List { items, .. } = &blocks[0] else {
+            panic!("expected a list: {blocks:?}")
+        };
+        assert!(
+            matches!(&items[0].blocks[..], [Block::Para(spans)]
+                if spans.iter().any(|s| s.image.as_deref() == Some("a.png"))),
+            "{:?}",
+            items[0].blocks
+        );
+    }
+
+    #[test]
     fn a_badge_keeps_the_link_it_is_wrapped_in() {
-        // `[![alt](img)](target)` — the picture is not fetched, but the alt
-        // text is still the thing you click to get to the target.
+        // `[![alt](img)](target)` — clicking the picture, drawn or not, goes to
+        // the target rather than to the picture.
         let blocks = doc("[![build](https://img.example/b.svg)](https://ci.example/job)");
         let Block::Para(spans) = &blocks[0] else {
             panic!("expected a paragraph")
         };
         let badge = spans.iter().find(|s| s.text == "build").unwrap();
-        assert!(badge.image);
+        assert_eq!(badge.image.as_deref(), Some("https://img.example/b.svg"));
         assert_eq!(badge.link.as_deref(), Some("https://ci.example/job"));
     }
 

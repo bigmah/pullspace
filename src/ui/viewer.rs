@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::Duration;
 
@@ -10,6 +10,7 @@ use crate::backend::difftool::{
     Block, Expansion, FileDiff, Line, LineKind, STEP, blocks, diff_file, stats, to_rows,
 };
 use crate::backend::highlight::{Span, highlight};
+use crate::backend::images::{self, media_type};
 use crate::backend::markdown;
 use crate::backend::route;
 use crate::backend::search::split_word;
@@ -19,11 +20,13 @@ use crate::backend::{FileContent, clip};
 use super::app::{PrFileState, St, ViewMode, Workspace};
 use super::compat;
 use super::ide;
+use super::imgcache::{all_settled, drawable, ensure_image};
+use super::markdown::Target;
 use super::prcache::ensure_path;
 
 /// Files offered in Preview. The browser lays HTML out itself, so this is the
 /// whole test — there is no renderer here with opinions of its own.
-fn is_html(path: &std::path::Path) -> bool {
+fn is_html(path: &Path) -> bool {
     path.extension()
         .and_then(|e| e.to_str())
         .is_some_and(|e| e.eq_ignore_ascii_case("html") || e.eq_ignore_ascii_case("htm"))
@@ -31,6 +34,44 @@ fn is_html(path: &std::path::Path) -> bool {
 
 const BIG_FILE_BYTES: usize = 400_000;
 const BIG_FILE_LINES: usize = 6_000;
+
+/// What one `src` in a previewed page turns out to be.
+#[derive(Clone, PartialEq, Eq, Debug)]
+enum Pic {
+    /// A file in this repository, to be carried into the document — there is no
+    /// server under this app for the frame to have fetched it from.
+    File(PathBuf),
+    /// Something the browser resolves on its own: a picture on a host of its
+    /// own, or one written into the page as data already.
+    Elsewhere,
+    /// A path leading somewhere this app cannot reach.
+    Missing,
+}
+
+/// Read one `src` out of a previewed page, `from` being the page's own path —
+/// a relative URL in an HTML file is relative to the file, not to the root.
+fn pic_of(from: &Path, url: &str) -> Pic {
+    let url = url.trim();
+    // Before anything is resolved as a path, because none of these are one.
+    // `data:` above all: a picture already written into the page is one that
+    // draws, and treating it as a filename would blank it out.
+    let scheme_like = url.contains("://")
+        || url.starts_with("//")
+        || ["data:", "blob:", "mailto:", "about:"]
+            .iter()
+            .any(|s| url.len() >= s.len() && url[..s.len()].eq_ignore_ascii_case(s));
+    if scheme_like {
+        return Pic::Elsewhere;
+    }
+    match super::markdown::resolve(from, url) {
+        Target::File(path) if media_type(&path).is_some() => Pic::File(path),
+        Target::Web(_) => Pic::Elsewhere,
+        // A path that resolves to nothing drawable, or out of the repository
+        // altogether. Left as written, the frame would resolve it against
+        // *this* app's URL and fetch a 404 of ours.
+        _ => Pic::Missing,
+    }
+}
 
 #[derive(Clone, PartialEq)]
 enum SourceLines {
@@ -234,6 +275,61 @@ pub fn Viewer() -> Element {
         }
     });
 
+    // Every picture the page being previewed asks for, and where in the file it
+    // asks. Scanned once per page rather than once per picture arriving.
+    let preview_pics = use_memo(move || match preview.read().as_deref() {
+        Some(html) => images::image_refs(html),
+        None => Vec::new(),
+    });
+
+    // Read them. A page carries its pictures inside itself here — see
+    // `backend::images` — so this is what has to happen before the frame is
+    // handed anything.
+    use_effect(move || {
+        let rel = st.open.read().clone().unwrap_or_default();
+        for r in preview_pics.read().iter() {
+            if let Pic::File(path) = pic_of(&rel, &r.url) {
+                ensure_image(st, &path);
+            }
+        }
+    });
+
+    // The page as the frame gets it: every `src` naming a file in this
+    // repository swapped for the file itself.
+    //
+    // Written out twice at most, however many pictures there are. A `srcdoc`
+    // that changes reloads the frame it is on, so a page of six screenshots
+    // arriving one at a time would load itself six times over in front of
+    // whoever is reading it — hence the wait for the last of them to settle
+    // before anything but the blanks is put in.
+    let preview_html = use_memo(move || {
+        let held = preview.read();
+        let html = held.as_deref()?;
+        let refs = preview_pics.read();
+        if refs.is_empty() {
+            return Some(html.to_string());
+        }
+        let rel = st.open.read().clone().unwrap_or_default();
+        let wanted: Vec<PathBuf> = refs
+            .iter()
+            .filter_map(|r| match pic_of(&rel, &r.url) {
+                Pic::File(path) => Some(path),
+                _ => None,
+            })
+            .collect();
+        let settled = all_settled(&st, &wanted);
+        Some(images::rewrite(html, &refs, |r| {
+            match pic_of(&rel, &r.url) {
+                Pic::File(path) if settled => Some(
+                    drawable(&st, &path)
+                        .map_or_else(|| images::BLANK.to_string(), |uri| uri.to_string()),
+                ),
+                Pic::File(_) | Pic::Missing => Some(images::BLANK.to_string()),
+                Pic::Elsewhere => None,
+            }
+        }))
+    });
+
     // A new file starts at the top. The scroll container outlives the file in
     // it, so without this, opening something short after reading deep into
     // something long lands you at the bottom of it.
@@ -325,7 +421,7 @@ pub fn Viewer() -> Element {
             Some(parsed) => super::markdown::render(st, &rel, parsed),
             None => rsx! { div { class: "notice", "Nothing to render — this file has no text." } },
         },
-        ViewMode::Preview => match &*preview.read() {
+        ViewMode::Preview => match &*preview_html.read() {
             None => rsx! { div { class: "notice", "Nothing to draw — this file has no text." } },
             Some(html) => render_preview(html),
         },

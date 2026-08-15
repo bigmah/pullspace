@@ -405,6 +405,50 @@ pub async fn hydrate(
 
 // -------------------------------------------------------------------- read
 
+/// One side of a file as it stands on disk or on GitHub, undecoded.
+///
+/// `None` is a 404: the file is not in that commit, which is the expected
+/// answer for the base side of an added file.
+async fn side_bytes(
+    token: &str,
+    repo: &RepoRef,
+    commit: &str,
+    path: &Path,
+    blob: &TreeEntry,
+) -> Result<Option<Vec<u8>>> {
+    let sha = blob.sha.as_str();
+    if let Some(bytes) = blobs::read(sha, blob.size).await {
+        return Ok(Some(bytes));
+    }
+
+    let mut reply = None;
+    if cdn_serves(repo) {
+        let (status, body) = github::raw_file(repo, commit, path).await?;
+        match status {
+            200..=299 => reply = Some(body),
+            404 if !token.is_empty() => cdn_refused(repo),
+            404 => return Ok(None),
+            _ => bail!("GitHub returned HTTP {status} for {}", path.display()),
+        }
+    }
+    let body = match reply {
+        Some(body) => body,
+        None => {
+            let (status, body) = github::api_blob(token, repo, sha).await?;
+            if status == 404 {
+                return Ok(None);
+            }
+            if !(200..300).contains(&status) {
+                bail!("GitHub returned HTTP {status} for {}", path.display());
+            }
+            body
+        }
+    };
+
+    blobs::write(sha, &body, blob.size).await;
+    Ok(Some(body))
+}
+
 /// One side of a file: off the disk if it is there, off the network if it is
 /// not — and kept on the way past, so the second reader of a file the clone
 /// skipped does not fetch it again either.
@@ -420,37 +464,10 @@ async fn side(
         // copy under. Read it and let it go.
         return github::file_at(token, repo, commit, path).await;
     };
-    let sha = blob.sha.as_str();
-    if let Some(bytes) = blobs::read(sha, blob.size).await {
-        return Ok(FileContent::from_bytes(&bytes));
-    }
-
-    let mut reply = None;
-    if cdn_serves(repo) {
-        let (status, body) = github::raw_file(repo, commit, path).await?;
-        match status {
-            200..=299 => reply = Some(body),
-            404 if !token.is_empty() => cdn_refused(repo),
-            404 => return Ok(FileContent::Absent),
-            _ => bail!("GitHub returned HTTP {status} for {}", path.display()),
-        }
-    }
-    let body = match reply {
-        Some(body) => body,
-        None => {
-            let (status, body) = github::api_blob(token, repo, sha).await?;
-            if status == 404 {
-                return Ok(FileContent::Absent);
-            }
-            if !(200..300).contains(&status) {
-                bail!("GitHub returned HTTP {status} for {}", path.display());
-            }
-            body
-        }
-    };
-
-    blobs::write(sha, &body, blob.size).await;
-    Ok(FileContent::from_bytes(&body))
+    Ok(match side_bytes(token, repo, commit, path, blob).await? {
+        Some(bytes) => FileContent::from_bytes(&bytes),
+        None => FileContent::Absent,
+    })
 }
 
 /// Whether both sides of a file could be read without asking GitHub for
@@ -467,6 +484,45 @@ pub fn is_local(job: &FetchJob) -> bool {
         None => false,
     };
     side(job.wants_head(), job.head_blob.as_ref()) && side(job.wants_base(), job.base_blob.as_ref())
+}
+
+/// One file's bytes, exactly as they are stored — nothing decoded, nothing
+/// classified.
+///
+/// What a picture needs. [`FileContent`] answers "binary" and drops the bytes,
+/// which is the right answer for a viewer of text and no use whatever to an
+/// `<img>`. The head commit's version is the one drawn, falling back to the base
+/// side for a file the pull request deletes — the same rule the viewer reads a
+/// document by, so a README and the screenshot in it are never two different
+/// commits of the same repository.
+pub async fn read_bytes(token: &str, job: &FetchJob) -> Result<Vec<u8>> {
+    let _waiting = Waiting::new();
+    let mut sides = Vec::new();
+    if job.wants_head() {
+        sides.push((&job.head_sha, &job.path, job.head_blob.as_ref()));
+    }
+    if job.wants_base() {
+        sides.push((&job.base_sha, &job.base_path, job.base_blob.as_ref()));
+    }
+    for (commit, path, blob) in sides {
+        let bytes = match blob {
+            Some(blob) => side_bytes(token, &job.repo, commit, path, blob).await?,
+            // No tree to say what this hashes to, so there is nothing to file a
+            // copy under: read it by name and let it go.
+            None => {
+                let (status, body) = github::bytes_at(token, &job.repo, commit, path).await?;
+                match status {
+                    200..=299 => Some(body),
+                    404 => None,
+                    _ => bail!("GitHub returned HTTP {status} for {}", path.display()),
+                }
+            }
+        };
+        if let Some(bytes) = bytes {
+            return Ok(bytes);
+        }
+    }
+    bail!("{} is not in this commit", job.path.display())
 }
 
 /// Both sides of one file, from the store where possible.

@@ -7,6 +7,10 @@
 //! wraps to the pane, can be selected out of, and whose links work: an
 //! outside one opens in the browser, and one pointing at a file in the
 //! repository opens it in the viewer.
+//!
+//! Pictures are the one thing here that is fetched rather than parsed, and only
+//! ever out of the repository being read — [`crate::backend::images`] is where
+//! that line is drawn and why.
 
 use std::path::{Path, PathBuf};
 
@@ -14,13 +18,16 @@ use dioxus::prelude::*;
 
 use crate::backend::auth::open_browser;
 use crate::backend::highlight::highlight_lang;
+use crate::backend::images::media_type;
 use crate::backend::markdown::{Block, Doc, Item, Span};
 use crate::backend::route::decoded;
 
 use super::app::St;
+use super::imgcache::{drawable, ensure_image, refused};
 
 /// Where a link in a document goes.
-enum Target {
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub(super) enum Target {
     /// Out of the app, to a browser.
     Web(String),
     /// A file in this repository, relative to its root.
@@ -35,7 +42,7 @@ enum Target {
 ///
 /// `from` is the document's own path, because a relative link is relative to
 /// the file it is written in, not to the root.
-fn resolve(from: &Path, href: &str) -> Target {
+pub(super) fn resolve(from: &Path, href: &str) -> Target {
     let href = href.trim();
     if href.is_empty() || href.starts_with('#') {
         return Target::Nowhere;
@@ -234,7 +241,7 @@ fn classes(s: &Span, link: bool) -> String {
         (s.style.em, " mdi"),
         (s.style.code, " mdc"),
         (s.style.strike, " mds"),
-        (s.image, " mdimg"),
+        (s.image.is_some(), " mdimg"),
         (link, " mda"),
     ] {
         if on {
@@ -245,7 +252,38 @@ fn classes(s: &Span, link: bool) -> String {
 }
 
 fn run(st: St, rel: &Path, s: &Span) -> Element {
-    let target = s.link.as_deref().map(|href| resolve(rel, href));
+    match s.image.as_deref() {
+        Some(src) => picture(st, rel, s, src),
+        None => text(st, rel, s, s.link.as_deref()),
+    }
+}
+
+/// A picture: the file itself when it is one this repository holds, and the alt
+/// text when it is not — a badge on somebody's CDN, a path that has moved, or
+/// something no browser would draw.
+///
+/// The alt text is a link either way, so a picture that cannot be shown is
+/// still a picture that can be looked at: at whatever the document wrapped it
+/// in, or failing that at the picture itself.
+fn picture(st: St, rel: &Path, s: &Span, src: &str) -> Element {
+    if let Target::File(path) = resolve(rel, src)
+        && media_type(&path).is_some()
+        && st.has_file(&path)
+    {
+        // The enclosing link is resolved here: inside the component the
+        // document's own path is no longer around to resolve it against.
+        let link = s.link.as_deref().map(|href| resolve(rel, href));
+        return rsx! {
+            Figure { path, alt: s.text.clone(), link }
+        };
+    }
+    let href = s.link.as_deref().or(Some(src));
+    text(st, rel, s, href)
+}
+
+/// A run of text, with `href` as where clicking it goes.
+fn text(st: St, rel: &Path, s: &Span, href: Option<&str>) -> Element {
+    let target = href.map(|href| resolve(rel, href));
     let (title, click) = match &target {
         Some(Target::Web(url)) => (url.clone(), true),
         Some(Target::File(path)) => (format!("Open {}", path.display()), true),
@@ -270,6 +308,60 @@ fn run(st: St, rel: &Path, s: &Span) -> Element {
                 _ => {}
             },
             "{s.text}"
+        }
+    }
+}
+
+/// One picture out of the repository, read on demand and drawn where it was
+/// written.
+///
+/// A component rather than a function because it is the only thing in this file
+/// that has to *ask* for something: the read is started from an effect, since
+/// starting it while the document is being drawn is a write to the state the
+/// drawing is reading.
+#[component]
+fn Figure(path: PathBuf, alt: String, link: Option<Target>) -> Element {
+    let st = use_context::<St>();
+    // `use_reactive` because `path` is a prop rather than a signal: a plain
+    // effect is built once and would keep asking for the first picture this
+    // slot ever held, which is the wrong file the moment another document is
+    // drawn in the same place.
+    use_effect(use_reactive!(|path| ensure_image(st, &path)));
+
+    // A picture wrapped in a link goes where the link goes — a badge, or a
+    // screenshot standing in for the page it was taken of.
+    let click = move |_| match &link {
+        Some(Target::Web(url)) => open_browser(url),
+        Some(Target::File(to)) if st.has_file(to) => st.open_file(to.clone()),
+        _ => {}
+    };
+
+    let name = path.display().to_string();
+    if let Some(uri) = drawable(&st, &path) {
+        return rsx! {
+            img {
+                class: "mdimage",
+                src: "{uri}",
+                alt: "{alt}",
+                title: "{name}",
+                onclick: click,
+            }
+        };
+    }
+    // Not here yet, or never coming. Empty alt text is a picture the document
+    // did not describe, which is most of them — its own name is better than a
+    // blank space to look at while it is read.
+    let why = refused(&st, &path);
+    let label = if alt.trim().is_empty() { &name } else { &alt };
+    let title = match &why {
+        Some(why) => format!("{name} — {why}"),
+        None => format!("{name} — reading…"),
+    };
+    rsx! {
+        span {
+            class: if why.is_some() { "mdt mdimg" } else { "mdt mdimg mdimgwait" },
+            title: "{title}",
+            "{label}"
         }
     }
 }

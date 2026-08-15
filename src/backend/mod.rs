@@ -6,6 +6,7 @@ pub mod difftool;
 pub mod github;
 pub mod highlight;
 pub mod http;
+pub mod images;
 pub mod layout;
 pub mod markdown;
 pub mod opfs;

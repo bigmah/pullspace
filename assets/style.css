@@ -2221,8 +2221,25 @@ button { font-family: inherit; user-select: none; }
 .mda { color: var(--accent); cursor: pointer; }
 .mda:hover { text-decoration: underline; }
 
-/* Images are never fetched — see backend/markdown.rs. The alt text is what
-   there is, and this is what says it stood in for a picture. */
+/* A picture out of the repository. Held to the column it is in, and to a
+   height that leaves the prose around it readable — a full-page screenshot
+   should not be a screenful of scrolling to get past. */
+.mdimage {
+  display: block;
+  max-width: 100%;
+  max-height: 70vh;
+  height: auto;
+  margin: 12px 0;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--r);
+  background: var(--bg-1);
+  object-fit: contain;
+  object-position: left top;
+}
+
+/* Pictures hosted somewhere other than the repository are not fetched — see
+   backend/images.rs. The alt text is what there is, and this is what says it
+   stood in for one. */
 .mdimg {
   font-size: 11.5px;
   color: var(--fg-faint);
@@ -2233,6 +2250,10 @@ button { font-family: inherit; user-select: none; }
 
 .mdimg::before { content: "▣ "; opacity: 0.7; }
 .mdimg.mda { color: var(--accent); opacity: 0.85; }
+
+/* One that is on its way. Dimmer still, and no dashes: it is not a picture
+   that will not be drawn, it is one that is not drawn yet. */
+.mdimgwait { border-style: dotted; opacity: 0.6; }
 
 .mdcode {
   font-family: var(--mono);

@@ -346,6 +346,19 @@ pub enum PrFileState {
     Failed(String),
 }
 
+/// One picture out of the repository, on its way to being drawn.
+///
+/// `Ready` holds the whole file as a `data:` URL — see
+/// [`crate::backend::images`] for why it has to be the whole file. Shared
+/// behind an `Rc`, because a README redrawn for a theme change would otherwise
+/// copy every screenshot in it.
+#[derive(Clone, PartialEq)]
+pub enum ImgState {
+    Loading,
+    Ready(Rc<str>),
+    Failed(String),
+}
+
 /// All app state, shared through context. Every field is a Copy signal, and
 /// every one of them is owned by [`ScopeId::ROOT`] — see [`root`].
 #[derive(Clone, Copy)]
@@ -454,6 +467,13 @@ pub struct St {
     pub pr_files: Signal<HashMap<PathBuf, PrFileState>>,
     /// What is in `pr_files`, oldest first, so the shelf can be kept to a size.
     pub warm_order: Signal<VecDeque<PathBuf>>,
+    /// The pictures a document has asked for, as URLs it can be drawn with.
+    /// Kept apart from `pr_files` because they are a different shape — bytes
+    /// rather than text — and a different size: see [`super::imgcache`], which
+    /// is the only thing that writes either of these two.
+    pub images: Signal<HashMap<PathBuf, ImgState>>,
+    /// What is in `images`, oldest first.
+    pub image_order: Signal<VecDeque<PathBuf>>,
     /// How the background clone of what is open is getting on. `None` before
     /// one has started, or where there is no filesystem to clone into.
     pub cloning: Signal<Option<Progress>>,
@@ -1041,6 +1061,12 @@ impl St {
         cache.set(HashMap::new());
         let mut order = self.warm_order;
         order.set(VecDeque::new());
+        // Pictures too, and for the same reason: the next commit's `logo.png`
+        // is a different file that happens to have the same name.
+        let mut images = self.images;
+        images.set(HashMap::new());
+        let mut image_order = self.image_order;
+        image_order.set(VecDeque::new());
         // Which stretches of a diff were opened up is a fact about that diff,
         // and every diff here is about to be built again out of whatever
         // arrives. Held on to, the positions would refer to gaps in a
@@ -1223,6 +1249,8 @@ pub fn App() -> Element {
             workspace: root(Workspace::Empty),
             pr_files: root(HashMap::new()),
             warm_order: root(VecDeque::new()),
+            images: root(HashMap::new()),
+            image_order: root(VecDeque::new()),
             cloning: root(None),
             store_gen: root(0),
             conv: root(Conversation::Loading),

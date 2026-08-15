@@ -116,7 +116,7 @@ Left to itself it stays under **1 GB**. Past that, the repositories you have not
 opened in the longest are dropped, and every file no remaining repository refers
 to goes with them. Files over 1 MB and the ones the viewer would only call
 binary — images, archives, fonts, compiled objects — are not downloaded up
-front; opening one fetches it then.
+front; opening one, or reading a document that shows one, fetches it then.
 
 ## Markdown + HTML
 
@@ -130,9 +130,24 @@ repository opens it in this viewer, resolved relative to the document it is
 written in — so a README that links to `docs/design.md` is a way around the
 repository rather than a dead end.
 
+Pictures are drawn — the ones the repository holds. `![a diff](diff.png)` is
+read out of the repository like any other file, off the local copy where it is
+already there, and carried into the document as a `data:` URL. There is no
+server here to have served it from, and pointing an `<img>` at
+raw.githubusercontent.com would only work for repositories that are public.
+
+A picture hosted somewhere else — a shields.io badge, a screenshot on a CDN —
+is deliberately *not* fetched, and shows its alt text with a link to itself
+instead. The same renderer draws pull request comments, and a comment is text a
+stranger wrote: an `<img>` in one is a request to whatever host it names, from
+the tab holding your token, saying who read the pull request and when. GitHub
+proxies those through camo for exactly that reason, and a static page has
+nothing to proxy with.
+
 What is *not* drawn is anything the file smuggles in as HTML. The bar says
-`raw HTML not drawn` when a file contained some. Images are not fetched either:
-their alt text is shown in their place.
+`raw HTML not drawn` when a file contained some — including an `<img>` written
+that way, which is worth knowing if your README centres its screenshots in a
+`<div>`.
 
 The conversation pane goes through the same renderer, at the size of the column
 it is in — which is the answer to the obvious worry about drawing text that
@@ -143,7 +158,10 @@ elements out of them, and a comment that was mostly a `<details>` block says
 
 HTML files get a **Preview** that is the real page, rendered in an `iframe` with
 an empty `sandbox` — no scripts, no forms, no navigation, and no same-origin
-access, so a previewed file cannot reach the token in local storage.
+access, so a previewed file cannot reach the token in local storage. Its
+pictures are carried in the same way: every `src` naming a file in the
+repository is swapped for the file itself before the frame is handed anything,
+since a relative path in there has no server to resolve against either.
 
 ## Architecture
 
@@ -171,18 +189,20 @@ src/
     difftool.rs     hunk/line/segment diff model (similar), split-row pairing
     highlight.rs    syntect syntax highlighting (pure-Rust fancy-regex build)
     markdown.rs     markdown parsed to blocks and styled runs (no HTML)
+    images.rs       pictures as data: URLs; the `src`s a page asks for
   ui/               Dioxus components
     app.rs          state (signals + context), root layout
     compat.rs       sleep, on the browser's event loop
     github.rs       sign-in, repository search, pull request picker overlay
     prcache.rs      what is decoded in memory, and what warms it
+    imgcache.rs     pictures read on demand, and what is kept of them
     topbar.rs       what is on screen, warm-up progress, account, refresh
     filetree.rs     recursive tree with status badges
     viewer.rs       source view, inline & split diff views
     ide.rs          search, definitions, references, and the keyboard
     nav.rs          the address bar read back: links, Back and Forward
     bottom.rs       the panel under the code: hits, definitions, a peek at one
-    markdown.rs     markdown drawn as elements; link targets
+    markdown.rs     markdown drawn as elements; link targets, pictures
     conversation.rs the pull request's description and comments, drawn
     prefs.rs        the appearance panel
     page.rs         the browser tab: its name, and the icon on it

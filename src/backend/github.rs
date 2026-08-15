@@ -1597,6 +1597,29 @@ pub async fn api_blob(token: &str, repo: &RepoRef, sha: &str) -> Result<(u16, Ve
     get_raw(token, &url, "application/vnd.github.raw").await
 }
 
+/// [`file_at`]'s reply before anything is made of it: the status, and the bytes
+/// as they arrived. What a picture is read with, since deciding a file is
+/// "binary" is exactly the wrong thing to do to one.
+pub async fn bytes_at(
+    token: &str,
+    repo: &RepoRef,
+    sha: &str,
+    path: &std::path::Path,
+) -> Result<(u16, Vec<u8>)> {
+    if token.is_empty() {
+        return raw_file(repo, sha, path).await;
+    }
+    let rel = slashed(path);
+    let url = format!(
+        "{API}/repos/{}/{}/contents/{}?ref={}",
+        encode_segment(&repo.owner),
+        encode_segment(&repo.name),
+        encode_path(&rel),
+        encode_segment(sha),
+    );
+    get_raw(token, &url, "application/vnd.github.raw").await
+}
+
 /// One side of a file, at a specific commit, for a caller that knows the path
 /// but not the blob it is made of — a repository whose tree would not load, or
 /// a base side with no base tree behind it.
@@ -1611,19 +1634,7 @@ pub async fn file_at(
     sha: &str,
     path: &std::path::Path,
 ) -> Result<FileContent> {
-    let (status, body) = if token.is_empty() {
-        raw_file(repo, sha, path).await?
-    } else {
-        let rel = slashed(path);
-        let url = format!(
-            "{API}/repos/{}/{}/contents/{}?ref={}",
-            encode_segment(&repo.owner),
-            encode_segment(&repo.name),
-            encode_path(&rel),
-            encode_segment(sha),
-        );
-        get_raw(token, &url, "application/vnd.github.raw").await?
-    };
+    let (status, body) = bytes_at(token, repo, sha, path).await?;
 
     if status == 404 {
         return Ok(FileContent::Absent);

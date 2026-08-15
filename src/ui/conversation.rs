@@ -12,10 +12,12 @@ use std::path::Path;
 use dioxus::prelude::*;
 
 use crate::backend::auth::open_browser;
-use crate::backend::github::{self, Comment, CommentKind, CommitSummary, PrHeader, RepoRef};
+use crate::backend::github::{
+    self, Annotation, Check, Comment, CommentKind, CommitSummary, PrHeader, RepoRef,
+};
 use crate::backend::markdown;
 
-use super::app::{CommitList, ConvTab, Conversation, St};
+use super::app::{Annots, CheckList, CommitList, ConvTab, Conversation, St};
 use super::panes::{Edge, Splitter};
 
 /// A comment's links are written from the root of the repository — there is no
@@ -64,6 +66,67 @@ pub(super) async fn load_commits(st: St, repo: RepoRef, number: u64) {
         Ok(commits) => CommitList::Ready(Box::new(commits)),
         Err(e) => CommitList::Failed(format!("{e:#}")),
     });
+}
+
+/// Fetch what ran against the commit on screen. Asked for rather than fetched
+/// with the pull request — see [`CheckList`].
+pub(super) async fn load_checks(st: St, repo: RepoRef, sha: String) {
+    let mut checks = st.checks;
+    checks.set(CheckList::Loading);
+    let token = st.api_token();
+    let got = github::commit_checks(&token, &repo, &sha).await;
+
+    // The same commit, still open. A pull request that was pushed to while this
+    // was in flight is a different set of checks.
+    let still_open = st
+        .workspace
+        .peek()
+        .checks_key()
+        .is_some_and(|(now, at)| now == repo && at == sha);
+    if !still_open {
+        return;
+    }
+    // What each check marked up was read out of the answer this one replaces.
+    // `⟳` is pressed precisely when something has moved — a check that was
+    // running has finished, and has things to say that it did not have before.
+    st.forget_annotations();
+    checks.set(match got {
+        Ok(checks) => CheckList::Ready(Box::new(checks)),
+        Err(e) => CheckList::Failed(format!("{e:#}")),
+    });
+}
+
+/// Fetch what one check marked up, the first time somebody opens it.
+///
+/// One request per check, and one only: the entry is claimed before the request
+/// goes out, so a row opened and closed and opened again asks once. What is
+/// held is dropped wholesale when the checks change — see
+/// `St::forget_annotations` — which is also how this notices that its answer is
+/// about a commit nobody is reading any more.
+pub(super) async fn load_annotations(st: St, check: u64) {
+    let mut annots = st.annots;
+    if annots.peek().contains_key(&check) {
+        return;
+    }
+    let Some(repo) = st.workspace.peek().repo_ref().cloned() else {
+        return;
+    };
+    annots.write().insert(check, Annots::Loading);
+    let token = st.api_token();
+    let got = github::check_annotations(&token, &repo, check).await;
+
+    let mut held = annots.write();
+    // Gone from under us: these are somebody else's check runs now.
+    if !held.contains_key(&check) {
+        return;
+    }
+    held.insert(
+        check,
+        match got {
+            Ok(list) => Annots::Ready(list),
+            Err(e) => Annots::Failed(format!("{e:#}")),
+        },
+    );
 }
 
 /// The date alone. The time of day is not what anyone is reading a comment
@@ -128,15 +191,38 @@ pub fn ConvPane() -> Element {
         CommitList::Ready(commits) => Some(commits.items.len()),
         _ => None,
     };
+    // The checks count carries the verdict with it: a red 14 beside the heading
+    // is the answer to the question the tab is there for, before it is opened.
+    let (checks, checks_tone, checks_why) = match &*st.checks.read() {
+        CheckList::Ready(checks) => (
+            Some(checks.items.len()),
+            checks.state().tone(),
+            format!("The checks on this commit — {}", checks.tally().phrase()),
+        ),
+        _ => (
+            None,
+            "",
+            "What ran against this commit, and how it went".to_string(),
+        ),
+    };
 
     // Folded away, the rail says what is behind it — which is whichever of the
-    // two was last being read, not always the conversation.
+    // three was last being read, not always the conversation.
     let (rail_label, rail_count, rail_why) = match showing {
-        ConvTab::Talk => ("CONVERSATION", count, "Show the pull request conversation"),
+        ConvTab::Talk => (
+            "CONVERSATION",
+            count,
+            "Show the pull request conversation".to_string(),
+        ),
         ConvTab::Commits => (
             "COMMITS",
             commits.unwrap_or_default(),
-            "Show the commits on this pull request",
+            "Show the commits on this pull request".to_string(),
+        ),
+        ConvTab::Checks => (
+            "CHECKS",
+            checks.unwrap_or_default(),
+            "Show what ran against this commit".to_string(),
         ),
     };
 
@@ -160,6 +246,7 @@ pub fn ConvPane() -> Element {
     let reloading = match showing {
         ConvTab::Talk => matches!(&*conv, Conversation::Loading),
         ConvTab::Commits => matches!(&*st.commits.read(), CommitList::Loading),
+        ConvTab::Checks => matches!(&*st.checks.read(), CheckList::Loading),
     };
 
     let talk = match &*conv {
@@ -188,7 +275,14 @@ pub fn ConvPane() -> Element {
     let reload_why = match showing {
         ConvTab::Talk => "Reload the conversation from GitHub",
         ConvTab::Commits => "Reload the commits from GitHub",
+        // The one of the three most worth pressing twice: a build that was
+        // running a minute ago has usually finished by now.
+        ConvTab::Checks => "Reload the checks from GitHub",
     };
+    // Which commit the checks are about, for the button that fetches them
+    // again. Peeked: the header is redrawn by every one of the three lists as
+    // it lands, and this is only read when something is clicked.
+    let at_sha = st.workspace.peek().checks_key().map(|(_, sha)| sha);
 
     rsx! {
         Splitter { edge: Edge::Conv }
@@ -200,15 +294,26 @@ pub fn ConvPane() -> Element {
                     label: "CONVERSATION",
                     on: showing == ConvTab::Talk,
                     count: (count > 0).then_some(count),
-                    why: "The description, the discussion and the notes left on lines of the diff",
+                    tone: "",
+                    why: "The description, the discussion and the notes left on lines of the diff"
+                        .to_string(),
                     onpick: move |_| tab.set(ConvTab::Talk),
                 }
                 PaneTab {
                     label: "COMMITS",
                     on: showing == ConvTab::Commits,
                     count: commits,
-                    why: "Every commit on this pull request, oldest first",
+                    tone: "",
+                    why: "Every commit on this pull request, oldest first".to_string(),
                     onpick: move |_| tab.set(ConvTab::Commits),
+                }
+                PaneTab {
+                    label: "CHECKS",
+                    on: showing == ConvTab::Checks,
+                    count: checks,
+                    tone: checks_tone,
+                    why: checks_why,
+                    onpick: move |_| tab.set(ConvTab::Checks),
                 }
                 span { class: "spacer" }
                 button {
@@ -222,6 +327,11 @@ pub fn ConvPane() -> Element {
                         }
                         ConvTab::Commits => {
                             spawn_forever(load_commits(st, repo.clone(), number));
+                        }
+                        ConvTab::Checks => {
+                            if let Some(sha) = at_sha.clone() {
+                                spawn_forever(load_checks(st, repo.clone(), sha));
+                            }
                         }
                     },
                     span { class: "glyph", "⟳" }
@@ -242,13 +352,16 @@ pub fn ConvPane() -> Element {
                     ConvTab::Commits => rsx! {
                         CommitsBody { repo: repo.clone(), pr: desc.clone(), at: at_commit.clone() }
                     },
+                    ConvTab::Checks => rsx! {
+                        ChecksBody {}
+                    },
                 }
             }
         }
     }
 }
 
-/// One of the pane's two headings, as the button that turns it on.
+/// One of the pane's three headings, as the button that turns it on.
 #[component]
 fn PaneTab(
     label: &'static str,
@@ -256,7 +369,12 @@ fn PaneTab(
     /// Shown beside the label once it is known. `None` while it is not — an
     /// unread list is not a list of none.
     count: Option<usize>,
-    why: &'static str,
+    /// What colour to say the count in: `ok`, `bad`, `run`, or empty for the
+    /// plain one. It is how the checks tab answers its own question without
+    /// being opened; the other two are counting comments, which are not good
+    /// news or bad news.
+    tone: &'static str,
+    why: String,
     onpick: EventHandler<()>,
 ) -> Element {
     let class = if on { "convtab on" } else { "convtab" };
@@ -267,7 +385,7 @@ fn PaneTab(
             onclick: move |_| onpick.call(()),
             span { class: "side-title", "{label}" }
             if let Some(count) = count {
-                span { class: "convcount", "{count}" }
+                span { class: "convcount {tone}", "{count}" }
             }
         }
     }
@@ -393,6 +511,264 @@ fn CommitRow(c: CommitSummary, repo: RepoRef, pr: PrHeader, current: bool) -> El
             div { class: "convtitle", "{c.subject()}" }
             if showing {
                 div { class: "convcommitbody", "{body}" }
+            }
+        }
+    }
+}
+
+/// What ran against the commit on screen: the tests, the linters, the deploy
+/// previews — each with the mark it earned.
+///
+/// A check belongs to a commit, so the list says which commit it is about. On a
+/// pull request that is its head; on one of its commits, that commit — and the
+/// seven characters at the top are what tells the reader which question they
+/// are looking at the answer to.
+#[component]
+fn ChecksBody() -> Element {
+    let st = use_context::<St>();
+    let held = st.checks.read();
+
+    match &*held {
+        // Idle only ever lasts as long as it takes the effect in `App` to see
+        // that this tab is up — the same as the commits beside it.
+        CheckList::Idle | CheckList::Loading => rsx! {
+            div { class: "panel-empty", "Loading the checks…" }
+        },
+        CheckList::Failed(e) => rsx! {
+            div { class: "gherror", "{e}" }
+        },
+        CheckList::Ready(checks) if checks.items.is_empty() => rsx! {
+            div { class: "panel-empty",
+                "Nothing has run against this commit — no checks, and no statuses posted."
+            }
+        },
+        CheckList::Ready(checks) => {
+            let short: String = checks.sha.chars().take(7).collect();
+            let state = checks.state();
+            rsx! {
+                div { class: "checkroll",
+                    span { class: "checkicon {state.tone()}", "{state.glyph()}" }
+                    span { class: "checktally", "{checks.tally().phrase()}" }
+                    span { class: "spacer" }
+                    span {
+                        class: "convsha",
+                        title: "{checks.sha}",
+                        "{short}"
+                    }
+                }
+                for (i , c) in checks.items.iter().enumerate() {
+                    CheckRow { key: "{i}-{c.name}", c: c.clone() }
+                }
+                if checks.truncated {
+                    div { class: "panel-empty",
+                        "This commit has more checks than pullspace lists — open it on github.com to see the rest."
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// One check: what it is called, how it went, and — on a click — everything it
+/// wrote down.
+///
+/// What it wrote is two things, and they arrive at different times. The report
+/// came with the list and is markdown the check composed for a person to read;
+/// the annotations are one more request, made the first time this row is
+/// opened, and are the half that names files and lines.
+#[component]
+fn CheckRow(c: Check) -> Element {
+    let st = use_context::<St>();
+    let url = c.html_url.clone();
+    let has_link = !url.is_empty();
+    // Anything to open the row for? Most checks pass and say nothing, and a
+    // row that unfolds nothing is a row that should not have been a control.
+    let more = c.has_detail();
+    let mut unfolded = use_signal(|| false);
+    let showing = more && *unfolded.read();
+
+    // The service that ran it, how long it took, and how many lines it marked
+    // up — and nothing where there is nothing to say, rather than an empty
+    // line under the name.
+    let marked = match c.annotations {
+        0 => String::new(),
+        1 => "1 annotation".to_string(),
+        n => format!("{n} annotations"),
+    };
+    let aside = [c.source.as_str(), c.took.as_str(), marked.as_str()]
+        .into_iter()
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join(" · ");
+    let tone = c.state.tone();
+    let class = match (more, showing) {
+        (true, true) => "convitem convcheck can open",
+        (true, false) => "convitem convcheck can",
+        _ => "convitem convcheck",
+    };
+    let why = match (more, showing) {
+        (true, true) => "Fold this check away",
+        (true, false) => "Show what this check wrote",
+        // Said rather than left blank: a row that does not open when its
+        // neighbours do is worth a word.
+        _ => "This check left nothing behind — ↗ opens its log on github.com",
+    };
+    let id = c.id;
+    let wanted = c.annotations > 0;
+
+    rsx! {
+        div {
+            class: "{class}",
+            title: "{why}",
+            onclick: move |_| {
+                if !more {
+                    return;
+                }
+                let now = *unfolded.peek();
+                unfolded.set(!now);
+                // Asked for on the way open, and only once — `load_annotations`
+                // drops the second ask. Root scope: the fetch outlives a row
+                // folded away again while it is in flight.
+                if !now && wanted {
+                    spawn_forever(load_annotations(st, id));
+                }
+            },
+            div { class: "convmeta",
+                span {
+                    class: "checkicon {tone}",
+                    title: "{c.label}",
+                    "{c.state.glyph()}"
+                }
+                span { class: "checkname", "{c.name}" }
+                span { class: "spacer" }
+                span { class: "convkind {tone}", "{c.label}" }
+                if more {
+                    span { class: "convmore", if showing { "⌃" } else { "⌄" } }
+                }
+                if has_link {
+                    button {
+                        class: "iconbtn sm",
+                        title: "Open this check on github.com — the whole log is there",
+                        onclick: move |e| {
+                            // The row unfolds what GitHub already told us; this
+                            // leaves for the part it did not.
+                            e.stop_propagation();
+                            open_browser(&url);
+                        },
+                        "↗"
+                    }
+                }
+            }
+            if !aside.is_empty() {
+                div { class: "checkaside", "{aside}" }
+            }
+            if !c.summary.is_empty() {
+                div { class: "checksummary", "{c.summary}" }
+            }
+            if showing {
+                CheckDetail { c: c.clone() }
+            }
+        }
+    }
+}
+
+/// What one check wrote: its report, and every line of the code it marked up.
+///
+/// Split out of the row so that opening one check does not re-render the other
+/// forty — and so that the annotations landing re-renders only the row that
+/// asked for them.
+#[component]
+fn CheckDetail(c: Check) -> Element {
+    let st = use_context::<St>();
+    let held = st.annots.read();
+
+    rsx! {
+        div {
+            class: "checkdetail",
+            // The detail is the row's own; clicking inside it — a link in the
+            // report, a line to jump to — must not fold it away again.
+            onclick: move |e| e.stop_propagation(),
+            if !c.report.is_empty() {
+                div { class: "checkreport", Body { text: c.report.clone() } }
+            }
+            match held.get(&c.id) {
+                Some(Annots::Loading) => rsx! {
+                    div { class: "panel-empty", "Loading what it marked up…" }
+                },
+                Some(Annots::Failed(e)) => rsx! {
+                    div { class: "gherror", "{e}" }
+                },
+                Some(Annots::Ready(list)) if list.is_empty() => rsx! {
+                    // It counted them and then had none: they expire, and an
+                    // old check run is a common thing to be reading.
+                    div { class: "panel-empty", "GitHub no longer has the lines this check marked." }
+                },
+                Some(Annots::Ready(list)) => rsx! {
+                    for (i , a) in list.iter().enumerate() {
+                        AnnotationRow { key: "{i}", a: a.clone() }
+                    }
+                },
+                None => rsx! {},
+            }
+        }
+    }
+}
+
+/// One line of the code a check had something to say about — and the way to
+/// that line.
+///
+/// This is the whole reason the checks are worth having in here rather than in
+/// the other tab: the file it names is in the explorer, so a failing assertion
+/// is one click from the code that failed it.
+#[component]
+fn AnnotationRow(a: Annotation) -> Element {
+    let st = use_context::<St>();
+    let path = a.path.clone();
+    // A check can mark up a file that is not in what is on screen — a
+    // workflow file on a commit whose tree would not load, or a path from
+    // somewhere else in the build. Named either way; only openable when it is
+    // there to open.
+    let here = st.has_file(&path);
+    let lines = if a.end_line > a.line {
+        format!("{}–{}", a.line, a.end_line)
+    } else {
+        a.line.to_string()
+    };
+    let loc = format!("{}:{lines}", a.path.display());
+    let line = a.line;
+    let tone = a.level.tone();
+
+    rsx! {
+        div { class: "annrow",
+            div { class: "annhead",
+                span {
+                    class: "checkicon {tone}",
+                    title: "{a.level.label()}",
+                    "{a.level.glyph()}"
+                }
+                if here {
+                    div {
+                        class: "convloc",
+                        title: "Open {loc}",
+                        onclick: move |_| st.open_at(path.clone(), line),
+                        "{loc}"
+                    }
+                } else {
+                    div {
+                        class: "convloc off",
+                        title: "This file is not in the commit on screen",
+                        "{loc}"
+                    }
+                }
+            }
+            if !a.title.is_empty() {
+                div { class: "anntitle", "{a.title}" }
+            }
+            if !a.message.is_empty() {
+                div { class: "annmsg", "{a.message}" }
+            }
+            if !a.raw_details.is_empty() {
+                div { class: "annraw", "{a.raw_details}" }
             }
         }
     }

@@ -35,6 +35,17 @@ one puts *that commit's* diff in the two panes — what it changed, against the
 commit before it — while the list stays where it is, so a branch can be read the
 way it was written, one commit at a time.
 
+**CHECKS** is the third heading on that pane: what ran against the commit on
+screen — the check runs and the older commit statuses in one list, failures
+first, each with a tick, a cross or a pulsing dot, the app that ran it and how
+long it took. The line at the top is the whole commit's verdict, and the count
+beside the heading wears its colour, so a red number is the answer before the
+tab is opened. Opening a check unfolds what it wrote: its report, drawn as the
+markdown it is, and every line it marked up — the compiler errors, the failed
+assertions, the lints. Each of those names a file and a line **and is a link to
+it**, which is the point of having them in here rather than on a web page: a
+failing test is one click from the code that failed it.
+
 A panel across the bottom of the code holds the answer to "where else is this?"
 — search hits, references, definitions — and closes again once it has been read.
 
@@ -68,7 +79,8 @@ serving the page, and it is sent to `api.github.com` and nowhere else. You can
 confirm that in the network tab.
 
 - A **fine-grained** token needs read access to *Contents*, *Pull requests* and
-  *Metadata*.
+  *Metadata* — and, for the Checks tab on a private repository, *Checks* and
+  *Commit statuses*, which are the two endpoints it reads.
 - A **classic** token needs `repo`.
 
 Make one at <https://github.com/settings/personal-access-tokens/new>.
@@ -233,6 +245,15 @@ patterns, URL parsing — is pure.
   which is why cloning one is worth doing exactly once.
 - Diffs are merge-base vs head, which is the comparison GitHub's "Files
   changed" tab shows.
+- The Checks tab shows what GitHub *says* about a run, not the run's output:
+  the conclusion, the report the check wrote, and the lines it marked up. The
+  raw step log is not among them, and cannot be — that endpoint needs a token
+  even on a public repository, and answers with a redirect to a storage host
+  that sends no CORS headers, so no page may read the body however it asks.
+  `↗` on a row opens the log on github.com, which can.
+- Checks are read for the commit on screen, so stepping into a commit from the
+  COMMITS tab asks again for that commit — which is the honest answer, since a
+  check is a fact about a commit and not about the branch.
 - The top bar flags a partial explorer: `truncated` (over GitHub's 3000-file
   cap per PR), `partial tree` (repo past GitHub's recursive-tree limit, about
   100k entries or 7 MB), or `changed files only` (the tree could not be read at

@@ -15,7 +15,9 @@ use super::store;
 pub struct Layout {
     /// The explorer's width.
     pub side_w: f64,
-    /// The conversation pane's width, when it is not folded away.
+    /// The conversation pane's width, when it is not folded away. Wide enough
+    /// for its three headings to be words rather than stubs — see `.convtab`
+    /// in the stylesheet, which is where the room actually goes.
     pub conv_w: f64,
     /// The results panel's height, when something has put it up.
     pub bottom_h: f64,
@@ -25,7 +27,7 @@ impl Default for Layout {
     fn default() -> Self {
         Self {
             side_w: 280.0,
-            conv_w: 380.0,
+            conv_w: 440.0,
             bottom_h: 240.0,
         }
     }

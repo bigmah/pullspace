@@ -1214,7 +1214,7 @@ button { font-family: inherit; user-select: none; }
 /* ---------- conversation pane ---------- */
 
 .convpane {
-  width: var(--conv-w, 380px);
+  width: var(--conv-w, 440px);
   min-width: 250px;
   max-width: 780px;
   flex: none;
@@ -1244,9 +1244,10 @@ button { font-family: inherit; user-select: none; }
   flex: none;
 }
 
-/* The pane holds two lists — what was said, and what was written — and these
-   are the two headings, each one the button that brings its own back. The one
-   that is off reads as a heading gone quiet rather than as a disabled control. */
+/* The pane holds three lists — what was said, what was written, and what ran —
+   and these are the three headings, each one the button that brings its own
+   back. The one that is off reads as a heading gone quiet rather than as a
+   disabled control. */
 .convtab {
   display: inline-flex;
   align-items: center;
@@ -1257,13 +1258,19 @@ button { font-family: inherit; user-select: none; }
   border: 1px solid transparent;
   border-radius: var(--r-sm);
   cursor: pointer;
-  /* Two headings and two buttons in a pane the reader is free to drag down to
-     250px. The counts hold their width and the words give way. */
+  /* Three headings and two buttons in a pane the reader is free to drag down
+     to 250px. The counts hold their width and the words give way. */
   flex: 0 1 auto;
   min-width: 0;
   overflow: hidden;
   transition: background-color var(--quick) var(--ease), border-color var(--quick) var(--ease);
 }
+
+/* The one being read gives way last. Squeezed, a row of three headings loses
+   its words from the right — and the word worth keeping is the one that says
+   what is in the pane below it. Slowed rather than stopped: a heading that
+   refused to shrink would push the two buttons off the end of a narrow pane. */
+.convtab.on { flex-shrink: 0.25; }
 
 .convtab .side-title {
   color: var(--fg-faint);
@@ -1434,6 +1441,172 @@ button { font-family: inherit; user-select: none; }
   overflow-wrap: anywhere;
   user-select: text;
 }
+
+/* ---------- conversation pane: checks ---------- */
+
+/* The verdict on the whole commit, kept at the top of the list while the list
+   scrolls under it: with forty jobs on a pull request, the one line that says
+   whether any of them is red should not be something you scroll back for. */
+.checkroll {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 12px;
+  background: var(--bg-2);
+  border-bottom: 1px solid var(--border);
+}
+
+.checktally {
+  font-size: 12px;
+  color: var(--fg-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* A tick, a cross, a dot. The whole point of the panel is that these are
+   readable from the other side of the desk, so they are a size up from the
+   text beside them and they carry the only saturated colour in the pane. */
+.checkicon {
+  flex: none;
+  width: 14px;
+  font-size: 13px;
+  line-height: 1;
+  text-align: center;
+  color: var(--fg-faint);
+}
+
+.checkroll .checkicon { font-size: 15px; width: 16px; }
+
+.checkicon.ok { color: var(--added); }
+.checkicon.bad { color: var(--deleted); }
+.checkicon.run { color: var(--modified); }
+.checkicon.off { color: var(--fg-faint); }
+
+/* Something still going. The same slow breath the clone counter takes, for the
+   same reason: it is in the corner of the eye for minutes at a time. */
+.checkicon.run { animation: warmpulse 2.4s ease-in-out infinite; }
+
+.checkname {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--fg);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Who ran it and how long it took — the line you read second, if at all. */
+.checkaside {
+  margin-top: 5px;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--fg-faint);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The one line the check left about itself. Never more than that: the rest of
+   what a failing build has to say is a log, and the ↗ beside it is the way
+   there. */
+.checksummary {
+  margin-top: 5px;
+  font-size: 11.5px;
+  line-height: 1.45;
+  color: var(--fg-dim);
+  overflow-wrap: anywhere;
+}
+
+/* A check with something behind it opens on a click, the way a commit message
+   unfolds — and one that wrote nothing is left as a row, not offered as a
+   control that would do nothing. */
+.convcheck.can {
+  cursor: pointer;
+  transition: background-color 80ms var(--ease);
+}
+
+.convcheck.can:hover { background: var(--bg-2); }
+.convcheck.open { background: var(--bg-2); }
+
+/* What the check wrote, under the line that says how it went. Its own cursor
+   again: inside here things are read and clicked, not folded away. */
+.checkdetail {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+  cursor: default;
+}
+
+/* One line of the code the check had something to say about. A card, because
+   the message under it is somebody's tool output and runs to several lines —
+   without one, twenty of them are a wall. */
+.annrow {
+  margin-top: 8px;
+  padding: 8px 10px;
+  background: var(--bg-1);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--r-sm);
+}
+
+.annhead {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+/* The location is the whole point of an annotation, so it leads the card
+   rather than sitting under the message the way a comment's does. */
+.annhead .convloc { margin-top: 0; min-width: 0; }
+
+/* Named, but not somewhere to go: the file is not in what is on screen. */
+.convloc.off { color: var(--fg-faint); cursor: default; }
+.convloc.off:hover { text-decoration: none; }
+
+.anntitle {
+  margin-top: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--fg);
+}
+
+/* Both of these keep the whitespace they arrived in: a compiler's caret line
+   under the token it is pointing at is the message, and reflowing it loses
+   what it was saying. */
+.annmsg,
+.annraw {
+  margin-top: 5px;
+  font-size: 11.5px;
+  line-height: 1.45;
+  color: var(--fg-dim);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+
+.annraw {
+  font-family: var(--mono);
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--fg-faint);
+}
+
+/* The two states the pills did not already have — `.convkind.ok` and `.bad`
+   are the review verdicts, and a check is marked the same way. */
+.convkind.run { color: var(--modified); border-color: rgba(226, 179, 76, 0.45); }
+.convkind.off { color: var(--fg-faint); }
+
+/* The count on the checks heading, in the colour of the verdict it is counting
+   — which is how the tab answers its own question without being opened. These
+   come after `.convtab.on .convcount` and match its specificity, so the colour
+   holds whether the tab is the one on show or not. */
+.convtab .convcount.ok { color: var(--added); border-color: rgba(79, 191, 122, 0.45); }
+.convtab .convcount.bad { color: var(--deleted); border-color: rgba(224, 108, 117, 0.45); }
+.convtab .convcount.run { color: var(--modified); border-color: rgba(226, 179, 76, 0.45); }
 
 .convpane .gherror { margin: 12px; }
 

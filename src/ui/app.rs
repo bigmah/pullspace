@@ -11,8 +11,8 @@ use crate::backend::auth::Token;
 use crate::backend::clone::Progress;
 use crate::backend::difftool::Expansion;
 use crate::backend::github::{
-    CommitView, Commits, FetchJob, PrDetail, PrHeader, PrState, PrSummary, RepoRef, RepoView,
-    Snapshot, Thread, statuses_of,
+    Annotation, Checks, CommitView, Commits, FetchJob, PrDetail, PrHeader, PrState, PrSummary,
+    RepoRef, RepoView, Snapshot, Thread, statuses_of,
 };
 use crate::backend::highlight;
 use crate::backend::markdown;
@@ -122,6 +122,23 @@ impl Workspace {
         match self {
             Workspace::Pr(pr) => Some(pr.header()),
             Workspace::Commit(view) => view.pr.clone(),
+            _ => None,
+        }
+    }
+
+    /// The commit whose checks the pane shows: the head of the pull request, or
+    /// whichever of its commits is being read.
+    ///
+    /// Not the pull request, because a check is a fact about a commit — stepping
+    /// into one of them asks a different question and gets a different answer.
+    /// `None` wherever the pane itself is not, which is anywhere there is no
+    /// pull request behind what is open — see [`header`](Self::header).
+    pub fn checks_key(&self) -> Option<(RepoRef, String)> {
+        match self {
+            Workspace::Pr(pr) => Some((pr.repo.clone(), pr.head_sha.clone())),
+            Workspace::Commit(view) if view.pr.is_some() => {
+                Some((view.repo.clone(), view.commit.sha.clone()))
+            }
             _ => None,
         }
     }
@@ -305,12 +322,38 @@ pub enum CommitList {
     Failed(String),
 }
 
-/// Which half of the conversation pane is on show.
+/// What ran against the commit on screen — and how it went.
+///
+/// Asked for rather than fetched with the pull request, like the commits: it is
+/// two more requests, and it is about a commit rather than about the review, so
+/// stepping into one of them asks again.
+#[derive(Clone, PartialEq)]
+pub enum CheckList {
+    Idle,
+    Loading,
+    Ready(Box<Checks>),
+    Failed(String),
+}
+
+/// What one check marked up in the code, once somebody has opened that check.
+///
+/// One entry per check run, keyed by its id — so a row opened, closed and
+/// opened again costs one request rather than three. Emptied whenever the
+/// checks themselves are, since the ids belong to those.
+#[derive(Clone, PartialEq)]
+pub enum Annots {
+    Loading,
+    Ready(Vec<Annotation>),
+    Failed(String),
+}
+
+/// Which third of the conversation pane is on show.
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
 pub enum ConvTab {
     #[default]
     Talk,
     Commits,
+    Checks,
 }
 
 /// Somewhere the reader has been: a file, how it was being shown, and the line
@@ -492,6 +535,10 @@ pub struct St {
     pub conv_open: Signal<bool>,
     /// And its commits, which the same pane shows in place of them.
     pub commits: Signal<CommitList>,
+    /// And what ran against the commit on screen — the third of the three.
+    pub checks: Signal<CheckList>,
+    /// What each opened check marked up, by check run id.
+    pub annots: Signal<HashMap<u64, Annots>>,
     pub conv_tab: Signal<ConvTab>,
 
     /// A file — and perhaps a line of it — named by a link that arrived before
@@ -728,6 +775,21 @@ impl St {
             let mut commits = self.commits;
             commits.set(CommitList::Idle);
         }
+        // The checks are asked again more often than either, because they are
+        // about the commit and not about the pull request: stepping from a
+        // review into one of its commits keeps the conversation and drops
+        // these, which is the difference between the two questions.
+        let same_checks = !reload
+            && self
+                .workspace
+                .peek()
+                .checks_key()
+                .is_some_and(|was| Some(was) == ws.checks_key());
+        if !same_checks {
+            let mut checks = self.checks;
+            checks.set(CheckList::Idle);
+            self.forget_annotations();
+        }
         let mut statuses = self.statuses;
         statuses.set(ws.statuses());
         // What was ticked here last time. On a reload as well: a mark is about
@@ -818,6 +880,9 @@ impl St {
         w.set(Workspace::Empty);
         let mut commits = self.commits;
         commits.set(CommitList::Idle);
+        let mut checks = self.checks;
+        checks.set(CheckList::Idle);
+        self.forget_annotations();
         self.forget_contents();
         let mut cloning = self.cloning;
         cloning.set(None);
@@ -1052,6 +1117,16 @@ impl St {
         }
     }
 
+    /// Forget what the checks marked up. Keyed by check run id, and a new
+    /// commit's checks are new runs — so what is held here is about nothing
+    /// once the checks it belongs to have gone.
+    pub fn forget_annotations(&self) {
+        let mut annots = self.annots;
+        if !annots.peek().is_empty() {
+            annots.set(HashMap::new());
+        }
+    }
+
     /// Drop every decoded file held in memory.
     ///
     /// Only the decoded copies: what was cloned stays on disk, so the files
@@ -1256,6 +1331,8 @@ pub fn App() -> Element {
             conv: root(Conversation::Loading),
             conv_open: root(true),
             commits: root(CommitList::Idle),
+            checks: root(CheckList::Idle),
+            annots: root(HashMap::new()),
             conv_tab: root(ConvTab::default()),
 
             pending: root(None),
@@ -1478,6 +1555,20 @@ pub fn App() -> Element {
             return;
         }
         spawn_forever(super::conversation::load_commits(st, repo, number));
+    });
+
+    // And what ran against the commit on screen, on the same terms: two
+    // requests, spent when somebody asks whether the build is green.
+    use_effect(move || {
+        let asked = *st.conv_tab.read() == ConvTab::Checks;
+        let target = st.workspace.read().checks_key();
+        let Some((repo, sha)) = target.filter(|_| asked) else {
+            return;
+        };
+        if !matches!(*st.checks.peek(), CheckList::Idle) {
+            return;
+        }
+        spawn_forever(super::conversation::load_checks(st, repo, sha));
     });
 
     // Unfolding the conversation claims 380px the explorer may currently be

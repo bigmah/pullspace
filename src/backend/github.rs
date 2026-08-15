@@ -38,6 +38,13 @@ const MAX_COMMENT_PAGES: u32 = 5;
 const MAX_COMMIT_PAGES: u32 = 3;
 /// And at most 300 files on a single commit, which is the same three pages.
 const MAX_COMMIT_FILE_PAGES: u32 = 3;
+/// 100 check runs a page. Three pages is three hundred jobs on one commit —
+/// past anything a person reads the results of one by one, and the panel says
+/// when it stopped there.
+const MAX_CHECK_PAGES: u32 = 3;
+/// And 200 marked-up lines from any one check. A build that failed in two
+/// hundred places has said what it has to say.
+const MAX_ANNOTATION_PAGES: u32 = 2;
 /// How many pull requests one listing holds. GitHub's own maximum per page,
 /// asked for in one request — a second page of a list nobody scrolls to the
 /// bottom of is not worth the wait or the budget.
@@ -1558,6 +1565,628 @@ pub async fn pr_commits(token: &str, repo: &RepoRef, number: u64) -> Result<Comm
     })
 }
 
+// ------------------------------------------------------------------- checks
+
+/// How something that ran against a commit went, or that it has not gone
+/// anywhere yet.
+///
+/// GitHub keeps two lists and spells the outcome differently in each: a check
+/// run has a `status` and, once it is finished, a `conclusion`; a commit status
+/// has one `state`. Both come down to these four, which are the four the panel
+/// draws — the exact word GitHub used is kept alongside in [`Check::label`], so
+/// nothing is flattened away, only coloured.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub enum CheckState {
+    /// Queued, or running now.
+    Running,
+    Passed,
+    Failed,
+    /// Finished without a verdict: skipped, cancelled, stale, or deliberately
+    /// neutral. Not a failure — and not something to count as a pass either.
+    Quiet,
+}
+
+impl CheckState {
+    /// What it is at a glance. A tick and a cross, because that is what
+    /// everybody already reads them as.
+    pub fn glyph(self) -> &'static str {
+        match self {
+            CheckState::Running => "●",
+            CheckState::Passed => "✓",
+            CheckState::Failed => "✕",
+            CheckState::Quiet => "○",
+        }
+    }
+
+    /// The stylesheet's name for the colour that goes with it.
+    pub fn tone(self) -> &'static str {
+        match self {
+            CheckState::Running => "run",
+            CheckState::Passed => "ok",
+            CheckState::Failed => "bad",
+            CheckState::Quiet => "off",
+        }
+    }
+
+    /// Where it belongs in a list: what is broken first, then what is still
+    /// going, then everything that needs no attention.
+    fn rank(self) -> u8 {
+        match self {
+            CheckState::Failed => 0,
+            CheckState::Running => 1,
+            CheckState::Passed => 2,
+            CheckState::Quiet => 3,
+        }
+    }
+}
+
+/// One thing that ran against a commit: a check run, or one of the older commit
+/// statuses a CI service posts.
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+pub struct Check {
+    /// What to ask GitHub for this one's annotations by. Zero for a commit
+    /// status, which is not a check run and has none.
+    pub id: u64,
+    pub name: String,
+    /// Who ran it — the app behind a check run, or the context a status was
+    /// posted under. Empty when GitHub named neither.
+    pub source: String,
+    pub state: CheckState,
+    /// GitHub's own word for how it went: `success`, `timed out`, `in
+    /// progress`, `action required`, … Shown as written, since the four states
+    /// above are a colour and not the whole story.
+    pub label: String,
+    /// The one line it left behind, when it left one.
+    pub summary: String,
+    /// Everything it wrote about itself, as the markdown it wrote it in — the
+    /// output's summary and, under it, its longer text. This is where a
+    /// coverage report or a bundle-size table lives; empty for the many checks
+    /// that write nothing but a conclusion.
+    ///
+    /// Empty as well when it would only repeat [`summary`](Self::summary),
+    /// which is the common case for a check whose whole output is one line.
+    pub report: String,
+    pub html_url: String,
+    /// How long it took, already in words — `1m 20s`. Empty while it is still
+    /// running, and for anything that did not say when it started.
+    pub took: String,
+    /// How many lines of the code this check marked up. Fetched separately —
+    /// see [`check_annotations`] — so this is what says whether there is
+    /// anything to go and fetch.
+    pub annotations: u32,
+}
+
+impl Check {
+    /// Whether there is anything behind this row worth opening it for.
+    pub fn has_detail(&self) -> bool {
+        !self.report.is_empty() || self.annotations > 0
+    }
+}
+
+/// How loudly a check marked one line of the code.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub enum Level {
+    Failure,
+    Warning,
+    Notice,
+}
+
+impl Level {
+    pub fn tone(self) -> &'static str {
+        match self {
+            Level::Failure => "bad",
+            Level::Warning => "run",
+            Level::Notice => "off",
+        }
+    }
+
+    /// Not the check's own tick and cross: these mark a line rather than
+    /// report a verdict, and a row of crosses down the side of a list of
+    /// errors says nothing the colour has not.
+    pub fn glyph(self) -> &'static str {
+        match self {
+            Level::Failure => "✕",
+            Level::Warning => "▲",
+            Level::Notice => "•",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Level::Failure => "failure",
+            Level::Warning => "warning",
+            Level::Notice => "notice",
+        }
+    }
+}
+
+/// One line of the code a check had something to say about: the compiler error,
+/// the failed assertion, the lint.
+///
+/// This is the part of a check worth having inside an editor rather than on a
+/// web page — it names a file and a line, and the file is in the explorer.
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+pub struct Annotation {
+    pub path: PathBuf,
+    /// Where it starts, 1-based. GitHub also sends an end line, which is only
+    /// worth keeping to say `12–18` beside the message.
+    pub line: usize,
+    pub end_line: usize,
+    pub level: Level,
+    /// A heading the check gave it, when it gave it one.
+    pub title: String,
+    pub message: String,
+    /// The long form — a traceback, a diff, the failing assertion in full.
+    /// Whitespace in it is the shape somebody's tool printed it in, so it is
+    /// kept exactly as it arrived and drawn in a monospaced block.
+    pub raw_details: String,
+}
+
+/// Everything that ran against one commit.
+#[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
+pub struct Checks {
+    /// The commit they are about — the head of the pull request, or the commit
+    /// being read out of one. Checks belong to a commit and not to a branch,
+    /// and a panel that did not say which would be answering a question nobody
+    /// asked.
+    pub sha: String,
+    pub items: Vec<Check>,
+    /// True when there were more check runs than [`MAX_CHECK_PAGES`] holds.
+    pub truncated: bool,
+}
+
+/// How many of each — what the line at the head of the list says.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct Tally {
+    pub passed: usize,
+    pub failed: usize,
+    pub running: usize,
+    pub quiet: usize,
+}
+
+impl Tally {
+    /// The sentence at the top of the panel. Only the parts there is something
+    /// to say about: "0 failing" beside twelve passes is noise, and noise in
+    /// the one line that answers "is it broken?" is worse than nowhere else.
+    pub fn phrase(&self) -> String {
+        let mut parts = Vec::new();
+        for (n, word) in [
+            (self.failed, "failing"),
+            (self.running, "running"),
+            (self.passed, "passed"),
+            (self.quiet, "other"),
+        ] {
+            if n > 0 {
+                parts.push(format!("{n} {word}"));
+            }
+        }
+        if parts.is_empty() {
+            return "nothing has run".to_string();
+        }
+        parts.join(" · ")
+    }
+}
+
+impl Checks {
+    pub fn tally(&self) -> Tally {
+        let mut t = Tally::default();
+        for c in &self.items {
+            let slot = match c.state {
+                CheckState::Passed => &mut t.passed,
+                CheckState::Failed => &mut t.failed,
+                CheckState::Running => &mut t.running,
+                CheckState::Quiet => &mut t.quiet,
+            };
+            *slot += 1;
+        }
+        t
+    }
+
+    /// The commit's verdict, as one state.
+    ///
+    /// A failure outranks anything still running, which outranks a pass:
+    /// something already red is red however much of the rest is green, and a
+    /// build still going is not one that has passed.
+    pub fn state(&self) -> CheckState {
+        let t = self.tally();
+        match () {
+            _ if t.failed > 0 => CheckState::Failed,
+            _ if t.running > 0 => CheckState::Running,
+            _ if t.passed > 0 => CheckState::Passed,
+            _ => CheckState::Quiet,
+        }
+    }
+}
+
+/// The check runs of one commit, a page at a time — an object with the list
+/// inside it rather than a bare array, which is why this cannot go through
+/// [`get_paged`].
+#[derive(Deserialize)]
+struct RawCheckPage {
+    #[serde(default)]
+    check_runs: Vec<RawCheckRun>,
+}
+
+#[derive(Deserialize)]
+struct RawCheckRun {
+    #[serde(default)]
+    id: u64,
+    #[serde(default)]
+    name: String,
+    /// `queued`, `in_progress`, `completed` — and `waiting`, `requested` and
+    /// `pending`, which GitHub added later and which all still mean "not yet".
+    #[serde(default)]
+    status: String,
+    /// Set once `status` is `completed`, and null until then.
+    #[serde(default)]
+    conclusion: Option<String>,
+    #[serde(default)]
+    started_at: Option<String>,
+    #[serde(default)]
+    completed_at: Option<String>,
+    /// Where the run itself is — the CI service's own page, usually. The
+    /// check's page on github.com is the fallback.
+    #[serde(default)]
+    details_url: Option<String>,
+    #[serde(default)]
+    html_url: Option<String>,
+    #[serde(default)]
+    output: Option<RawCheckOutput>,
+    #[serde(default)]
+    app: Option<RawApp>,
+}
+
+#[derive(Deserialize, Default)]
+struct RawCheckOutput {
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default)]
+    summary: Option<String>,
+    /// The long half of what a check wrote. Null far more often than not.
+    #[serde(default)]
+    text: Option<String>,
+    #[serde(default)]
+    annotations_count: u32,
+}
+
+#[derive(Deserialize)]
+struct RawApp {
+    #[serde(default)]
+    name: String,
+}
+
+/// The combined status of a commit: GitHub answers with the latest status per
+/// context, which is exactly the list worth showing.
+#[derive(Deserialize)]
+struct RawStatuses {
+    #[serde(default)]
+    statuses: Vec<RawStatus>,
+}
+
+#[derive(Deserialize)]
+struct RawStatus {
+    /// `success`, `failure`, `error` or `pending`.
+    #[serde(default)]
+    state: String,
+    /// The name the service posts under — `ci/circleci`, `continuous-integration/travis-ci`.
+    #[serde(default)]
+    context: String,
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(default)]
+    target_url: Option<String>,
+    #[serde(default)]
+    created_at: Option<String>,
+    #[serde(default)]
+    updated_at: Option<String>,
+}
+
+/// One of GitHub's machine words, as a person would say it.
+fn humanised(word: &str) -> String {
+    word.to_ascii_lowercase().replace('_', " ")
+}
+
+/// How far a summary is worth reading in a pane this narrow. Past this it is a
+/// build log, and the link beside it is the way to read one.
+const MAX_SUMMARY: usize = 160;
+
+/// The first line worth showing of whatever a check said about itself.
+///
+/// A check's output is markdown, and can be a whole report — tables, badges,
+/// stack traces. None of that belongs in a 380px column, and the row links to
+/// where it is drawn properly.
+fn one_line(text: &str) -> String {
+    let Some(line) = text.lines().map(str::trim).find(|l| !l.is_empty()) else {
+        return String::new();
+    };
+    match line.char_indices().nth(MAX_SUMMARY) {
+        Some((cut, _)) => format!("{}…", line[..cut].trim_end()),
+        None => line.to_string(),
+    }
+}
+
+/// What a check run amounts to, and the word GitHub used for it.
+fn run_state(status: &str, conclusion: Option<&str>) -> (CheckState, String) {
+    match conclusion.unwrap_or_default() {
+        // Finished and said nothing about how. Rare enough to have no word of
+        // its own, and not something to colour green.
+        "" if status == "completed" => (CheckState::Quiet, "finished".to_string()),
+        "" => (CheckState::Running, humanised(status)),
+        "success" => (CheckState::Passed, "success".to_string()),
+        // `action_required` is a build that stopped and is waiting to be let
+        // through, which is a red mark on the pull request like any other.
+        other @ ("failure" | "timed_out" | "action_required" | "startup_failure") => {
+            (CheckState::Failed, humanised(other))
+        }
+        other => (CheckState::Quiet, humanised(other)),
+    }
+}
+
+fn check_of(raw: RawCheckRun) -> Check {
+    let (state, label) = run_state(&raw.status, raw.conclusion.as_deref());
+    let output = raw.output.unwrap_or_default();
+    // The title is a summary somebody wrote for exactly this purpose; the body
+    // of the output is what there is when nobody did.
+    let summary = match one_line(output.title.as_deref().unwrap_or_default()) {
+        line if line.is_empty() => one_line(output.summary.as_deref().unwrap_or_default()),
+        line => line,
+    };
+    // The two halves of the output as one document, which is what they are
+    // written as — and nothing at all where it would only say the row's own
+    // line back again, which is most one-line outputs.
+    let mut report = String::new();
+    for part in [
+        output.summary.unwrap_or_default(),
+        output.text.unwrap_or_default(),
+    ] {
+        let part = part.trim();
+        if part.is_empty() {
+            continue;
+        }
+        if !report.is_empty() {
+            report.push_str("\n\n");
+        }
+        report.push_str(part);
+    }
+    if report == summary {
+        report.clear();
+    }
+    Check {
+        id: raw.id,
+        name: if raw.name.is_empty() {
+            "check".to_string()
+        } else {
+            raw.name
+        },
+        source: raw.app.map(|a| a.name).unwrap_or_default(),
+        state,
+        label,
+        summary,
+        report,
+        html_url: raw
+            .details_url
+            .filter(|u| !u.is_empty())
+            .or(raw.html_url)
+            .unwrap_or_default(),
+        took: took(raw.started_at.as_deref(), raw.completed_at.as_deref()),
+        annotations: output.annotations_count,
+    }
+}
+
+fn status_check_of(raw: RawStatus) -> Check {
+    let state = match raw.state.as_str() {
+        "success" => CheckState::Passed,
+        "failure" | "error" => CheckState::Failed,
+        "pending" => CheckState::Running,
+        _ => CheckState::Quiet,
+    };
+    Check {
+        // A commit status is not a check run: there is nothing to ask GitHub
+        // about it by, and nothing to ask for — the description below is the
+        // whole of what it has to say.
+        id: 0,
+        name: if raw.context.is_empty() {
+            "status".to_string()
+        } else {
+            raw.context
+        },
+        // A commit status has no app behind it; the context is the whole of
+        // what it is called, and it is already in the name.
+        source: String::new(),
+        state,
+        label: humanised(&raw.state),
+        summary: one_line(raw.description.as_deref().unwrap_or_default()),
+        report: String::new(),
+        annotations: 0,
+        html_url: raw.target_url.unwrap_or_default(),
+        // A status is posted, not run: the two timestamps are when it was first
+        // posted and when it last changed, which for a finished one is how long
+        // it took to get there.
+        took: match state {
+            CheckState::Running => String::new(),
+            _ => took(raw.created_at.as_deref(), raw.updated_at.as_deref()),
+        },
+    }
+}
+
+/// Days between 1970-01-01 and a date, by Howard Hinnant's `days_from_civil` —
+/// the standard closed form, and shorter than the leap-year rules it encodes.
+fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
+    // March-first years, so the leap day lands at the end where it costs
+    // nothing to reason about.
+    let y = y - i64::from(m <= 2);
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = y - era * 400;
+    let doy = (153 * ((m + 9) % 12) + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe - 719_468
+}
+
+/// Seconds since the epoch for `2024-05-06T07:08:09Z`, which is the only shape
+/// GitHub writes a time in.
+///
+/// `None` for anything else — the only thing read out of the answer is a
+/// duration, and a missing duration is a line that says a little less rather
+/// than a row that fails to draw.
+fn epoch_secs(ts: &str) -> Option<i64> {
+    let (date, rest) = ts.split_once('T')?;
+    let mut ymd = date.split('-');
+    let year: i64 = ymd.next()?.parse().ok()?;
+    let month: i64 = ymd.next()?.parse().ok()?;
+    let day: i64 = ymd.next()?.parse().ok()?;
+
+    let mut hms = rest.split(':');
+    let hour: i64 = hms.next()?.parse().ok()?;
+    let minute: i64 = hms.next()?.parse().ok()?;
+    // Whatever follows the seconds — the `Z`, a fraction, an offset — is past
+    // what a duration in whole seconds is measured in.
+    let secs: i64 = hms
+        .next()?
+        .split(['Z', '.', '+', '-'])
+        .next()?
+        .parse()
+        .ok()?;
+
+    Some(days_from_civil(year, month, day) * 86_400 + hour * 3_600 + minute * 60 + secs)
+}
+
+/// How long something took, in the words a build log uses.
+///
+/// Both ends are needed: a check that is still running has no end to measure
+/// to, and one that never said when it started cannot be measured at all.
+fn took(started: Option<&str>, finished: Option<&str>) -> String {
+    let Some((from, to)) = started
+        .and_then(epoch_secs)
+        .zip(finished.and_then(epoch_secs))
+    else {
+        return String::new();
+    };
+    let secs = to - from;
+    // Two machines, two clocks. A negative duration is not one to print.
+    if secs < 0 {
+        return String::new();
+    }
+    match (secs / 3_600, (secs % 3_600) / 60, secs % 60) {
+        (0, 0, s) => format!("{s}s"),
+        (0, m, s) => format!("{m}m {s}s"),
+        (h, m, _) => format!("{h}h {m}m"),
+    }
+}
+
+/// Everything that ran against one commit: its check runs, and the commit
+/// statuses the older CI services still post.
+///
+/// Two requests, because GitHub keeps two lists and a repository may be using
+/// either or both. A failure on either fails the pair — a list of checks
+/// missing the half that was red is worse than one that says it could not be
+/// read.
+pub async fn commit_checks(token: &str, repo: &RepoRef, sha: &str) -> Result<Checks> {
+    let base = format!(
+        "{API}/repos/{}/{}/commits/{}",
+        encode_segment(&repo.owner),
+        encode_segment(&repo.name),
+        encode_segment(sha),
+    );
+
+    let mut items = Vec::new();
+    let mut truncated = false;
+    for page in 1..=MAX_CHECK_PAGES {
+        let raw: RawCheckPage = get_json(
+            token,
+            &format!("{base}/check-runs?per_page=100&page={page}"),
+        )
+        .await
+        .with_context(|| format!("reading the checks on {sha}"))?;
+        let full_page = raw.check_runs.len() == 100;
+        items.extend(raw.check_runs.into_iter().map(check_of));
+        if !full_page {
+            break;
+        }
+        if page == MAX_CHECK_PAGES {
+            truncated = true;
+        }
+    }
+
+    let combined: RawStatuses = get_json(token, &format!("{base}/status?per_page=100"))
+        .await
+        .with_context(|| format!("reading the commit statuses on {sha}"))?;
+    items.extend(combined.statuses.into_iter().map(status_check_of));
+
+    // What is broken first, then what is still going. A list read from the top
+    // answers "is anything wrong?" before it answers anything else — and by
+    // name within each rank, so reloading it does not shuffle the rows.
+    items.sort_by(|a, b| {
+        a.state
+            .rank()
+            .cmp(&b.state.rank())
+            .then_with(|| a.name.cmp(&b.name))
+    });
+
+    Ok(Checks {
+        sha: sha.to_string(),
+        items,
+        truncated,
+    })
+}
+
+#[derive(Deserialize)]
+struct RawAnnotation {
+    #[serde(default)]
+    path: String,
+    #[serde(default)]
+    start_line: usize,
+    #[serde(default)]
+    end_line: usize,
+    /// `failure`, `warning` or `notice`.
+    #[serde(default)]
+    annotation_level: Option<String>,
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default)]
+    message: Option<String>,
+    #[serde(default)]
+    raw_details: Option<String>,
+}
+
+fn annotation_of(raw: RawAnnotation) -> Annotation {
+    let line = raw.start_line.max(1);
+    Annotation {
+        path: PathBuf::from(raw.path),
+        line,
+        end_line: raw.end_line.max(line),
+        level: match raw.annotation_level.as_deref().unwrap_or_default() {
+            "failure" => Level::Failure,
+            "warning" => Level::Warning,
+            // `notice` and anything GitHub adds later: something worth reading,
+            // and not something worth colouring like a broken build.
+            _ => Level::Notice,
+        },
+        title: raw.title.unwrap_or_default().trim().to_string(),
+        message: raw.message.unwrap_or_default().trim_end().to_string(),
+        raw_details: raw.raw_details.unwrap_or_default().trim_end().to_string(),
+    }
+}
+
+/// Every line one check marked up: the compiler errors, the failed assertions,
+/// the lints.
+///
+/// A separate request per check, and only for a check that says it has some —
+/// which is why [`Check::annotations`] is fetched with the list and these are
+/// not. It is the one part of a check's report that names a file and a line, so
+/// it is the part this app can do something with: see `ui::conversation`, where
+/// each one is a way into the code it is about.
+pub async fn check_annotations(token: &str, repo: &RepoRef, check: u64) -> Result<Vec<Annotation>> {
+    let base = format!(
+        "{API}/repos/{}/{}/check-runs/{check}/annotations",
+        encode_segment(&repo.owner),
+        encode_segment(&repo.name),
+    );
+    let (raw, _): (Vec<RawAnnotation>, bool) = get_paged(token, &base, MAX_ANNOTATION_PAGES)
+        .await
+        .with_context(|| "reading what this check marked up".to_string())?;
+    Ok(raw.into_iter().map(annotation_of).collect())
+}
+
 /// One file's bytes from the CDN, named by commit and path.
 ///
 /// Not metered, and no credential to send — which is what makes reading a whole
@@ -2309,6 +2938,292 @@ mod tests {
         let map = statuses_of(&files);
         assert_eq!(map.get(&PathBuf::from("a.rs")), Some(&ChangeKind::Added));
         assert_eq!(map.get(&PathBuf::from("b.rs")), Some(&ChangeKind::Deleted));
+    }
+
+    // ------------------------------------------------------------ checks
+
+    #[test]
+    fn a_check_that_has_not_finished_is_still_running() {
+        for status in ["queued", "in_progress", "waiting", "requested"] {
+            let (state, label) = run_state(status, None);
+            assert_eq!(state, CheckState::Running, "{status}");
+            // The word GitHub used, spelled the way a person would.
+            assert!(!label.contains('_'), "{label}");
+        }
+        assert_eq!(run_state("in_progress", None).1, "in progress");
+    }
+
+    #[test]
+    fn a_conclusion_is_what_a_finished_check_is_coloured_by() {
+        let cases = [
+            ("success", CheckState::Passed),
+            ("failure", CheckState::Failed),
+            ("timed_out", CheckState::Failed),
+            // Stopped and waiting to be let through: a red mark on the pull
+            // request like any other.
+            ("action_required", CheckState::Failed),
+            ("skipped", CheckState::Quiet),
+            ("cancelled", CheckState::Quiet),
+            ("neutral", CheckState::Quiet),
+            ("stale", CheckState::Quiet),
+        ];
+        for (conclusion, want) in cases {
+            let (state, label) = run_state("completed", Some(conclusion));
+            assert_eq!(state, want, "{conclusion}");
+            assert_eq!(label, humanised(conclusion));
+        }
+        // Finished, and said nothing about how. Not something to call a pass.
+        assert_eq!(run_state("completed", None).0, CheckState::Quiet);
+    }
+
+    /// The four states, as the rows they are counted out of.
+    fn checks_of(states: &[CheckState]) -> Checks {
+        Checks {
+            sha: "abc1234".to_string(),
+            items: states
+                .iter()
+                .enumerate()
+                .map(|(i, state)| Check {
+                    id: i as u64 + 1,
+                    name: format!("job {i}"),
+                    source: String::new(),
+                    state: *state,
+                    label: String::new(),
+                    summary: String::new(),
+                    report: String::new(),
+                    html_url: String::new(),
+                    took: String::new(),
+                    annotations: 0,
+                })
+                .collect(),
+            truncated: false,
+        }
+    }
+
+    #[test]
+    fn a_failure_outranks_everything_still_running() {
+        let checks = checks_of(&[
+            CheckState::Passed,
+            CheckState::Running,
+            CheckState::Failed,
+            CheckState::Passed,
+        ]);
+        assert_eq!(checks.state(), CheckState::Failed);
+        let t = checks.tally();
+        assert_eq!((t.passed, t.failed, t.running), (2, 1, 1));
+        assert_eq!(t.phrase(), "1 failing · 1 running · 2 passed");
+    }
+
+    #[test]
+    fn a_build_still_going_is_not_one_that_has_passed() {
+        let checks = checks_of(&[CheckState::Passed, CheckState::Running]);
+        assert_eq!(checks.state(), CheckState::Running);
+        assert_eq!(checks.tally().phrase(), "1 running · 1 passed");
+    }
+
+    #[test]
+    fn nothing_but_skips_is_neither_green_nor_red() {
+        let checks = checks_of(&[CheckState::Quiet, CheckState::Quiet]);
+        assert_eq!(checks.state(), CheckState::Quiet);
+        assert_eq!(checks.tally().phrase(), "2 other");
+        // And nothing at all says so rather than counting to zero.
+        assert_eq!(checks_of(&[]).tally().phrase(), "nothing has run");
+        assert_eq!(checks_of(&[]).state(), CheckState::Quiet);
+    }
+
+    #[test]
+    fn a_check_run_carries_its_app_its_link_and_its_first_line() {
+        let raw: RawCheckRun = serde_json::from_str(
+            r#"{
+                "name": "test (ubuntu-latest)",
+                "status": "completed",
+                "conclusion": "failure",
+                "started_at": "2024-05-06T07:08:09Z",
+                "completed_at": "2024-05-06T07:10:29Z",
+                "details_url": "https://ci.example/run/1",
+                "html_url": "https://github.com/o/r/runs/1",
+                "output": { "title": "", "summary": "3 tests failed\nsee the log" },
+                "app": { "name": "GitHub Actions" }
+            }"#,
+        )
+        .unwrap();
+        let check = check_of(raw);
+        assert_eq!(check.state, CheckState::Failed);
+        assert_eq!(check.label, "failure");
+        assert_eq!(check.source, "GitHub Actions");
+        // The run itself, not the page about it.
+        assert_eq!(check.html_url, "https://ci.example/run/1");
+        assert_eq!(check.summary, "3 tests failed");
+        assert_eq!(check.took, "2m 20s");
+    }
+
+    #[test]
+    fn a_check_keeps_the_whole_of_what_it_wrote_as_well_as_the_first_line() {
+        let raw: RawCheckRun = serde_json::from_str(
+            r#"{
+                "id": 951133849,
+                "name": "coverage",
+                "status": "completed",
+                "conclusion": "success",
+                "output": {
+                    "title": "Coverage 81%",
+                    "summary": "| file | % |\n|---|---|\n| a.rs | 81 |",
+                    "text": "The long form.",
+                    "annotations_count": 3
+                }
+            }"#,
+        )
+        .unwrap();
+        let check = check_of(raw);
+        assert_eq!(check.id, 951133849);
+        // The row shows the line somebody wrote for the purpose…
+        assert_eq!(check.summary, "Coverage 81%");
+        // …and opening it shows the two halves of the output, as one document.
+        assert_eq!(
+            check.report,
+            "| file | % |\n|---|---|\n| a.rs | 81 |\n\nThe long form."
+        );
+        assert_eq!(check.annotations, 3);
+        assert!(check.has_detail());
+    }
+
+    #[test]
+    fn a_one_line_output_is_not_shown_twice() {
+        let one_liner = |json: &str| check_of(serde_json::from_str::<RawCheckRun>(json).unwrap());
+        // Nothing but a summary: it is the row's line, so there is nothing
+        // left to unfold.
+        let check = one_liner(
+            r#"{"name":"links","status":"completed","conclusion":"success",
+                "output":{"summary":"No broken links found"}}"#,
+        );
+        assert_eq!(check.summary, "No broken links found");
+        assert_eq!(check.report, "");
+        assert!(!check.has_detail());
+
+        // And a check that wrote nothing at all — most of them.
+        let bare = one_liner(r#"{"name":"build","status":"completed","conclusion":"success"}"#);
+        assert!(!bare.has_detail());
+        assert_eq!(bare.summary, "");
+
+        // Marked-up lines are worth opening for on their own, with no report.
+        let marked = one_liner(
+            r#"{"name":"pylint","status":"completed","conclusion":"failure",
+                "output":{"annotations_count":2}}"#,
+        );
+        assert!(marked.has_detail());
+    }
+
+    #[test]
+    fn an_annotation_names_a_line_to_go_to() {
+        let raw: RawAnnotation = serde_json::from_str(
+            r#"{
+                "path": "tests/components/portainer/test_event.py",
+                "start_line": 7,
+                "end_line": 9,
+                "annotation_level": "failure",
+                "title": "",
+                "message": "E0611: No name 'DockerEvent' in module\n",
+                "raw_details": "  assert 1 == 2\n"
+            }"#,
+        )
+        .unwrap();
+        let a = annotation_of(raw);
+        assert_eq!(
+            a.path,
+            PathBuf::from("tests/components/portainer/test_event.py")
+        );
+        assert_eq!((a.line, a.end_line), (7, 9));
+        assert_eq!(a.level, Level::Failure);
+        // Trailing newlines go; the shape inside does not — it is a tool's own
+        // layout, and the block is drawn monospaced for exactly that reason.
+        assert_eq!(a.message, "E0611: No name 'DockerEvent' in module");
+        assert_eq!(a.raw_details, "  assert 1 == 2");
+    }
+
+    #[test]
+    fn an_annotation_without_a_line_still_lands_somewhere() {
+        let bare: RawAnnotation = serde_json::from_str(r#"{"path": ".github"}"#).unwrap();
+        let a = annotation_of(bare);
+        // Line 0 is not a line. The top of the file is where it points.
+        assert_eq!((a.line, a.end_line), (1, 1));
+        // And an unknown level is something to read, not something to redden.
+        assert_eq!(a.level, Level::Notice);
+
+        for (word, want) in [
+            ("failure", Level::Failure),
+            ("warning", Level::Warning),
+            ("notice", Level::Notice),
+        ] {
+            let raw: RawAnnotation =
+                serde_json::from_str(&format!(r#"{{"path":"a.rs","annotation_level":"{word}"}}"#))
+                    .unwrap();
+            assert_eq!(annotation_of(raw).level, want, "{word}");
+        }
+    }
+
+    #[test]
+    fn an_older_commit_status_reads_as_a_check_like_any_other() {
+        let raw: RawStatus = serde_json::from_str(
+            r#"{
+                "state": "error",
+                "context": "ci/circleci: build",
+                "description": "Your tests failed on CircleCI",
+                "target_url": "https://circleci.example/1",
+                "created_at": "2024-05-06T07:08:09Z",
+                "updated_at": "2024-05-06T07:08:19Z"
+            }"#,
+        )
+        .unwrap();
+        let check = status_check_of(raw);
+        assert_eq!(check.state, CheckState::Failed);
+        assert_eq!(check.name, "ci/circleci: build");
+        assert_eq!(check.summary, "Your tests failed on CircleCI");
+        assert_eq!(check.took, "10s");
+    }
+
+    #[test]
+    fn a_summary_is_one_line_and_not_a_build_log() {
+        assert_eq!(one_line("\n\n  hello  \nworld\n"), "hello");
+        assert_eq!(one_line(""), "");
+        let long = "x".repeat(400);
+        let cut = one_line(&long);
+        assert_eq!(cut.chars().count(), MAX_SUMMARY + 1);
+        assert!(cut.ends_with('…'));
+        // Cut by characters, not by bytes: a summary is somebody's prose.
+        let wide = "é".repeat(400);
+        assert!(one_line(&wide).starts_with('é'));
+    }
+
+    #[test]
+    fn a_duration_reads_the_way_a_build_log_says_it() {
+        let at = |s: &str| epoch_secs(s).unwrap();
+        assert_eq!(at("1970-01-01T00:00:00Z"), 0);
+        assert_eq!(at("2024-05-06T07:08:09Z"), 1_714_979_289);
+        // A fraction of a second, and an offset, are past what this measures.
+        assert_eq!(at("2024-05-06T07:08:09.512Z"), at("2024-05-06T07:08:09Z"));
+        assert_eq!(at("2024-05-06T07:08:09+00:00"), at("2024-05-06T07:08:09Z"));
+
+        let took_between = |a: &str, b: &str| took(Some(a), Some(b));
+        assert_eq!(
+            took_between("2024-05-06T07:08:09Z", "2024-05-06T07:08:54Z"),
+            "45s"
+        );
+        assert_eq!(
+            took_between("2024-05-06T07:08:09Z", "2024-05-06T07:09:29Z"),
+            "1m 20s"
+        );
+        assert_eq!(
+            took_between("2024-05-06T07:08:09Z", "2024-05-06T08:10:09Z"),
+            "1h 2m"
+        );
+        // One end missing, both ends nonsense, or two clocks disagreeing: a
+        // line that says a little less, not a row that fails to draw.
+        assert_eq!(took(Some("2024-05-06T07:08:09Z"), None), "");
+        assert_eq!(took(Some("yesterday"), Some("today")), "");
+        assert_eq!(
+            took_between("2024-05-06T07:08:09Z", "2024-05-06T07:08:08Z"),
+            ""
+        );
     }
 }
 

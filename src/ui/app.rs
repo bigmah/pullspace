@@ -11,8 +11,8 @@ use crate::backend::auth::Token;
 use crate::backend::clone::Progress;
 use crate::backend::difftool::Expansion;
 use crate::backend::github::{
-    Annotation, Branches, Checks, CommitFrom, CommitView, Commits, FetchJob, PrDetail, PrHeader,
-    PrState, PrSummary, RepoRef, RepoView, Snapshot, Thread, statuses_of,
+    Annotation, Branches, Checks, CommitFrom, CommitView, Commits, CompareView, FetchJob, PrDetail,
+    PrHeader, PrState, PrSummary, RepoRef, RepoView, Snapshot, Thread, statuses_of,
 };
 use crate::backend::highlight;
 use crate::backend::markdown;
@@ -65,6 +65,9 @@ pub enum Workspace {
     /// out of the pull request it belongs to, which rides along inside so that
     /// the conversation beside it stays whole.
     Commit(Box<CommitView>),
+    /// Two of its refs held up against each other — the pull request somebody
+    /// has not opened yet.
+    Compare(Box<CompareView>),
 }
 
 impl Workspace {
@@ -89,6 +92,13 @@ impl Workspace {
         }
     }
 
+    pub fn compare(&self) -> Option<&CompareView> {
+        match self {
+            Workspace::Compare(view) => Some(view),
+            _ => None,
+        }
+    }
+
     pub fn is_open(&self) -> bool {
         !matches!(self, Workspace::Empty)
     }
@@ -101,6 +111,7 @@ impl Workspace {
             Workspace::Pr(pr) => Some(&pr.repo),
             Workspace::Repo(view) => Some(&view.repo),
             Workspace::Commit(view) => Some(&view.repo),
+            Workspace::Compare(view) => Some(&view.repo),
         }
     }
 
@@ -152,12 +163,22 @@ impl Workspace {
             Workspace::Repo(view) => {
                 Some(CommitSource::Branch(view.repo.clone(), view.branch.clone()))
             }
+            Workspace::Compare(view) => Some(CommitSource::Compare(
+                view.repo.clone(),
+                view.base.clone(),
+                view.head.clone(),
+            )),
             Workspace::Commit(view) => match &view.from {
                 CommitFrom::Alone => None,
                 CommitFrom::Pr(pr) => Some(CommitSource::Pr(view.repo.clone(), pr.number)),
                 CommitFrom::Branch(branch) => {
                     Some(CommitSource::Branch(view.repo.clone(), branch.clone()))
                 }
+                CommitFrom::Compare(base, head) => Some(CommitSource::Compare(
+                    view.repo.clone(),
+                    base.clone(),
+                    head.clone(),
+                )),
             },
         }
     }
@@ -175,6 +196,7 @@ impl Workspace {
             Workspace::Pr(pr) => Some((pr.repo.clone(), pr.head_sha.clone())),
             Workspace::Repo(view) => Some((view.repo.clone(), view.head_sha.clone())),
             Workspace::Commit(view) => Some((view.repo.clone(), view.commit.sha.clone())),
+            Workspace::Compare(view) => Some((view.repo.clone(), view.head_sha.clone())),
         }
     }
 
@@ -200,6 +222,7 @@ impl Workspace {
             Workspace::Pr(pr) => !pr.tree.is_empty(),
             Workspace::Repo(view) => !view.tree.is_empty(),
             Workspace::Commit(view) => !view.tree.is_empty(),
+            Workspace::Compare(view) => !view.tree.is_empty(),
         }
     }
 
@@ -209,6 +232,7 @@ impl Workspace {
         match self {
             Workspace::Pr(pr) => statuses_of(&pr.files),
             Workspace::Commit(view) => statuses_of(&view.files),
+            Workspace::Compare(view) => statuses_of(&view.files),
             // Nothing is changed in a repository being read on its own.
             _ => HashMap::new(),
         }
@@ -228,6 +252,11 @@ impl Workspace {
                 .iter()
                 .map(|f| FetchJob::for_commit_change(view, f))
                 .collect(),
+            Workspace::Compare(view) => view
+                .files
+                .iter()
+                .map(|f| FetchJob::for_compare_change(view, f))
+                .collect(),
             _ => Vec::new(),
         }
     }
@@ -239,6 +268,7 @@ impl Workspace {
             Workspace::Pr(pr) => Some(FetchJob::new(pr, rel)),
             Workspace::Repo(view) => Some(FetchJob::browsing(view, rel)),
             Workspace::Commit(view) => Some(FetchJob::in_commit(view, rel)),
+            Workspace::Compare(view) => Some(FetchJob::in_compare(view, rel)),
         }
     }
 
@@ -255,6 +285,9 @@ impl Workspace {
             Workspace::Repo(view) if view.default => Target::Repo(view.repo.clone()),
             Workspace::Repo(view) => Target::Branch(view.repo.clone(), view.branch.clone()),
             Workspace::Commit(view) => Target::Commit(view.repo.clone(), view.commit.sha.clone()),
+            Workspace::Compare(view) => {
+                Target::Compare(view.repo.clone(), view.base.clone(), view.head.clone())
+            }
         }
     }
 
@@ -266,6 +299,7 @@ impl Workspace {
             Workspace::Pr(pr) => Some((pr.tree.clone(), pr.base_tree.clone())),
             Workspace::Repo(view) => Some((view.tree.clone(), Snapshot::default())),
             Workspace::Commit(view) => Some((view.tree.clone(), view.base_tree.clone())),
+            Workspace::Compare(view) => Some((view.tree.clone(), view.base_tree.clone())),
         }
     }
 }
@@ -360,12 +394,17 @@ pub enum CommitSource {
     Pr(RepoRef, u64),
     /// A branch's history, newest first, a page at a time.
     Branch(RepoRef, String),
+    /// What lies between two refs, oldest first — the same list a pull request
+    /// would have, for the pull request nobody has opened.
+    Compare(RepoRef, String, String),
 }
 
 impl CommitSource {
     pub fn repo(&self) -> &RepoRef {
         match self {
-            CommitSource::Pr(repo, _) | CommitSource::Branch(repo, _) => repo,
+            CommitSource::Pr(repo, _)
+            | CommitSource::Branch(repo, _)
+            | CommitSource::Compare(repo, ..) => repo,
         }
     }
 
@@ -373,8 +412,22 @@ impl CommitSource {
     pub fn branch(&self) -> Option<&str> {
         match self {
             CommitSource::Branch(_, name) => Some(name),
-            CommitSource::Pr(..) => None,
+            _ => None,
         }
+    }
+
+    /// Whether more of this list is a request away rather than the end of what
+    /// GitHub will say — which is true of the two that arrive a page at a time
+    /// and not of a pull request's, which arrives whole.
+    pub fn is_paged(&self) -> bool {
+        !matches!(self, CommitSource::Pr(..))
+    }
+
+    /// Which way the page after this one goes. A branch is read newest first,
+    /// so the next page is older; a comparison is read oldest first, so the
+    /// next page is the commits after the ones on screen.
+    pub fn older_first(&self) -> bool {
+        matches!(self, CommitSource::Branch(..))
     }
 }
 
@@ -862,6 +915,21 @@ impl St {
         }
     }
 
+    /// Show two refs held up against each other.
+    ///
+    /// The commits between them come with the comparison, so the pane beside it
+    /// is filled in here rather than left to fetch what is already in hand —
+    /// after [`enter`](Self::enter), which is what clears the last list out.
+    pub fn enter_compare(&self, view: CompareView) {
+        let reload = self.workspace.peek().compare().is_some_and(|open| {
+            open.repo == view.repo && open.base == view.base && open.head == view.head
+        });
+        let commits = view.commits.clone();
+        self.enter(Workspace::Compare(Box::new(view)), reload);
+        let mut held = self.commits;
+        held.set(CommitList::Ready(Box::new(commits)));
+    }
+
     /// Show one commit, diffed against the commit before it.
     ///
     /// The pull request it came out of stays beside it — the conversation, the
@@ -1113,6 +1181,7 @@ impl St {
         match &*self.workspace.peek() {
             Workspace::Pr(pr) => Some(pr.blob_key(rel).into_owned()),
             Workspace::Commit(view) => Some(view.blob_key(rel).into_owned()),
+            Workspace::Compare(view) => Some(view.blob_key(rel).into_owned()),
             _ => None,
         }
     }
@@ -1161,6 +1230,11 @@ impl St {
                 .filter(|f| marks.contains(pr.blob_key_of(f).as_ref()))
                 .count(),
             Workspace::Commit(view) => view
+                .files
+                .iter()
+                .filter(|f| marks.contains(view.blob_key_of(f).as_ref()))
+                .count(),
+            Workspace::Compare(view) => view
                 .files
                 .iter()
                 .filter(|f| marks.contains(view.blob_key_of(f).as_ref()))
@@ -1288,6 +1362,9 @@ impl St {
             }
             Workspace::Repo(view) => view.tree.entry(rel).is_some(),
             Workspace::Commit(view) => {
+                view.tree.entry(rel).is_some() || view.files.iter().any(|f| f.path == rel)
+            }
+            Workspace::Compare(view) => {
                 view.tree.entry(rel).is_some() || view.files.iter().any(|f| f.path == rel)
             }
         }
@@ -1431,6 +1508,7 @@ fn marks_key(ws: &Workspace) -> Option<String> {
     match ws {
         Workspace::Pr(pr) => Some(viewed::pr_key(&pr.repo, pr.number)),
         Workspace::Commit(view) => Some(viewed::commit_key(&view.repo, &view.commit.sha)),
+        Workspace::Compare(view) => Some(viewed::compare_key(&view.repo, &view.base, &view.head)),
         _ => None,
     }
 }
@@ -1545,6 +1623,11 @@ pub fn App() -> Element {
             ),
             Workspace::Commit(view) => build_tree_from_paths(
                 &format!("{} @ {}", view.repo, view.commit.short()),
+                view.tree.paths(),
+                &statuses,
+            ),
+            Workspace::Compare(view) => build_tree_from_paths(
+                &format!("{} {}...{}", view.repo, view.base, view.head),
                 view.tree.paths(),
                 &statuses,
             ),
@@ -1904,6 +1987,67 @@ mod tests {
             browsing("dev", false).commits_key(),
             Some(CommitSource::Branch(repo(), "dev".to_string()))
         );
+    }
+
+    fn comparing(base: &str, head: &str) -> Workspace {
+        Workspace::Compare(Box::new(crate::backend::github::CompareView {
+            repo: repo(),
+            base: base.to_string(),
+            head: head.to_string(),
+            base_sha: "merge-base".to_string(),
+            head_sha: "tip-of-head".to_string(),
+            base_tip: "tip-of-base".to_string(),
+            status: "ahead".to_string(),
+            ahead: 5,
+            behind: 0,
+            files: Vec::new(),
+            truncated: false,
+            tree: Snapshot::default(),
+            base_tree: Snapshot::default(),
+            commits: Commits::default(),
+            html_url: String::new(),
+        }))
+    }
+
+    /// A comparison is a pull request nobody opened: the same two trees, the
+    /// same list of what differs, and a link of its own to send somebody.
+    #[test]
+    fn a_comparison_is_read_the_way_a_pull_request_is() {
+        let ws = comparing("main", "feat/thing");
+        assert_eq!(
+            ws.target(),
+            Target::Compare(repo(), "main".to_string(), "feat/thing".to_string())
+        );
+        // Its commits are the ones between the two…
+        assert_eq!(
+            ws.commits_key(),
+            Some(CommitSource::Compare(
+                repo(),
+                "main".to_string(),
+                "feat/thing".to_string()
+            ))
+        );
+        // …and its checks are about the commit on screen, which is the head.
+        assert_eq!(ws.checks_key(), Some((repo(), "tip-of-head".to_string())));
+        // No pull request behind it, so the pane leads with the branches.
+        assert!(!ws.has_review());
+        assert_eq!(showing_tab(ConvTab::Talk, &ws), ConvTab::Branches);
+    }
+
+    /// The two lists that arrive a page at a time go opposite ways, and the
+    /// button that asks for the next page has to say which.
+    #[test]
+    fn only_the_paged_lists_have_a_next_page() {
+        let branch = CommitSource::Branch(repo(), "dev".to_string());
+        let compare = CommitSource::Compare(repo(), "main".to_string(), "dev".to_string());
+        let pr = CommitSource::Pr(repo(), 7);
+
+        assert!(branch.is_paged() && compare.is_paged());
+        assert!(!pr.is_paged(), "a pull request's commits arrive whole");
+        // A branch is read newest first, so the page after it is older; a
+        // comparison is read oldest first, so it is newer.
+        assert!(branch.older_first());
+        assert!(!compare.older_first());
     }
 
     /// A link with no branch written in it opens whatever the default branch is

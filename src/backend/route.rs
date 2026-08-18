@@ -1,9 +1,11 @@
 //! What is open, said in the address bar — and read back out of it.
 //!
 //! `#/owner/repo/pull/123`, `#/owner/repo/commit/<sha>` for one commit of it,
-//! `#/owner/repo` for a repository being read on its own and
-//! `#/owner/repo/tree/<branch>` for one of its branches — the four words
-//! github.com writes the same four things under. Behind the `#` on purpose:
+//! `#/owner/repo` for a repository being read on its own,
+//! `#/owner/repo/tree/<branch>` for one of its branches and
+//! `#/owner/repo/compare/<base>...<head>` for two of them held up against each
+//! other — the five words github.com writes the same five things under. Behind
+//! the `#` on purpose:
 //! this is a static page, and the fragment
 //! is the one part of a URL no host ever sees, so a deep link works on GitHub
 //! Pages, on a bare directory, and under any `base_path` — with nothing to
@@ -39,6 +41,9 @@ pub enum Target {
     /// The same, at a branch somebody named — which is the one thing a link
     /// with no branch in it cannot come back to.
     Branch(RepoRef, String),
+    /// Two refs of it, held up against each other: base first, as github.com
+    /// writes a comparison and as everybody reads one.
+    Compare(RepoRef, String, String),
     Pr(RepoRef, u64),
     /// One commit, diffed against the one before it.
     Commit(RepoRef, String),
@@ -51,7 +56,7 @@ impl Target {
         match self {
             Target::Home => None,
             Target::Repo(_) | Target::Branch(..) => Some("blob"),
-            Target::Pr(..) | Target::Commit(..) => Some("files"),
+            Target::Pr(..) | Target::Commit(..) | Target::Compare(..) => Some("files"),
         }
     }
 }
@@ -96,6 +101,13 @@ impl Route {
                 repo.name,
                 encoded_ref(branch)
             ),
+            Target::Compare(repo, base, head) => format!(
+                "#/{}/{}/compare/{}...{}",
+                repo.owner,
+                repo.name,
+                encoded_ref(base),
+                encoded_ref(head),
+            ),
             Target::Pr(repo, number) => {
                 format!("#/{}/{}/pull/{number}", repo.owner, repo.name)
             }
@@ -132,13 +144,18 @@ pub fn parse(hash: &str) -> Route {
     // answer with the repository every time.
     let at = match parse_commit_target(&head) {
         Some((repo, sha)) => Target::Commit(repo, sha),
-        // And a branch before a bare repository, for the same reason.
-        None => match branch_target(&head) {
-            Some((repo, branch)) => Target::Branch(repo, branch),
-            None => match parse_target(&head) {
-                Some((repo, Some(number))) => Target::Pr(repo, number),
-                Some((repo, None)) => Target::Repo(repo),
-                None => Target::Home,
+        // And a comparison and a branch before a bare repository, for the same
+        // reason: `parse_target` reads all three as a repository with something
+        // after it.
+        None => match compare_target(&head) {
+            Some((repo, base, head)) => Target::Compare(repo, base, head),
+            None => match branch_target(&head) {
+                Some((repo, branch)) => Target::Branch(repo, branch),
+                None => match parse_target(&head) {
+                    Some((repo, Some(number))) => Target::Pr(repo, number),
+                    Some((repo, None)) => Target::Repo(repo),
+                    None => Target::Home,
+                },
             },
         },
     };
@@ -162,6 +179,12 @@ fn split(text: &str) -> (String, Option<Place>) {
         // it falls rather than at a fixed depth — but never before the branch
         // itself, so a branch actually called `blob` still names a branch.
         [_, _, "tree", _, ..] => match parts.iter().skip(4).position(|p| *p == "blob") {
+            Some(at) => at + 5,
+            None => return (rest.to_string(), None),
+        },
+        // And the same for a comparison, whose two names may each have slashes
+        // in them.
+        [_, _, "compare", _, ..] => match parts.iter().skip(4).position(|p| *p == "files") {
             Some(at) => at + 5,
             None => return (rest.to_string(), None),
         },
@@ -232,6 +255,44 @@ pub fn branch_target(input: &str) -> Option<(RepoRef, String)> {
             .map(|s| decoded(s))
             .collect::<Vec<_>>()
             .join("/"),
+    ))
+}
+
+/// The comparison one piece of text names, when it names one: `owner/repo`, and
+/// two refs with three dots between them.
+///
+/// Everything after `compare/` is the pair, and the dots are what separates
+/// them — git forbids `..` inside a ref name, so the separator cannot be part
+/// of either however the two are called. Each side is then a path's worth of
+/// segments, unescaped the way [`branch_target`] unescapes one.
+///
+/// GitHub's own `owner:ref` form survives untouched, which is what a link to a
+/// comparison across forks arrives as — it is passed straight back to the API,
+/// which reads it.
+pub fn compare_target(input: &str) -> Option<(RepoRef, String, String)> {
+    let text = input.trim();
+    let rest = strip_host(text).unwrap_or(text);
+    let parts: Vec<&str> = rest.split('/').filter(|p| !p.is_empty()).collect();
+    let [owner, name, "compare", spec @ ..] = parts.as_slice() else {
+        return None;
+    };
+    let spec = spec
+        .iter()
+        .map(|s| decoded(s))
+        .collect::<Vec<_>>()
+        .join("/");
+    let (base, head) = spec.split_once("...")?;
+    // A comparison needs both halves; one of them alone names nothing.
+    if base.is_empty() || head.is_empty() {
+        return None;
+    }
+    Some((
+        RepoRef {
+            owner: owner.to_string(),
+            name: name.trim_end_matches(".git").to_string(),
+        },
+        base.to_string(),
+        head.to_string(),
     ))
 }
 
@@ -412,6 +473,86 @@ mod tests {
         let route = Route::to(Target::Branch(repo("o", "r"), "a/b/c".to_string()));
         assert_eq!(route.hash(), "#/o/r/tree/a/b/c");
         assert_eq!(parse(&route.hash()), route);
+    }
+
+    #[test]
+    fn a_comparison_round_trips() {
+        let route = Route::to(Target::Compare(
+            repo("o", "r"),
+            "main".to_string(),
+            "feat/thing".to_string(),
+        ));
+        assert_eq!(route.hash(), "#/o/r/compare/main...feat/thing");
+        assert_eq!(parse(&route.hash()), route);
+
+        // And a line of a file inside one.
+        let route = Route {
+            at: Target::Compare(repo("o", "r"), "v1.0".to_string(), "main".to_string()),
+            place: place("src/main.rs", Some(9)),
+        };
+        assert_eq!(
+            route.hash(),
+            "#/o/r/compare/v1.0...main/files/src/main.rs:L9"
+        );
+        assert_eq!(parse(&route.hash()), route);
+    }
+
+    /// Both names can have slashes in them, and the three dots are the only
+    /// thing that separates the two — git forbids `..` inside a ref name, which
+    /// is what makes that safe.
+    #[test]
+    fn a_comparison_of_two_slashed_branches_round_trips() {
+        let route = Route {
+            at: Target::Compare(
+                repo("o", "r"),
+                "release/1.2".to_string(),
+                "feat/deep/work".to_string(),
+            ),
+            place: place("a.rs", None),
+        };
+        assert_eq!(
+            route.hash(),
+            "#/o/r/compare/release/1.2...feat/deep/work/files/a.rs"
+        );
+        assert_eq!(parse(&route.hash()), route);
+    }
+
+    /// github.com's own compare URL, including the `owner:ref` form its
+    /// permalinks use.
+    #[test]
+    fn a_compare_link_pasted_after_the_hash_is_read_as_one() {
+        assert_eq!(
+            parse("#https://github.com/o/r/compare/main...dev"),
+            Route::to(Target::Compare(
+                repo("o", "r"),
+                "main".to_string(),
+                "dev".to_string()
+            ))
+        );
+        assert_eq!(
+            parse("#/o/r/compare/bigmah:ecbee88...bigmah:2740204"),
+            Route::to(Target::Compare(
+                repo("o", "r"),
+                "bigmah:ecbee88".to_string(),
+                "bigmah:2740204".to_string()
+            ))
+        );
+    }
+
+    /// Half a comparison names nothing to compare.
+    #[test]
+    fn a_comparison_missing_a_side_is_just_the_repository() {
+        for text in [
+            "#/o/r/compare/main",
+            "#/o/r/compare/...dev",
+            "#/o/r/compare/",
+        ] {
+            assert_eq!(
+                parse(text),
+                Route::to(Target::Repo(repo("o", "r"))),
+                "{text}"
+            );
+        }
     }
 
     /// github.com's own branch URL, which is the one anybody has to hand.

@@ -269,6 +269,12 @@ button { font-family: inherit; user-select: none; }
 /* A toggle that is on, not a warning. */
 .iconbtn.filter.on { color: var(--accent); border-color: var(--accent-line); background: var(--bg-3); }
 
+/* The small one that is on: the ⇄ of the branch already being compared. It is
+   lit rather than disabled, because what it says is "this is the one you are
+   looking at" and not "this control is unavailable". */
+.iconbtn.sm.on { color: var(--accent); border-color: var(--accent-line); cursor: default; }
+.iconbtn.sm.on:hover:enabled { background: transparent; color: var(--accent); }
+
 .iconbtn .glyph { display: block; line-height: 1; }
 
 /* Turning, while the thing it reloads is being reloaded. The glyph turns and
@@ -1459,6 +1465,15 @@ button { font-family: inherit; user-select: none; }
   box-shadow: inset 2px 0 0 var(--accent);
   cursor: default;
 }
+
+/* The ⇄ on a branch row is a second thing to do with it, so it sits back until
+   the row is under the pointer — the row itself is the first thing, and a
+   column of bright buttons would read as the list's purpose. The one that is
+   on stays lit, since it is saying where you are rather than offering a click. */
+.convbranch .iconbtn.sm { opacity: 0.35; }
+.convbranch:hover .iconbtn.sm,
+.convbranch .iconbtn.sm.on,
+.convbranch .iconbtn.sm:focus-visible { opacity: 1; }
 
 /* Monospaced, because a branch name is a git ref and not prose: `release/1.2`
    and `release/l.2` are two different branches. */

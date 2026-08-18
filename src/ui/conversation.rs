@@ -59,6 +59,9 @@ pub(super) async fn load_commits(st: St, source: CommitSource) {
     let got = match &source {
         CommitSource::Pr(repo, number) => github::pr_commits(&token, repo, *number).await,
         CommitSource::Branch(repo, branch) => github::branch_commits(&token, repo, branch, 1).await,
+        CommitSource::Compare(repo, base, head) => {
+            github::compare_commits(&token, repo, base, head, 1).await
+        }
     };
 
     // Something else opened while this was in flight: what came back is the
@@ -80,9 +83,10 @@ pub(super) async fn load_commits(st: St, source: CommitSource) {
 /// hundred rows that were fetched and read to a request that failed would be
 /// the wrong way round.
 pub(super) async fn load_older(st: St, source: CommitSource) {
-    let Some(branch) = source.branch().map(str::to_string) else {
+    // A pull request's commits arrive whole; there is no next page to ask for.
+    if !source.is_paged() {
         return;
-    };
+    }
     let mut commits = st.commits;
     // Only from a settled page of this branch that says there is more behind
     // it — which is also what keeps a double click from asking twice.
@@ -97,7 +101,16 @@ pub(super) async fn load_older(st: St, source: CommitSource) {
     commits.set(CommitList::More(held));
 
     let token = st.api_token();
-    let got = github::branch_commits(&token, source.repo(), &branch, page).await;
+    let got = match &source {
+        CommitSource::Branch(repo, branch) => {
+            github::branch_commits(&token, repo, branch, page).await
+        }
+        CommitSource::Compare(repo, base, head) => {
+            github::compare_commits(&token, repo, base, head, page).await
+        }
+        // Guarded above; a pull request never reaches here.
+        CommitSource::Pr(..) => return,
+    };
 
     if st.workspace.peek().commits_key() != Some(source) {
         return;
@@ -113,6 +126,7 @@ pub(super) async fn load_older(st: St, source: CommitSource) {
             let mut all = base;
             all.items.extend(next.items);
             all.truncated = next.truncated;
+            all.total = next.total;
             all.pages = page;
             commits.set(CommitList::Ready(all));
         }
@@ -259,6 +273,15 @@ pub fn ConvPane() -> Element {
         .repo()
         .map(|v| v.branch.clone())
         .or_else(|| held.commit().and_then(|v| v.branch().map(str::to_string)));
+    // What a comparison started from the branch list would be against, and
+    // which branch is already the right-hand side of one. Reading a branch, it
+    // is that branch; reading a comparison, it is the base — so walking down
+    // the list holds a repository's branches up against the same one in turn,
+    // which is what anybody comparing branches is doing.
+    let (against, compared) = match held.compare() {
+        Some(v) => (Some(v.base.clone()), Some(v.head.clone())),
+        None => (at_branch.clone(), None),
+    };
     drop(held);
     let mut open = st.conv_open;
     let mut tab = st.conv_tab;
@@ -384,6 +407,9 @@ pub fn ConvPane() -> Element {
     let from = match (&source, &desc) {
         (Some(CommitSource::Pr(..)), Some(header)) => CommitFrom::Pr(header.clone()),
         (Some(CommitSource::Branch(_, branch)), _) => CommitFrom::Branch(branch.clone()),
+        (Some(CommitSource::Compare(_, base, head)), _) => {
+            CommitFrom::Compare(base.clone(), head.clone())
+        }
         _ => CommitFrom::Alone,
     };
     // Which commit the checks are about, for the button that fetches them
@@ -487,7 +513,12 @@ pub fn ConvPane() -> Element {
                         {talk}
                     },
                     ConvTab::Branches => rsx! {
-                        BranchesBody { repo: repo.clone(), at: at_branch.clone() }
+                        BranchesBody {
+                            repo: repo.clone(),
+                            at: at_branch.clone(),
+                            against: against.clone(),
+                            compared: compared.clone(),
+                        }
                     },
                     ConvTab::Commits => rsx! {
                         if let Some(source) = source.clone() {
@@ -545,6 +576,7 @@ fn CommitsBody(source: CommitSource, from: CommitFrom, at: Option<String>) -> El
     let st = use_context::<St>();
     let held = st.commits.read();
     let branch = source.branch().is_some();
+    let comparing = matches!(source, CommitSource::Compare(..));
 
     let (commits, waiting) = match &*held {
         // Idle only ever lasts as long as it takes the effect in `App` to see
@@ -562,7 +594,9 @@ fn CommitsBody(source: CommitSource, from: CommitFrom, at: Option<String>) -> El
         CommitList::Ready(commits) if commits.items.is_empty() => {
             return rsx! {
                 div { class: "panel-empty",
-                    if branch {
+                    if comparing {
+                        "Nothing between these two — the right-hand side adds no commits."
+                    } else if branch {
                         "No commits on this branch."
                     } else {
                         "No commits on this pull request."
@@ -574,8 +608,17 @@ fn CommitsBody(source: CommitSource, from: CommitFrom, at: Option<String>) -> El
         CommitList::More(commits) => (commits, true),
     };
     // More behind what is here — which on a pull request is the end of what
-    // GitHub will say, and on a branch is one more request away.
+    // GitHub will say, and on the two that arrive a page at a time is one more
+    // request away.
     let more = commits.truncated;
+    let paged = source.is_paged();
+    // Which way that page goes: back through a branch's history, or on through
+    // the commits of a comparison, which are read oldest first.
+    let older = source.older_first();
+    // How many there are in all, where GitHub said — a hundred rows under a
+    // comparison of six thousand commits should not read as the whole of it.
+    let total = commits.total as usize;
+    let shown = commits.items.len();
     let listing = source.clone();
 
     rsx! {
@@ -588,22 +631,25 @@ fn CommitsBody(source: CommitSource, from: CommitFrom, at: Option<String>) -> El
                 current: at.as_deref() == Some(c.sha.as_str()),
             }
         }
-        if more && !branch {
+        if total > shown {
+            div { class: "panel-empty", "{shown} of {total} commits." }
+        }
+        if more && !paged {
             div { class: "panel-empty",
                 "GitHub lists at most 250 commits on a pull request — open it on github.com to read the rest."
             }
         } else if waiting {
-            div { class: "panel-empty", "Loading older commits…" }
+            div { class: "panel-empty", "Loading more commits…" }
         } else if more {
             button {
                 class: "convolder",
-                title: "Read another {github::HISTORY_PAGE} commits back along this branch",
+                title: if older { "Read another {github::HISTORY_PAGE} commits back along this branch" } else { "Read the next {github::HISTORY_PAGE} commits between these two" },
                 // Root scope: the page lands on a pane that may have been
                 // scrolled, folded away or stepped out of in the meantime.
                 onclick: move |_| {
                     spawn_forever(load_older(st, listing.clone()));
                 },
-                "Show older commits"
+                if older { "Show older commits" } else { "Show more commits" }
             }
         }
     }
@@ -738,7 +784,15 @@ fn merged(local: Vec<Branch>, found: &[Branch]) -> Vec<Branch> {
 /// beginning rather than the whole, and what is typed goes to GitHub as well —
 /// see [`github::matching_branches`].
 #[component]
-fn BranchesBody(repo: RepoRef, at: Option<String>) -> Element {
+fn BranchesBody(
+    repo: RepoRef,
+    at: Option<String>,
+    /// The branch a comparison started from a row here would be against — the
+    /// one being read, or the base of the comparison already open.
+    against: Option<String>,
+    /// And the branch that is already the right-hand side of one.
+    compared: Option<String>,
+) -> Element {
     let st = use_context::<St>();
     let mut filter = use_signal(String::new);
 
@@ -839,6 +893,8 @@ fn BranchesBody(repo: RepoRef, at: Option<String>) -> Element {
                 b: b.clone(),
                 repo: repo.clone(),
                 current: at.as_deref() == Some(b.name.as_str()),
+                against: against.clone().filter(|left| *left != b.name),
+                compared: compared.as_deref() == Some(b.name.as_str()),
             }
         }
         if let Some(e) = error {
@@ -871,11 +927,32 @@ fn BranchesBody(repo: RepoRef, at: Option<String>) -> Element {
 
 /// One branch: what it is called, what is at the end of it, and — on a click —
 /// the repository as that branch has it.
+///
+/// `⇄` beside it is the other thing to do with a branch: hold it up against
+/// whichever one is being read. It is on the row rather than in a form of its
+/// own because that is the question — *this* branch against the one I am on —
+/// and a pair of dropdowns would be a longer way of saying it.
 #[component]
-fn BranchRow(b: Branch, repo: RepoRef, current: bool) -> Element {
+fn BranchRow(
+    b: Branch,
+    repo: RepoRef,
+    current: bool,
+    /// The left-hand side a comparison from this row would have, when there is
+    /// one and it is not this branch: comparing a branch with itself is a
+    /// question with nothing in the answer.
+    against: Option<String>,
+    /// Whether this row is already the right-hand side of the comparison on
+    /// screen.
+    compared: bool,
+) -> Element {
     let st = use_context::<St>();
     let name = b.name.clone();
     let sha = b.sha.clone();
+    // One clone each for the two things a row does — browse it, or hold it up
+    // against the branch being read — since each moves what it needs into its
+    // own handler.
+    let compare_to = b.name.clone();
+    let in_repo = repo.clone();
     let class = if current {
         "convitem convbranch on"
     } else {
@@ -909,6 +986,28 @@ fn BranchRow(b: Branch, repo: RepoRef, current: bool) -> Element {
                     }
                 }
                 span { class: "spacer" }
+                if let Some(left) = against {
+                    button {
+                        class: if compared { "iconbtn sm on" } else { "iconbtn sm" },
+                        title: if compared { "Already comparing {left}...{b.name}" } else { "Compare {left}...{b.name} — what {b.name} has that {left} does not" },
+                        onclick: move |e| {
+                            // The row under this button opens the branch; this
+                            // one holds it up against the one being read.
+                            e.stop_propagation();
+                            if !compared {
+                                spawn_forever(
+                                    super::github::open_compare(
+                                        st,
+                                        in_repo.clone(),
+                                        left.clone(),
+                                        compare_to.clone(),
+                                    ),
+                                );
+                            }
+                        },
+                        span { class: "glyph", "⇄" }
+                    }
+                }
                 span {
                     class: "convsha",
                     title: "{b.sha}",

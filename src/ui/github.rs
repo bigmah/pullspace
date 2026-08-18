@@ -910,7 +910,7 @@ fn RepoPicker(autofocus: bool) -> Element {
                 input {
                     class: "ghinput",
                     r#type: "text",
-                    placeholder: "Search GitHub · owner/repo · or paste a link to a PR, branch or commit",
+                    placeholder: "Search GitHub · owner/repo · or paste a link to a PR, branch, commit or comparison",
                     spellcheck: "false",
                     autocomplete: "off",
                     value: "{typed}",
@@ -1216,7 +1216,11 @@ async fn open_target(st: St) {
     if let Some((repo, sha)) = parse_commit_target(&raw) {
         return open_commit(st, repo, sha, CommitFrom::Alone).await;
     }
-    // And `owner/repo/tree/<branch>`, for the same reason.
+    // And `owner/repo/compare/<base>...<head>`, and `owner/repo/tree/<branch>`,
+    // for the same reason.
+    if let Some((repo, base, head)) = route::compare_target(&raw) {
+        return open_compare(st, repo, base, head).await;
+    }
     if let Some((repo, branch)) = route::branch_target(&raw) {
         return browse_branch(st, repo, branch, None).await;
     }
@@ -1369,6 +1373,44 @@ pub(super) async fn open_commit(st: St, repo: RepoRef, sha: String, from: Commit
 
     fetch.set(Fetch::Idle);
     st.enter_commit(view);
+}
+
+/// Compare two refs of one repository: what one has that the other does not,
+/// as the diff it would be.
+///
+/// The same three steps a pull request takes, because it is the same thing — a
+/// merge base, a head, and the list of what differs — and it is what a pull
+/// request between these two branches would show, before anybody has opened
+/// one.
+///
+/// The commits between them arrive with the comparison rather than after it:
+/// GitHub sends the first hundred in the same answer, so the pane that lists
+/// them opens without a request of its own.
+pub(super) async fn open_compare(st: St, repo: RepoRef, base: String, head: String) {
+    let token = st.api_token();
+    let mut fetch = st.fetch;
+
+    fetch.set(Fetch::Working(format!("Comparing {base} with {head}…")));
+    let mut view = match github::load_compare(&token, &repo, &base, &head).await {
+        Ok(v) => v,
+        Err(e) => return fetch.set(Fetch::Failed(format!("{e:#}"))),
+    };
+
+    fetch.set(Fetch::Working("Reading the file tree…".to_string()));
+    // As for a pull request: a tree that will not load costs the explorer its
+    // unchanged files, which is a smaller loss than refusing to open the diff.
+    if let Some(tree) = tree_at(&token, &repo, &view.head_sha).await {
+        view.tree = tree;
+    }
+    // And the merge base's, which every left-hand side is read from.
+    if !view.base_sha.is_empty()
+        && let Some(base_tree) = tree_at(&token, &repo, &view.base_sha).await
+    {
+        view.base_tree = base_tree;
+    }
+
+    fetch.set(Fetch::Idle);
+    st.enter_compare(view);
 }
 
 /// Which files a commit is made of.

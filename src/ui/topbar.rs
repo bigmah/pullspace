@@ -4,7 +4,9 @@ use crate::backend::auth::open_browser;
 use crate::backend::github::{CommitFrom, RepoRef};
 
 use super::app::{Account, Fetch, St, Workspace};
-use super::github::{PrListBody, PrStates, browse_branch, browse_repo, open_commit, open_pr};
+use super::github::{
+    PrListBody, PrStates, browse_branch, browse_repo, open_commit, open_compare, open_pr,
+};
 use super::ide;
 
 /// What the bar says is open, and what it offers to do about it.
@@ -64,6 +66,11 @@ pub fn TopBar() -> Element {
             "wschip cmp",
             "One commit, diffed against the commit before it",
         ),
+        Workspace::Compare(_) => (
+            "comparing",
+            "wschip cmp",
+            "Two refs held up against each other — what the one on the right adds to the one on the left",
+        ),
     };
 
     // What is open, said the same way whichever of the three it is: a name, the
@@ -109,6 +116,14 @@ pub fn TopBar() -> Element {
                     v.commit.short(),
                     v.commit.subject(),
                 ),
+                (None, None) if v.compare().is_some() => {
+                    let (base, head) = v.compare().unwrap_or_default();
+                    format!(
+                        "{} — {}\nOne commit of {base}...{head}. The rest of that comparison is in the pane on the right.",
+                        v.commit.short(),
+                        v.commit.subject(),
+                    )
+                }
                 (None, None) => format!(
                     "{} — {}\nOne commit of {}, diffed against the commit before it",
                     v.commit.short(),
@@ -120,6 +135,23 @@ pub fn TopBar() -> Element {
             close: "close commit",
             close_why: "Close this commit",
         }),
+        // The two names are what this is; how they stand is what it found.
+        Workspace::Compare(v) => Some(Crumb {
+            lead: format!("{}...{}", v.base, v.head),
+            trail: v.summary(),
+            why: format!(
+                "{}...{} — {}\nWhat {} has that {} does not, diffed against where the two last agreed. The branches of {} are in the pane on the right.",
+                v.base,
+                v.head,
+                v.summary(),
+                v.head,
+                v.base,
+                v.repo,
+            ),
+            url: v.html_url(),
+            close: "close compare",
+            close_why: "Close this comparison",
+        }),
     };
     let pr_target = workspace.pr().map(|p| (p.repo.clone(), p.number));
     // The branch as well as the repository: `⟳` on a branch means that branch
@@ -130,6 +162,12 @@ pub fn TopBar() -> Element {
     let commit_target = workspace
         .commit()
         .map(|v| (v.repo.clone(), v.commit.sha.clone(), v.from.clone()));
+    // Both ways round: which of two branches is the base is a thing to get
+    // wrong, and the answer is one click rather than a trip back through the
+    // branch list.
+    let compare_target = workspace
+        .compare()
+        .map(|v| (v.repo.clone(), v.base.clone(), v.head.clone()));
     let ws_open = workspace.is_open();
 
     let (reload_note, reload_error) = match &*st.fetch.read() {
@@ -142,6 +180,7 @@ pub fn TopBar() -> Element {
         Workspace::Pr(_) => "Reload this pull request from GitHub",
         Workspace::Repo(_) => "Reload this repository from GitHub",
         Workspace::Commit(_) => "Reload this commit from GitHub",
+        Workspace::Compare(_) => "Compare these two again — either end may have moved",
         Workspace::Empty => "Nothing open to reload",
     };
     // The progress line along the bottom of the bar is the one piece of a
@@ -223,6 +262,32 @@ pub fn TopBar() -> Element {
                 None
             }
         }
+        // Nothing between them is not a failure to show anything: it is the
+        // answer, and which of the two reasons it is is the thing worth saying.
+        Workspace::Compare(view) => {
+            if view.truncated {
+                Some((
+                    "truncated",
+                    "This comparison covers more files than GitHub will list; only the first 300 were loaded",
+                ))
+            } else if view.is_empty() && view.behind > 0 {
+                Some((
+                    "nothing ahead",
+                    "Everything on the right is already on the left — it is behind, not ahead",
+                ))
+            } else if view.is_empty() {
+                Some(("identical", "These two are the same commit"))
+            } else if view.tree.truncated {
+                Some(partial_tree)
+            } else if view.tree.is_empty() {
+                Some((
+                    "changed files only",
+                    "The repository tree could not be read, so the explorer lists only the files that differ",
+                ))
+            } else {
+                None
+            }
+        }
         Workspace::Empty => None,
     };
 
@@ -262,6 +327,19 @@ pub fn TopBar() -> Element {
                 }
                 if let Some(e) = reload_error {
                     span { class: "prwarn", title: "{e}", "reload failed" }
+                }
+                if let Some((repo, base, head)) = compare_target {
+                    button {
+                        class: "iconbtn",
+                        title: "Compare them the other way round — {head}...{base}",
+                        // Root scope: the swap replaces the bar this button is in.
+                        onclick: move |_| {
+                            spawn_forever(
+                                open_compare(st, repo.clone(), head.clone(), base.clone()),
+                            );
+                        },
+                        span { class: "glyph", "⇄" }
+                    }
                 }
                 button {
                     class: "iconbtn",

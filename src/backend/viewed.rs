@@ -85,6 +85,13 @@ pub fn commit_key(repo: &RepoRef, sha: &str) -> String {
     format!("{repo}@{sha}")
 }
 
+/// And two refs held up against each other. Apart from either branch's own
+/// marks, and from any pull request's: what has been read here is one
+/// comparison, and it stops being that the moment either end moves.
+pub fn compare_key(repo: &RepoRef, base: &str, head: &str) -> String {
+    format!("{repo}@{base}...{head}")
+}
+
 fn book() -> Book {
     store::get(store::VIEWED)
         .and_then(|raw| serde_json::from_str::<Book>(&raw).ok())

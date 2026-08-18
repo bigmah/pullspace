@@ -41,7 +41,20 @@ commit at the tip of each — and a filter box over the list once there are more
 than eight. Opening one reads the repository as that branch has it, carrying the
 file you were on across wherever that branch still has it, and the branch is
 written into the address bar as `#/owner/repo/tree/<branch>`, so a link to one is
-a link somebody else can open. **COMMITS** beside it is then that branch's
+a link somebody else can open.
+
+`⇄` on a branch row is the other thing to do with one: hold it up against the
+branch you are reading. That opens **a comparison** — `base...head`, three dots,
+the same one github.com's compare page shows — and it is a pull request in
+everything but name: the changed files badged in the tree, every diff read
+against where the two last agreed, the commits between them in the pane, and
+each of those openable as its own diff. The bar says how the two stand (`5
+commits ahead`, `3 ahead · 12 behind`, `identical`) and `⇄` there turns the
+comparison around. It has a link of its own too —
+`#/owner/repo/compare/main...feat/thing` — and a pasted github.com compare URL
+opens it, `owner:ref` cross-fork form included. Walking down the branch list
+from an open comparison holds each branch against the same base in turn, which
+is what comparing branches actually looks like. **COMMITS** beside it is then that branch's
 history rather than a pull request's — newest first, a hundred at a time, with
 *Show older commits* at the foot for the ones behind them — and every row of it
 opens as a diff the same way. Reading a branch commit by commit is the same
@@ -198,7 +211,7 @@ src/
     github.rs       GitHub REST: repo search, PRs, branches, commits, trees, blobs
     auth.rs         the token, and localStorage
     store.rs        localStorage: what a desktop app would put in ~/.config
-    route.rs        what is open, as `#/owner/repo/pull/123/files/x.rs:L42`
+    route.rs        what is open: a PR, a commit, a branch or a comparison
     prefs.rs        theme, accent, font and size, as a `:root` stylesheet
     clip.rs         the clipboard, for the link to a line
     viewed.rs       which files have been ticked off, by blob hash
@@ -256,7 +269,13 @@ patterns, URL parsing — is pure.
   read through the API's blob endpoint, one request of the hour's 5000 each,
   which is why cloning one is worth doing exactly once.
 - Diffs are merge-base vs head, which is the comparison GitHub's "Files
-  changed" tab shows.
+  changed" tab shows — and a comparison between two branches is the same three
+  dots, so what it shows is what the right-hand side *adds* rather than every
+  way the two differ right now. A branch that is only behind therefore compares
+  to nothing, and the bar says so rather than showing an empty diff.
+- A comparison covers at most 300 files, which is GitHub's own limit on that
+  endpoint. Its commits arrive with it — the first hundred, free, in the same
+  answer — and it says how many there are in all.
 - The Checks tab shows what GitHub *says* about a run, not the run's output:
   the conclusion, the report the check wrote, and the lines it marked up. The
   raw step log is not among them, and cannot be — that endpoint needs a token

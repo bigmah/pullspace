@@ -19,7 +19,7 @@ use crate::backend::route::{self, Route, Target};
 
 use super::app::{Account, St};
 use super::compat;
-use super::github::{browse_branch, browse_repo, open_commit, open_pr};
+use super::github::{browse_branch, browse_repo, open_commit, open_compare, open_pr};
 
 /// How often to look in on the saved token while it is being checked. Short
 /// enough not to be felt on the way in to a link.
@@ -107,6 +107,10 @@ fn go(st: St, asked: Route) {
         Target::Branch(repo, branch) => {
             name_it(st, &repo);
             spawn_forever(browse_branch(st, repo, branch, None));
+        }
+        Target::Compare(repo, base, head) => {
+            name_it(st, &repo);
+            spawn_forever(open_compare(st, repo, base, head));
         }
         Target::Pr(repo, number) => {
             name_it(st, &repo);

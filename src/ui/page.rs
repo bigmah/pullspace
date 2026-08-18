@@ -59,6 +59,9 @@ fn title(ws: &Workspace) -> String {
         Workspace::Commit(view) => {
             format!("{} {} · pullspace", view.repo, view.commit.short())
         }
+        Workspace::Compare(view) => {
+            format!("{} {}...{} · pullspace", view.repo, view.base, view.head)
+        }
     }
 }
 

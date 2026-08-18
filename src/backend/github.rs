@@ -38,6 +38,9 @@ const MAX_COMMENT_PAGES: u32 = 5;
 const MAX_COMMIT_PAGES: u32 = 3;
 /// And at most 300 files on a single commit, which is the same three pages.
 const MAX_COMMIT_FILE_PAGES: u32 = 3;
+/// And at most 300 on a comparison — all on the first page of it, whatever
+/// `per_page` says, which is why this is a count and not a number of pages.
+const MAX_COMPARE_FILES: usize = 300;
 /// 100 check runs a page. Three pages is three hundred jobs on one commit —
 /// past anything a person reads the results of one by one, and the panel says
 /// when it stopped there.
@@ -1084,6 +1087,25 @@ pub async fn repo_tree(token: &str, repo: &RepoRef, sha: &str) -> Result<Snapsho
 #[derive(Deserialize)]
 struct RawCompare {
     merge_base_commit: RawCommit,
+    #[serde(default)]
+    base_commit: RawCommit,
+    /// `identical`, `ahead`, `behind` or `diverged`, from the base's point of
+    /// view.
+    #[serde(default)]
+    status: String,
+    #[serde(default)]
+    ahead_by: u32,
+    #[serde(default)]
+    behind_by: u32,
+    /// Every commit between them, not only the ones on this page.
+    #[serde(default)]
+    total_commits: u32,
+    #[serde(default)]
+    commits: Vec<RawPrCommit>,
+    #[serde(default)]
+    files: Vec<RawFile>,
+    #[serde(default)]
+    html_url: String,
 }
 
 #[derive(Deserialize, Default)]
@@ -1523,6 +1545,11 @@ pub struct Commits {
     /// request, whose commits arrive in one go — see [`branch_commits`].
     #[serde(default)]
     pub pages: u32,
+    /// How many there are in all, where that is known — a comparison is asked
+    /// and answers, and `5798` next to a hundred rows is worth saying. Zero
+    /// where nobody said, which is everywhere else.
+    #[serde(default)]
+    pub total: u32,
 }
 
 #[derive(Deserialize)]
@@ -1597,6 +1624,8 @@ pub enum CommitFrom {
     Pr(PrHeader),
     /// One commit of a branch's history — which stays beside it.
     Branch(String),
+    /// One commit out of a comparison — which stays beside it, base first.
+    Compare(String, String),
 }
 
 /// One commit, opened the way a pull request is: the files it changes, diffed
@@ -1645,6 +1674,14 @@ impl CommitView {
     pub fn branch(&self) -> Option<&str> {
         match &self.from {
             CommitFrom::Branch(name) => Some(name),
+            _ => None,
+        }
+    }
+
+    /// And the comparison it was read out of, when it was read out of one.
+    pub fn compare(&self) -> Option<(&str, &str)> {
+        match &self.from {
+            CommitFrom::Compare(base, head) => Some((base, head)),
             _ => None,
         }
     }
@@ -1748,6 +1785,195 @@ pub async fn load_commit(token: &str, repo: &RepoRef, sha: &str) -> Result<Commi
     })
 }
 
+/// Two refs of one repository, and everything that lies between them.
+///
+/// The same shape as a [`PrDetail`] where it matters — two trees, a changed
+/// file list and the commits behind it — because it is the same question a
+/// pull request asks, without anybody having opened one. What it compares
+/// against is the merge base and not the tip of `base`, which is the comparison
+/// github.com's own compare page shows and the one that answers "what does this
+/// branch add" rather than "how do these two differ right now".
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+pub struct CompareView {
+    pub repo: RepoRef,
+    /// What is being compared into — the left-hand side, and the side whose
+    /// version of a file the diff reads as "before".
+    pub base: String,
+    /// And what is being compared in.
+    pub head: String,
+    /// The merge base: where the two last agreed, and what every diff here is
+    /// read against.
+    pub base_sha: String,
+    /// Where `head` points now.
+    pub head_sha: String,
+    /// And where `base` points now, which is not what anything is diffed
+    /// against — it is what `behind` is counted from.
+    pub base_tip: String,
+    /// GitHub's word for how the two stand: `identical`, `ahead`, `behind` or
+    /// `diverged`.
+    pub status: String,
+    /// How many commits `head` has that `base` does not, and the other way
+    /// about.
+    pub ahead: u32,
+    pub behind: u32,
+    pub files: Vec<PrFile>,
+    /// GitHub stops at 300 files on a comparison, and this says when it did.
+    pub truncated: bool,
+    /// Every file in the repository at `head_sha`, so the explorer shows the
+    /// whole thing rather than only what differs. Filled in by the caller, as
+    /// [`PrDetail`]'s is.
+    pub tree: Snapshot,
+    /// And at the merge base, which every left-hand side is read from.
+    pub base_tree: Snapshot,
+    /// The commits between them, oldest first — the first page of them, which
+    /// arrives with the comparison itself and costs nothing extra.
+    pub commits: Commits,
+    pub html_url: String,
+}
+
+impl CompareView {
+    pub fn blob_key(&self, path: &std::path::Path) -> Cow<'_, str> {
+        blob_key_in(&self.tree, &self.base_tree, &self.files, path)
+    }
+
+    pub fn blob_key_of(&self, f: &PrFile) -> Cow<'_, str> {
+        blob_key_of_in(&self.tree, &self.base_tree, f)
+    }
+
+    /// How the two stand, in words — what the bar says beside the two names.
+    ///
+    /// Both numbers where both are interesting, because "3 ahead" on its own
+    /// reads as the whole story on a branch that is also 40 behind.
+    pub fn summary(&self) -> String {
+        let commits = |n: u32| if n == 1 { "commit" } else { "commits" };
+        match (self.ahead, self.behind) {
+            (0, 0) => "identical".to_string(),
+            (ahead, 0) => format!("{ahead} {} ahead", commits(ahead)),
+            (0, behind) => format!("{behind} {} behind", commits(behind)),
+            (ahead, behind) => format!("{ahead} ahead · {behind} behind"),
+        }
+    }
+
+    /// Whether there is anything in `head` that `base` does not already have.
+    /// A comparison with nothing in it is not a broken one, and the bar says
+    /// which of the two reasons it is.
+    pub fn is_empty(&self) -> bool {
+        self.ahead == 0
+    }
+
+    /// Where this is on github.com.
+    pub fn html_url(&self) -> String {
+        if self.html_url.is_empty() {
+            return format!(
+                "https://github.com/{}/{}/compare/{}...{}",
+                self.repo.owner, self.repo.name, self.base, self.head
+            );
+        }
+        self.html_url.clone()
+    }
+}
+
+/// Compare two refs: what lies between them, and the files that differ.
+///
+/// One request. GitHub answers the whole comparison on the first page — up to
+/// 300 files, and the first hundred commits with it — so the pane that lists
+/// those commits costs nothing to open. Pages past the first carry commits
+/// alone, which is what [`compare_commits`] asks for.
+pub async fn load_compare(
+    token: &str,
+    repo: &RepoRef,
+    base: &str,
+    head: &str,
+) -> Result<CompareView> {
+    let raw: RawCompare = get_json(token, &compare_url(repo, base, head, 1))
+        .await
+        .with_context(|| format!("comparing {base} with {head}"))?;
+
+    // Where `head` actually is. The commits come back oldest first, so the last
+    // of them is the head — but only when they all came back: past a hundred,
+    // the last one on this page is somewhere in the middle, and a tree read at
+    // it would show the repository half way along the comparison.
+    let complete = raw.total_commits as usize <= raw.commits.len();
+    let last = raw.commits.last().map(|c| c.sha.clone());
+    let head_sha = match last {
+        // Nothing between them: whatever `head` names is the merge base itself.
+        None => raw.merge_base_commit.sha.clone(),
+        Some(sha) if complete && !sha.is_empty() => sha,
+        Some(sha) => match branch_head(token, repo, head).await {
+            Ok(resolved) => resolved,
+            // A ref this repository cannot resolve on its own, which is what a
+            // comparison across forks arrives as — `owner:branch`. The last
+            // commit on the page is not the head, and the explorer will show
+            // the repository as of it; the list of what differs, which is what
+            // the comparison is for, is right either way.
+            Err(_) => sha,
+        },
+    };
+    let base_sha = raw.merge_base_commit.sha;
+
+    Ok(CompareView {
+        tree: Snapshot::unknown(repo, &head_sha),
+        base_tree: Snapshot::unknown(repo, &base_sha),
+        repo: repo.clone(),
+        base: base.to_string(),
+        head: head.to_string(),
+        base_tip: raw.base_commit.sha,
+        status: raw.status,
+        ahead: raw.ahead_by,
+        behind: raw.behind_by,
+        truncated: raw.files.len() >= MAX_COMPARE_FILES,
+        files: raw.files.iter().map(file_of).collect(),
+        commits: Commits {
+            truncated: raw.commits.len() == HISTORY_PAGE,
+            total: raw.total_commits,
+            items: raw.commits.into_iter().map(commit_of).collect(),
+            pages: 1,
+        },
+        html_url: raw.html_url,
+        base_sha,
+        head_sha,
+    })
+}
+
+/// One more page of the commits between two refs, for the pane that lists them.
+///
+/// Oldest first, as the comparison itself is — so the page after the first is
+/// the commits *after* the ones already read, and the button that asks for it
+/// says so.
+pub async fn compare_commits(
+    token: &str,
+    repo: &RepoRef,
+    base: &str,
+    head: &str,
+    page: u32,
+) -> Result<Commits> {
+    let raw: RawCompare = get_json(token, &compare_url(repo, base, head, page))
+        .await
+        .with_context(|| format!("reading the commits between {base} and {head}"))?;
+    Ok(Commits {
+        truncated: raw.commits.len() == HISTORY_PAGE,
+        total: raw.total_commits,
+        items: raw.commits.into_iter().map(commit_of).collect(),
+        pages: page,
+    })
+}
+
+/// `base...head`, three dots, as github.com writes it and as the API reads it.
+///
+/// Three rather than two on purpose: it is the comparison against where the two
+/// last agreed, so what it shows is what `head` adds rather than everything
+/// that has happened on `base` since. Git forbids `..` inside a ref name, which
+/// is what makes the separator unambiguous however the two are called.
+fn compare_url(repo: &RepoRef, base: &str, head: &str, page: u32) -> String {
+    format!(
+        "{API}/repos/{}/{}/compare/{}...{}?per_page={HISTORY_PAGE}&page={page}",
+        encode_segment(&repo.owner),
+        encode_segment(&repo.name),
+        encode_ref(base),
+        encode_ref(head),
+    )
+}
+
 /// Every commit on a pull request — what the branch is made of, rather than
 /// what it adds up to.
 pub async fn pr_commits(token: &str, repo: &RepoRef, number: u64) -> Result<Commits> {
@@ -1763,6 +1989,9 @@ pub async fn pr_commits(token: &str, repo: &RepoRef, number: u64) -> Result<Comm
         items: raw.into_iter().map(commit_of).collect(),
         truncated,
         pages: 0,
+        // GitHub does not say how many a pull request has beyond the ones it
+        // hands over; `truncated` is the whole of what it will admit.
+        total: 0,
     })
 }
 
@@ -1792,6 +2021,8 @@ pub async fn branch_commits(
         .with_context(|| format!("reading the commits on {branch}"))?;
     Ok(Commits {
         truncated: raw.len() == HISTORY_PAGE,
+        // A branch has no end to count to, so there is no total to say.
+        total: 0,
         items: raw.into_iter().map(commit_of).collect(),
         pages: page,
     })
@@ -3551,6 +3782,29 @@ impl FetchJob {
             &view.repo,
             &view.parent_sha,
             &view.commit.sha,
+            &view.tree,
+            &view.base_tree,
+            rel,
+            f,
+        )
+    }
+
+    /// For any path of a comparison — read against the merge base, which is
+    /// what `base_sha` is.
+    pub fn in_compare(view: &CompareView, rel: &std::path::Path) -> Self {
+        Self::compare_build(view, rel, find_file(&view.files, rel))
+    }
+
+    /// [`in_compare`](Self::in_compare) for a caller already holding the file.
+    pub fn for_compare_change<'a>(view: &'a CompareView, f: &'a PrFile) -> Self {
+        Self::compare_build(view, &f.path, Some(f))
+    }
+
+    fn compare_build(view: &CompareView, rel: &std::path::Path, f: Option<&PrFile>) -> Self {
+        Self::between(
+            &view.repo,
+            &view.base_sha,
+            &view.head_sha,
             &view.tree,
             &view.base_tree,
             rel,

@@ -118,20 +118,32 @@ pub(super) fn PickerFoot(form: Signal<Option<bool>>, showing: bool) -> Element {
         return rsx! {};
     }
 
+    // A rejection belongs beside the box that will answer it, and while the
+    // form is open that box is right there — so the strip carries the error
+    // only when the form is folded away.
+    let told_here = match &account {
+        Account::Failed(e) if !showing => Some(e.clone()),
+        _ => None,
+    };
+    let told_in_form = match &account {
+        Account::Failed(e) if showing => Some(e.clone()),
+        _ => None,
+    };
+    let verifying = matches!(account, Account::Verifying);
+
     rsx! {
         div { class: "ghfoot",
             match account {
-                Account::SignedOut => rsx! {
-                    AccountLine { form, showing, error: None }
-                },
-                Account::Failed(e) => rsx! {
-                    AccountLine { form, showing, error: Some(e) }
-                },
                 Account::SignedIn { login } => rsx! { SignedIn { login } },
                 Account::Checking => rsx! {},
+                // Signed out, rejected, or checking a paste: the same line,
+                // because all three are the same state to browse in.
+                _ => rsx! {
+                    AccountLine { form, showing, error: told_here }
+                },
             }
             if showing {
-                SignIn {}
+                SignIn { form, busy: verifying, error: told_in_form }
             }
             LocalCopy {}
         }
@@ -215,6 +227,12 @@ const NEW_TOKEN_URL: &str = "https://github.com/settings/personal-access-tokens/
 /// is up from the first frame, while the saved token is still being checked, so
 /// a rejection arrives after whatever was decided on the way in.
 pub(super) fn form_open(form: &Signal<Option<bool>>, account: &Account) -> bool {
+    // Signed in, there is nothing left for it to do, whatever was asked for
+    // before — so it folds itself away on the way in rather than sitting under
+    // the line that says the token worked.
+    if matches!(account, Account::SignedIn { .. }) {
+        return false;
+    }
     form.read().unwrap_or(matches!(account, Account::Failed(_)))
 }
 
@@ -259,44 +277,109 @@ fn AccountLine(form: Signal<Option<bool>>, showing: bool, error: Option<String>)
 /// So: paste one. It is stored on this origin and sent only to
 /// api.github.com — a shorter path than any OAuth flow would give it, and one
 /// you can check for yourself in the network tab.
+///
+/// Which leaves the part nobody enjoys: putting a secret you cannot read into a
+/// box, and waiting. So the field can be unmasked, the shape of what is in it is
+/// checked before GitHub's opinion is asked, the button says it is working while
+/// it works, and a rejection lands under the field with what you pasted still
+/// in it.
 #[component]
-fn SignIn() -> Element {
+fn SignIn(form: Signal<Option<bool>>, busy: bool, error: Option<String>) -> Element {
     let st = use_context::<St>();
     let mut typed = use_signal(String::new);
+    // Masked by default, because a bearer token is a password and
+    // shoulder-surfing is real — and readable on request, because a masked
+    // field cannot be proof-read, and the usual fault in a pasted token is one
+    // you could have seen.
+    let mut shown = use_signal(|| false);
+
     let value = typed.read().clone();
-    let ready = !value.trim().is_empty();
+    let peeking = *shown.read();
+    let kind = if peeking { "text" } else { "password" };
+    let peek_why = if peeking {
+        "Mask the token again"
+    } else {
+        "Show the token as text"
+    };
+    let ready = !value.is_empty() && !busy;
+    let refused = error.is_some();
+    // Said before GitHub is asked, because the paste that goes wrong usually is
+    // not a bad token but the wrong text altogether — the token's name, the URL
+    // of the page it was made on, half of a wrapped line.
+    let odd_shape = !value.is_empty() && !refused && !looks_like_token(&value);
 
     rsx! {
         div { class: "ghsection",
-            div { class: "ghlabel", "GitHub token" }
-            div { class: "ghhelp",
-                "A token adds private repositories, and raises GitHub's limit of 60 API "
-                "requests an hour to 5000 — file contents come off the CDN and count "
-                "against neither."
+            div { class: "ghrow",
+                span { class: "ghlabel", "GitHub token" }
+                span { class: "spacer" }
+                button {
+                    class: "textlink",
+                    onclick: move |_| open_browser(NEW_TOKEN_URL),
+                    "Create one on GitHub →"
+                }
             }
-            input {
-                class: "ghinput",
-                // A bearer token is a password, and shoulder-surfing is real.
-                r#type: "password",
-                placeholder: "github_pat_… or ghp_…",
-                spellcheck: "false",
-                autocomplete: "off",
-                value: "{value}",
-                // This form is only on screen because somebody asked for it,
-                // and what they asked for is somewhere to paste.
-                onmounted: move |e| async move {
-                    let _ = e.set_focus(true).await;
-                },
-                oninput: move |e| typed.set(e.value()),
-                // Pasting then hitting return is the whole interaction.
-                onkeydown: move |e| {
-                    if e.key() == Key::Enter {
-                        let token = typed.peek().trim().to_string();
-                        if !token.is_empty() {
-                            spawn_forever(use_pasted_token(st, token));
+            div { class: "ghhelp",
+                "Adds private repositories, and raises GitHub's 60 API requests an hour to "
+                "5000 — file contents come off the CDN and count against neither."
+            }
+            div { class: "ghrow tokenrow",
+                input {
+                    class: "ghinput",
+                    r#type: "{kind}",
+                    placeholder: "github_pat_… or ghp_…",
+                    spellcheck: "false",
+                    autocomplete: "off",
+                    autocapitalize: "off",
+                    // Held rather than disabled while GitHub is asked: a
+                    // read-only field keeps the caret, so a rejection lands
+                    // back in a box you are already typing in.
+                    readonly: busy,
+                    value: "{value}",
+                    // This form is only on screen because somebody asked for
+                    // it, and what they asked for is somewhere to paste.
+                    onmounted: move |e| async move {
+                        let _ = e.set_focus(true).await;
+                    },
+                    // Trimmed on the way in. A token copied off a web page
+                    // arrives with a newline on it often enough, and the count
+                    // of dots in a masked field ought to be the count of
+                    // characters that will be sent.
+                    oninput: move |e| {
+                        typed.set(e.value().trim().to_string());
+                        dismiss(st, form);
+                    },
+                    // Pasting then hitting return is the whole interaction.
+                    onkeydown: move |e| {
+                        if e.key() == Key::Enter {
+                            submit(st, form, typed.peek().trim().to_string());
                         }
-                    }
-                },
+                    },
+                }
+                button {
+                    class: "textlink tokenpeek",
+                    title: "{peek_why}",
+                    onclick: move |_| shown.toggle(),
+                    if peeking { "Hide" } else { "Show" }
+                }
+                button {
+                    class: "primarybtn",
+                    disabled: !ready,
+                    onclick: move |_| submit(st, form, typed.peek().trim().to_string()),
+                    if busy { "Checking…" } else { "Save token" }
+                }
+            }
+            if let Some(e) = error {
+                div { class: "gherror", "{e}" }
+            }
+            if odd_shape {
+                div { class: "ghwarn",
+                    "That does not look like a token — the ones GitHub issues start with "
+                    code { "github_pat_" }
+                    " or "
+                    code { "ghp_" }
+                    ". Saving it will ask GitHub anyway."
+                }
             }
             div { class: "ghhelp",
                 "A fine-grained token needs read access to "
@@ -309,30 +392,8 @@ fn SignIn() -> Element {
                 code { "repo" }
                 "."
             }
-            button {
-                class: "textlink",
-                onclick: move |_| open_browser(NEW_TOKEN_URL),
-                "Create a token on GitHub →"
-            }
-        }
-        div { class: "ghsection",
-            button {
-                class: "primarybtn",
-                disabled: !ready,
-                onclick: move |_| {
-                    let token = typed.peek().trim().to_string();
-                    if token.is_empty() {
-                        return;
-                    }
-                    // Root scope, not this component's: signing in unmounts
-                    // SignIn, and Dioxus cancels a task when the component that
-                    // spawned it goes away.
-                    spawn_forever(use_pasted_token(st, token));
-                },
-                "Save token"
-            }
             div { class: "ghhelp",
-                "Kept in this browser's local storage, on this site only. It is sent to "
+                "Kept in this browser's local storage, on this site only, and sent to "
                 code { "api.github.com" }
                 " and nowhere else — there is no pullspace server to send it to."
             }
@@ -340,11 +401,55 @@ fn SignIn() -> Element {
     }
 }
 
+/// The prefixes GitHub puts on the tokens it issues: fine-grained, classic, and
+/// the three the OAuth and App flows mint.
+const TOKEN_PREFIXES: [&str; 5] = ["github_pat_", "ghp_", "gho_", "ghs_", "ghu_"];
+
+/// The shortest a token of any of those kinds is: the four-character prefixes
+/// come to forty in all, and `github_pat_` runs to about ninety. Enough to catch
+/// half a paste.
+const TOKEN_MIN: usize = 40;
+
+/// Whether what has been pasted could be a token at all.
+///
+/// The shape only — GitHub is the authority on whether a real one is any good,
+/// and this is a caution rather than a gate, because the list above is theirs
+/// to add to and not ours to be certain about.
+fn looks_like_token(v: &str) -> bool {
+    TOKEN_PREFIXES.iter().any(|p| v.starts_with(p))
+        && v.len() >= TOKEN_MIN
+        && !v.contains(char::is_whitespace)
+}
+
+/// Take GitHub's last word on the matter off the screen, now that the reader is
+/// busy replacing what it was about.
+///
+/// It pins the form open first: a rejection is what opens one unasked, so
+/// clearing the rejection is also what would fold it away mid-sentence.
+fn dismiss(st: St, mut form: Signal<Option<bool>>) {
+    let mut account = st.account;
+    if matches!(&*account.peek(), Account::Failed(_)) {
+        form.set(Some(true));
+        account.set(Account::SignedOut);
+    }
+}
+
+/// Send what is in the box, if there is anything in it.
+fn submit(st: St, form: Signal<Option<bool>>, token: String) {
+    if token.is_empty() || matches!(&*st.account.peek(), Account::Verifying) {
+        return;
+    }
+    dismiss(st, form);
+    // Root scope, not the form's: a token that verifies unmounts the form, and
+    // Dioxus cancels a task when the component that spawned it goes away.
+    spawn_forever(use_pasted_token(st, token));
+}
+
 /// Verify a pasted token before keeping it — a typo should not be something
 /// you have to sign out of.
 async fn use_pasted_token(st: St, token: String) {
     let mut account = st.account;
-    account.set(Account::Checking);
+    account.set(Account::Verifying);
     match github::viewer_login(&token).await {
         Ok(login) => {
             auth::save_token(&token);
@@ -1551,6 +1656,33 @@ mod tests {
             stars: 0,
             pushed: String::new(),
         }
+    }
+
+    #[test]
+    fn the_shape_check_passes_the_tokens_github_issues() {
+        // 4 + 36 and 11 + 82, which is what the two kinds measure.
+        assert!(looks_like_token(&format!("ghp_{}", "a".repeat(36))));
+        assert!(looks_like_token(&format!("github_pat_{}", "a".repeat(82))));
+        // The App and OAuth flows mint the other three.
+        assert!(looks_like_token(&format!("ghs_{}", "a".repeat(36))));
+    }
+
+    #[test]
+    fn the_shape_check_catches_the_paste_that_went_wrong() {
+        // The wrong text entirely: a name, a URL, a whole other secret.
+        assert!(!looks_like_token("my laptop token"));
+        assert!(!looks_like_token(NEW_TOKEN_URL));
+        // Half of one, which is what a paste out of a wrapped line gives.
+        assert!(!looks_like_token("ghp_abc123"));
+        // Two of them, or a token with a line break landed in the middle.
+        assert!(!looks_like_token(&format!(
+            "ghp_{} ghp_{}",
+            "a".repeat(36),
+            "b".repeat(36)
+        )));
+        // Nothing is not a fault worth saying anything about — the caller
+        // checks for empty before it asks.
+        assert!(!looks_like_token(""));
     }
 
     #[test]

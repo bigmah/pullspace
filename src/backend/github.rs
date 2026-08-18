@@ -290,7 +290,13 @@ async fn get_raw(token: &str, url: &str, accept: &str) -> Result<(u16, Vec<u8>)>
     let reply = http::get(url, &headers).await?;
 
     if reply.status == 401 {
-        bail!("GitHub rejected the token (401). Sign in again.");
+        // Read on the sign-in form as often as anywhere else, so it says what
+        // is wrong rather than what to do about it — "sign in again" is no help
+        // to somebody in the middle of signing in.
+        bail!(
+            "GitHub rejected the token (401). It may have expired, been revoked, \
+             or been copied short."
+        );
     }
     // An emptied budget is a 403 for search and for the API at large, a 429 when
     // GitHub feels strongly about it, and occasionally a 404. What tells them

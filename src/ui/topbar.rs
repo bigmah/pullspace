@@ -292,7 +292,7 @@ pub fn TopBar() -> Element {
     };
 
     let account_label = match &*st.account.read() {
-        Account::Checking => "checking…".to_string(),
+        Account::Checking | Account::Verifying => "checking…".to_string(),
         Account::SignedOut => "Sign in".to_string(),
         Account::Failed(_) => "sign-in failed".to_string(),
         Account::SignedIn { login } => login.clone(),

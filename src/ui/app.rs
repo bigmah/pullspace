@@ -311,6 +311,13 @@ impl Workspace {
 pub enum Account {
     /// Startup: looking for a saved token.
     Checking,
+    /// A pasted token, on its way to GitHub to be checked.
+    ///
+    /// Kept apart from [`Account::Checking`] because the two mean different
+    /// things to the picker: that one is the whole panel waiting to learn what
+    /// it may ask for, this one is one form waiting on one answer, with the
+    /// panel live around it.
+    Verifying,
     SignedOut,
     SignedIn {
         login: String,

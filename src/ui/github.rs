@@ -22,9 +22,10 @@ use dioxus::prelude::*;
 use crate::backend::auth::{self, Token, open_browser};
 use crate::backend::blobs;
 use crate::backend::github::{
-    self, OwnerHit, PR_PAGE, PrHeader, PrState, PrSummary, RepoHit, RepoRef, RepoView,
+    self, CommitFrom, OwnerHit, PR_PAGE, PrState, PrSummary, RepoHit, RepoRef, RepoView,
     parse_commit_target, parse_owner, parse_target,
 };
+use crate::backend::route;
 
 use super::app::{Account, Fetch, Got, PrList, St};
 use super::compat;
@@ -907,7 +908,7 @@ fn RepoPicker(autofocus: bool) -> Element {
                 input {
                     class: "ghinput",
                     r#type: "text",
-                    placeholder: "Search GitHub · owner/repo · or paste a link to a PR or commit",
+                    placeholder: "Search GitHub · owner/repo · or paste a link to a PR, branch or commit",
                     spellcheck: "false",
                     autocomplete: "off",
                     value: "{typed}",
@@ -1008,7 +1009,7 @@ fn RepoPicker(autofocus: bool) -> Element {
                 } else if typed.trim().chars().count() < MIN_QUERY {
                     div { class: "ghnote",
                         "Type a repository, organisation or user name to search GitHub, \
-                         or paste a link to a pull request or a commit."
+                         or paste a link to a pull request, a branch or a commit."
                     }
                 } else {
                     div { class: "ghnote", "Nothing on GitHub matches “{typed}”." }
@@ -1203,14 +1204,19 @@ fn do_sign_out(st: St) {
     p.set(None);
 }
 
-/// Load whatever the user typed: a repo lists its PRs, a PR link opens it, and
-/// a link to a commit opens that commit's diff.
+/// Load whatever the user typed: a repo lists its PRs, a PR link opens it, a
+/// link to a branch browses it, and a link to a commit opens that commit's
+/// diff.
 async fn open_target(st: St) {
     let raw = st.repo_input.peek().clone();
     // Before the repository: `owner/repo/commit/<sha>` names a repository as
     // well, and answering with that one would drop the half that was pasted.
     if let Some((repo, sha)) = parse_commit_target(&raw) {
-        return open_commit(st, repo, sha, None).await;
+        return open_commit(st, repo, sha, CommitFrom::Alone).await;
+    }
+    // And `owner/repo/tree/<branch>`, for the same reason.
+    if let Some((repo, branch)) = route::branch_target(&raw) {
+        return browse_branch(st, repo, branch, None).await;
     }
     let Some((repo, number)) = parse_target(&raw) else {
         let mut fetch = st.fetch;
@@ -1270,21 +1276,55 @@ pub(super) async fn browse_repo(st: St, repo: RepoRef) {
         Err(e) => return fetch.set(Fetch::Failed(format!("{e:#}"))),
     };
 
+    open_tree(st, repo, head.branch, head.sha, true).await;
+}
+
+/// Open a repository at one of its branches: the code at that branch's tip.
+///
+/// The sha is passed in wherever it is already known — a row of the branch list
+/// carries it — and looked up when it is not, which is what a link naming a
+/// branch arrives as. `⟳` comes through here with no sha for exactly that
+/// reason: what the branch points at now is the thing being asked for.
+pub(super) async fn browse_branch(st: St, repo: RepoRef, branch: String, sha: Option<String>) {
+    let token = st.api_token();
+    let mut fetch = st.fetch;
+
+    let sha = match sha {
+        Some(sha) => sha,
+        None => {
+            fetch.set(Fetch::Working(format!("Reading {branch}…")));
+            match github::branch_head(&token, &repo, &branch).await {
+                Ok(sha) => sha,
+                Err(e) => return fetch.set(Fetch::Failed(format!("{e:#}"))),
+            }
+        }
+    };
+
+    open_tree(st, repo, branch, sha, false).await;
+}
+
+/// The half a browse and a branch have in common: the file list at one commit,
+/// and the repository put on screen at it.
+async fn open_tree(st: St, repo: RepoRef, branch: String, sha: String, default: bool) {
+    let token = st.api_token();
+    let mut fetch = st.fetch;
+
     fetch.set(Fetch::Working("Reading the file tree…".to_string()));
     // A pull request with no readable tree still has its changed files to show.
     // A repository has nothing at all, so this is where it stops — with the
     // list still on screen, rather than on an explorer that looks empty.
-    let Some(tree) = tree_at(&token, &repo, &head.sha).await else {
+    let Some(tree) = tree_at(&token, &repo, &sha).await else {
         return fetch.set(Fetch::Failed(format!(
-            "Could not read the file list for {repo}."
+            "Could not read the file list for {repo} at {branch}."
         )));
     };
 
     fetch.set(Fetch::Idle);
     st.enter_repo(RepoView {
         repo,
-        branch: head.branch,
-        head_sha: head.sha,
+        branch,
+        default,
+        head_sha: sha,
         tree,
     });
 }
@@ -1296,11 +1336,11 @@ pub(super) async fn browse_repo(st: St, repo: RepoRef) {
 /// side — because from the explorer down it is the same thing: two commits and
 /// a list of what differs between them.
 ///
-/// `pr` is the pull request it was opened out of, when it was opened out of
-/// one. It travels no further than the conversation pane, which goes on showing
-/// that pull request's description and discussion while one of its commits is
-/// being read.
-pub(super) async fn open_commit(st: St, repo: RepoRef, sha: String, pr: Option<PrHeader>) {
+/// `from` is what it was opened out of, when it was opened out of anything — a
+/// pull request, or a branch. It travels no further than the pane on the right,
+/// which goes on showing that pull request's discussion, or that branch's
+/// history, while one commit of it is being read.
+pub(super) async fn open_commit(st: St, repo: RepoRef, sha: String, from: CommitFrom) {
     let token = st.api_token();
     let mut fetch = st.fetch;
 
@@ -1309,7 +1349,7 @@ pub(super) async fn open_commit(st: St, repo: RepoRef, sha: String, pr: Option<P
         Ok(v) => v,
         Err(e) => return fetch.set(Fetch::Failed(format!("{e:#}"))),
     };
-    view.pr = pr;
+    view.from = from;
 
     fetch.set(Fetch::Working("Reading the file tree…".to_string()));
     // As for a pull request: a tree that will not load costs the explorer its

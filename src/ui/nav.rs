@@ -14,12 +14,12 @@ use std::time::Duration;
 
 use dioxus::prelude::*;
 
-use crate::backend::github::RepoRef;
+use crate::backend::github::{CommitFrom, RepoRef};
 use crate::backend::route::{self, Route, Target};
 
 use super::app::{Account, St};
 use super::compat;
-use super::github::{browse_repo, open_commit, open_pr};
+use super::github::{browse_branch, browse_repo, open_commit, open_pr};
 
 /// How often to look in on the saved token while it is being checked. Short
 /// enough not to be felt on the way in to a link.
@@ -101,17 +101,24 @@ fn go(st: St, asked: Route) {
             // screen when the URL changes.
             spawn_forever(browse_repo(st, repo));
         }
+        // A link naming a branch says nothing about where its tip is — that is
+        // the point of naming a branch rather than a commit — so it is looked
+        // up on the way in.
+        Target::Branch(repo, branch) => {
+            name_it(st, &repo);
+            spawn_forever(browse_branch(st, repo, branch, None));
+        }
         Target::Pr(repo, number) => {
             name_it(st, &repo);
             spawn_forever(open_pr(st, repo, number));
         }
         // A commit reached by its own link — Back out of one, or a link
-        // somebody sent — arrives without the pull request it may have been
-        // opened out of. It is the commit that was linked to, so the commit is
-        // what opens.
+        // somebody sent — arrives without the pull request or the branch it may
+        // have been opened out of. It is the commit that was linked to, so the
+        // commit is what opens.
         Target::Commit(repo, sha) => {
             name_it(st, &repo);
-            spawn_forever(open_commit(st, repo, sha, None));
+            spawn_forever(open_commit(st, repo, sha, CommitFrom::Alone));
         }
     }
 }

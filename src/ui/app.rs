@@ -11,8 +11,8 @@ use crate::backend::auth::Token;
 use crate::backend::clone::Progress;
 use crate::backend::difftool::Expansion;
 use crate::backend::github::{
-    Annotation, Checks, CommitView, Commits, FetchJob, PrDetail, PrHeader, PrState, PrSummary,
-    RepoRef, RepoView, Snapshot, Thread, statuses_of,
+    Annotation, Branches, Checks, CommitFrom, CommitView, Commits, FetchJob, PrDetail, PrHeader,
+    PrState, PrSummary, RepoRef, RepoView, Snapshot, Thread, statuses_of,
 };
 use crate::backend::highlight;
 use crate::backend::markdown;
@@ -121,25 +121,60 @@ impl Workspace {
     pub fn header(&self) -> Option<PrHeader> {
         match self {
             Workspace::Pr(pr) => Some(pr.header()),
-            Workspace::Commit(view) => view.pr.clone(),
+            Workspace::Commit(view) => view.pr().cloned(),
             _ => None,
         }
     }
 
-    /// The commit whose checks the pane shows: the head of the pull request, or
-    /// whichever of its commits is being read.
+    /// Whether there is a pull request behind what is open — the one open, or
+    /// the one a commit was read out of.
     ///
-    /// Not the pull request, because a check is a fact about a commit — stepping
-    /// into one of them asks a different question and gets a different answer.
-    /// `None` wherever the pane itself is not, which is anywhere there is no
-    /// pull request behind what is open — see [`header`](Self::header).
+    /// What decides whether the pane on the right leads with a conversation or
+    /// with the branches. Cheap on purpose: [`header`](Self::header) answers
+    /// the same question by cloning half a pull request.
+    pub fn has_review(&self) -> bool {
+        match self {
+            Workspace::Pr(_) => true,
+            Workspace::Commit(view) => view.pr().is_some(),
+            _ => false,
+        }
+    }
+
+    /// Which list of commits belongs beside what is open: everything on a pull
+    /// request, or the history of a branch.
+    ///
+    /// `None` for a commit reached by a link of its own, which has neither
+    /// around it — and for nothing being open at all.
+    pub fn commits_key(&self) -> Option<CommitSource> {
+        match self {
+            Workspace::Empty => None,
+            Workspace::Pr(pr) => Some(CommitSource::Pr(pr.repo.clone(), pr.number)),
+            Workspace::Repo(view) => {
+                Some(CommitSource::Branch(view.repo.clone(), view.branch.clone()))
+            }
+            Workspace::Commit(view) => match &view.from {
+                CommitFrom::Alone => None,
+                CommitFrom::Pr(pr) => Some(CommitSource::Pr(view.repo.clone(), pr.number)),
+                CommitFrom::Branch(branch) => {
+                    Some(CommitSource::Branch(view.repo.clone(), branch.clone()))
+                }
+            },
+        }
+    }
+
+    /// The commit whose checks the pane shows: the head of the pull request,
+    /// the tip of the branch being browsed, or whichever single commit is being
+    /// read.
+    ///
+    /// A check is a fact about a commit and not about the thing it was reached
+    /// through — so stepping into one of them asks a different question and
+    /// gets a different answer. `None` only with nothing open.
     pub fn checks_key(&self) -> Option<(RepoRef, String)> {
         match self {
+            Workspace::Empty => None,
             Workspace::Pr(pr) => Some((pr.repo.clone(), pr.head_sha.clone())),
-            Workspace::Commit(view) if view.pr.is_some() => {
-                Some((view.repo.clone(), view.commit.sha.clone()))
-            }
-            _ => None,
+            Workspace::Repo(view) => Some((view.repo.clone(), view.head_sha.clone())),
+            Workspace::Commit(view) => Some((view.repo.clone(), view.commit.sha.clone())),
         }
     }
 
@@ -147,9 +182,7 @@ impl Workspace {
     pub fn review_key(&self) -> Option<(RepoRef, u64)> {
         match self {
             Workspace::Pr(pr) => Some((pr.repo.clone(), pr.number)),
-            Workspace::Commit(view) => {
-                Some((view.repo.clone(), view.pr.as_ref().map(|p| p.number)?))
-            }
+            Workspace::Commit(view) => Some((view.repo.clone(), view.pr()?.number)),
             _ => None,
         }
     }
@@ -216,7 +249,11 @@ impl Workspace {
         match self {
             Workspace::Empty => Target::Home,
             Workspace::Pr(pr) => Target::Pr(pr.repo.clone(), pr.number),
-            Workspace::Repo(view) => Target::Repo(view.repo.clone()),
+            // A link with no branch in it is the repository at whatever its
+            // default branch is now, which is the right link for the one and
+            // the wrong link for any other.
+            Workspace::Repo(view) if view.default => Target::Repo(view.repo.clone()),
+            Workspace::Repo(view) => Target::Branch(view.repo.clone(), view.branch.clone()),
             Workspace::Commit(view) => Target::Commit(view.repo.clone(), view.commit.sha.clone()),
         }
     }
@@ -310,7 +347,38 @@ pub enum Conversation {
     Failed(String),
 }
 
-/// The open pull request's commits — what its branch is made of.
+/// Where the commits in the pane come from — the two lists worth reading one
+/// commit at a time.
+///
+/// It is what the list is keyed by rather than a label on it: stepping into one
+/// of the commits keeps the list it was clicked in, and the way that is decided
+/// is by asking whether the answer to this has changed.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum CommitSource {
+    /// Every commit on a pull request, oldest first — the order they were
+    /// written in.
+    Pr(RepoRef, u64),
+    /// A branch's history, newest first, a page at a time.
+    Branch(RepoRef, String),
+}
+
+impl CommitSource {
+    pub fn repo(&self) -> &RepoRef {
+        match self {
+            CommitSource::Pr(repo, _) | CommitSource::Branch(repo, _) => repo,
+        }
+    }
+
+    /// The branch this is the history of, when it is one.
+    pub fn branch(&self) -> Option<&str> {
+        match self {
+            CommitSource::Branch(_, name) => Some(name),
+            CommitSource::Pr(..) => None,
+        }
+    }
+}
+
+/// The commits beside what is open — a pull request's, or a branch's.
 ///
 /// Idle until somebody asks, unlike the conversation: the commits are one more
 /// request, and a review that never opens the tab should not spend it.
@@ -319,6 +387,32 @@ pub enum CommitList {
     Idle,
     Loading,
     Ready(Box<Commits>),
+    /// A page of history in hand and an older one on its way — the list stays
+    /// on screen while it comes, since it is what was being read.
+    More(Box<Commits>),
+    Failed(String),
+}
+
+impl CommitList {
+    /// The commits it holds, if it holds any yet.
+    pub fn items(&self) -> Option<&Commits> {
+        match self {
+            CommitList::Ready(c) | CommitList::More(c) => Some(c),
+            _ => None,
+        }
+    }
+}
+
+/// The branches of the repository whatever is open belongs to.
+///
+/// Asked for on the same terms as the commits: one request, and only once
+/// somebody opens the tab. Kept for as long as that repository is, since
+/// stepping through its branches is exactly what the list is for.
+#[derive(Clone, PartialEq)]
+pub enum BranchList {
+    Idle,
+    Loading,
+    Ready(Box<Branches>),
     Failed(String),
 }
 
@@ -347,13 +441,43 @@ pub enum Annots {
     Failed(String),
 }
 
-/// Which third of the conversation pane is on show.
-#[derive(Clone, Copy, PartialEq, Eq, Default)]
+/// Which list the pane on the right is showing.
+///
+/// Three at a time, not four: [`Talk`](Self::Talk) is the heading of something
+/// with a pull request behind it and [`Branches`](Self::Branches) the heading
+/// of something without one, so the two are never offered together — see
+/// `ConvPane`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum ConvTab {
     #[default]
     Talk,
+    Branches,
     Commits,
     Checks,
+}
+
+/// Which of the pane's headings is actually on show.
+///
+/// The one somebody last picked, unless what is open does not have it: a
+/// repository read on its own has no conversation, and a commit reached by a
+/// link of its own has no list of commits behind it. Both fall back to the
+/// heading that leads the pane for what *is* open.
+///
+/// A free function over plain values because two things have to agree about it
+/// — the pane that draws the list, and the effect that goes and fetches what
+/// the list is of. A tab shown by one and not noticed by the other is a pane
+/// that says "Loading…" for ever.
+pub fn showing_tab(tab: ConvTab, ws: &Workspace) -> ConvTab {
+    let first = if ws.has_review() {
+        ConvTab::Talk
+    } else {
+        ConvTab::Branches
+    };
+    match tab {
+        ConvTab::Talk | ConvTab::Branches => first,
+        ConvTab::Commits if ws.commits_key().is_none() => first,
+        other => other,
+    }
 }
 
 /// Somewhere the reader has been: a file, how it was being shown, and the line
@@ -533,8 +657,12 @@ pub struct St {
     /// comes back instantly and without a second trip to GitHub.
     pub conv: Signal<Conversation>,
     pub conv_open: Signal<bool>,
-    /// And its commits, which the same pane shows in place of them.
+    /// And its commits, which the same pane shows in place of them — or the
+    /// history of the branch being browsed, which is the same list of a
+    /// different thing.
     pub commits: Signal<CommitList>,
+    /// And the branches of the repository all of it is inside.
+    pub branches: Signal<BranchList>,
     /// And what ran against the commit on screen — the third of the three.
     pub checks: Signal<CheckList>,
     /// What each opened check marked up, by check run id.
@@ -588,6 +716,13 @@ impl St {
             Account::SignedIn { login } => login.clone(),
             _ => String::new(),
         }
+    }
+
+    /// [`showing_tab`], for the two signals it is about. A reactive read of
+    /// both: the pane redraws and the fetches re-run when either moves.
+    pub fn conv_showing(&self) -> ConvTab {
+        let held = self.workspace.read();
+        showing_tab(*self.conv_tab.read(), &held)
     }
 
     fn bump_tick(&self) {
@@ -692,23 +827,38 @@ impl St {
     /// no pull request in it is being opened to be read, and the front page is
     /// what it is written to be read from — an empty pane with a button in it
     /// is not the answer to "show me this repository".
+    ///
+    /// Switching branch is the exception, and is why `was_reading` exists: the
+    /// question there is what this file looks like over there, so the file
+    /// being read follows the switch wherever the other branch still has it.
     pub fn enter_repo(&self, view: RepoView) {
-        let reload = self
-            .workspace
-            .peek()
-            .repo()
-            .is_some_and(|open| open.repo == view.repo);
+        let (reload, same_repo) = {
+            let held = self.workspace.peek();
+            let open = held.repo();
+            (
+                open.is_some_and(|open| open.repo == view.repo && open.branch == view.branch),
+                open.is_some_and(|open| open.repo == view.repo),
+            )
+        };
+        let was_reading = self.open.peek().clone();
         let readme = markdown::readme_of(view.tree.paths());
         let linked = self.enter(Workspace::Repo(Box::new(view)), reload);
         // Not on a reload: that keeps whatever was being read, and coming back
         // to the README is a click on the tree away. Nor when the link that
         // brought us here named a file — that file is the front page it asked
         // for.
-        if !reload
-            && !linked
-            && let Some(readme) = readme
-        {
-            self.open_file(readme);
+        if reload || linked {
+            return;
+        }
+        // The same file on the other branch, when the other branch has it. A
+        // branch that deleted it, or a different repository altogether, falls
+        // through to the front page.
+        let carried = same_repo
+            .then_some(was_reading)
+            .flatten()
+            .filter(|path| self.has_file(path));
+        if let Some(path) = carried.or(readme) {
+            self.open_file(path);
         }
     }
 
@@ -749,16 +899,16 @@ impl St {
         self.forget_contents();
         let mut cloning = self.cloning;
         cloning.set(None);
-        // The conversation and the commit list belong to a pull request, not to
-        // whichever of its commits is on screen — so stepping from a pull
-        // request into one of its commits, or from one commit to the next,
-        // keeps both rather than fetching them again.
+        // The conversation belongs to a pull request, not to whichever of its
+        // commits is on screen — so stepping from a pull request into one of
+        // its commits, or from one commit to the next, keeps it rather than
+        // fetching it again.
         //
-        // Dropped here rather than when the new ones land, so the pane never
+        // Dropped here rather than when the new one lands, so the pane never
         // shows the last pull request's comments under this one's title.
         //
         // Not on a reload, though: `⟳` means fetch all of it again, and the
-        // conversation and the commits are part of what may have moved.
+        // conversation is part of what may have moved.
         let same_review = !reload
             && self
                 .workspace
@@ -768,12 +918,36 @@ impl St {
         if !same_review {
             let mut conv = self.conv;
             conv.set(Conversation::Loading);
+        }
+        // The commits are the same question for longer: stepping from a pull
+        // request into one of its commits keeps that list, and so does stepping
+        // from a branch into one of the commits on it — which is what makes
+        // reading a branch a matter of clicking down the pane beside it.
+        let same_commits = !reload
+            && self
+                .workspace
+                .peek()
+                .commits_key()
+                .is_some_and(|was| Some(was) == ws.commits_key());
+        if !same_commits {
             // Idle rather than empty: it is what has the pane go and fetch the
             // commits the moment somebody looks at the tab, and — on a reload —
             // what picks up whatever was just pushed. Before the workspace is
             // written, since that write is what the fetch hangs off.
             let mut commits = self.commits;
             commits.set(CommitList::Idle);
+        }
+        // And the branches outlive both, because they are a fact about the
+        // repository — and every pull request, branch and commit of one is
+        // inside it.
+        let same_repo = !reload && {
+            let held = self.workspace.peek();
+            held.repo_ref()
+                .is_some_and(|was| Some(was) == ws.repo_ref())
+        };
+        if !same_repo {
+            let mut branches = self.branches;
+            branches.set(BranchList::Idle);
         }
         // The checks are asked again more often than either, because they are
         // about the commit and not about the pull request: stepping from a
@@ -880,6 +1054,8 @@ impl St {
         w.set(Workspace::Empty);
         let mut commits = self.commits;
         commits.set(CommitList::Idle);
+        let mut branches = self.branches;
+        branches.set(BranchList::Idle);
         let mut checks = self.checks;
         checks.set(CheckList::Idle);
         self.forget_annotations();
@@ -1331,6 +1507,7 @@ pub fn App() -> Element {
             conv: root(Conversation::Loading),
             conv_open: root(true),
             commits: root(CommitList::Idle),
+            branches: root(BranchList::Idle),
             checks: root(CheckList::Idle),
             annots: root(HashMap::new()),
             conv_tab: root(ConvTab::default()),
@@ -1542,25 +1719,41 @@ pub fn App() -> Element {
         spawn_forever(super::github::load_repo_prs(st, repo));
     });
 
-    // And the open pull request's commits, once somebody looks at the tab they
+    // And the commits beside whatever is open — a pull request's, or the
+    // history of the branch being browsed — once somebody looks at the tab they
     // are under. One request, spent on being asked for rather than on every
     // review that never opens it.
     use_effect(move || {
-        let asked = *st.conv_tab.read() == ConvTab::Commits;
-        let target = st.workspace.read().review_key();
-        let Some((repo, number)) = target.filter(|_| asked) else {
+        let asked = st.conv_showing() == ConvTab::Commits;
+        let source = st.workspace.read().commits_key();
+        let Some(source) = source.filter(|_| asked) else {
             return;
         };
         if !matches!(*st.commits.peek(), CommitList::Idle) {
             return;
         }
-        spawn_forever(super::conversation::load_commits(st, repo, number));
+        spawn_forever(super::conversation::load_commits(st, source));
+    });
+
+    // And the branches of the repository all of it is inside, on the same
+    // terms. They belong to the repository rather than to what is open in it,
+    // so this is the one of the three that survives opening a commit.
+    use_effect(move || {
+        let asked = st.conv_showing() == ConvTab::Branches;
+        let repo = st.workspace.read().repo_ref().cloned();
+        let Some(repo) = repo.filter(|_| asked) else {
+            return;
+        };
+        if !matches!(*st.branches.peek(), BranchList::Idle) {
+            return;
+        }
+        spawn_forever(super::conversation::load_branches(st, repo));
     });
 
     // And what ran against the commit on screen, on the same terms: two
     // requests, spent when somebody asks whether the build is green.
     use_effect(move || {
-        let asked = *st.conv_tab.read() == ConvTab::Checks;
+        let asked = st.conv_showing() == ConvTab::Checks;
         let target = st.workspace.read().checks_key();
         let Some((repo, sha)) = target.filter(|_| asked) else {
             return;
@@ -1643,5 +1836,132 @@ pub fn App() -> Element {
             }
             DragMask {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::backend::github::{CommitSummary, Snapshot};
+
+    fn repo() -> RepoRef {
+        RepoRef {
+            owner: "bigmah".to_string(),
+            name: "pullspace".to_string(),
+        }
+    }
+
+    fn browsing(branch: &str, default: bool) -> Workspace {
+        Workspace::Repo(Box::new(RepoView {
+            repo: repo(),
+            branch: branch.to_string(),
+            default,
+            head_sha: "tip".to_string(),
+            tree: Snapshot::default(),
+        }))
+    }
+
+    fn one_commit(from: CommitFrom) -> Workspace {
+        Workspace::Commit(Box::new(CommitView {
+            repo: repo(),
+            commit: CommitSummary {
+                sha: "abc1234def".to_string(),
+                message: "a change".to_string(),
+                author: "ada".to_string(),
+                date: String::new(),
+                html_url: String::new(),
+            },
+            parent_sha: "bbb2222".to_string(),
+            merge: false,
+            files: Vec::new(),
+            truncated: false,
+            tree: Snapshot::default(),
+            base_tree: Snapshot::default(),
+            from,
+        }))
+    }
+
+    /// The list a commit was clicked in stays beside it — which is what makes
+    /// reading a branch, or a pull request, a matter of clicking down that list.
+    #[test]
+    fn a_commit_is_read_beside_whatever_it_was_opened_out_of() {
+        let header = PrHeader {
+            number: 7,
+            ..PrHeader::default()
+        };
+        assert_eq!(
+            one_commit(CommitFrom::Pr(header)).commits_key(),
+            Some(CommitSource::Pr(repo(), 7))
+        );
+        assert_eq!(
+            one_commit(CommitFrom::Branch("dev".to_string())).commits_key(),
+            Some(CommitSource::Branch(repo(), "dev".to_string()))
+        );
+        // Reached by a link of its own: nothing around it to go on showing.
+        assert_eq!(one_commit(CommitFrom::Alone).commits_key(), None);
+        // And a branch being browsed is its own history.
+        assert_eq!(
+            browsing("dev", false).commits_key(),
+            Some(CommitSource::Branch(repo(), "dev".to_string()))
+        );
+    }
+
+    /// A link with no branch written in it opens whatever the default branch is
+    /// *now*, which is the right answer for that branch and the wrong one for
+    /// every other.
+    #[test]
+    fn a_branch_that_is_not_the_default_one_says_so_in_the_link() {
+        assert_eq!(browsing("main", true).target(), Target::Repo(repo()));
+        assert_eq!(
+            browsing("feat/thing", false).target(),
+            Target::Branch(repo(), "feat/thing".to_string())
+        );
+    }
+
+    /// The pane leads with the conversation where there is one and with the
+    /// branches where there is not — and the tab last picked is kept across the
+    /// switch wherever the new thing has it.
+    #[test]
+    fn the_pane_falls_back_to_the_heading_the_thing_on_screen_leads_with() {
+        // A repository read on its own: the default tab is a conversation it
+        // does not have.
+        assert_eq!(
+            showing_tab(ConvTab::Talk, &browsing("dev", false)),
+            ConvTab::Branches
+        );
+        // And the other way about, for somebody who came from one.
+        let pr = one_commit(CommitFrom::Pr(PrHeader {
+            number: 7,
+            ..PrHeader::default()
+        }));
+        assert_eq!(showing_tab(ConvTab::Branches, &pr), ConvTab::Talk);
+        // A commit reached by a link of its own has no list of commits behind
+        // it, so that heading falls back too.
+        assert_eq!(
+            showing_tab(ConvTab::Commits, &one_commit(CommitFrom::Alone)),
+            ConvTab::Branches
+        );
+        // What is kept: a heading both of them have.
+        assert_eq!(
+            showing_tab(ConvTab::Commits, &browsing("dev", false)),
+            ConvTab::Commits
+        );
+        assert_eq!(showing_tab(ConvTab::Checks, &pr), ConvTab::Checks);
+    }
+
+    /// A check is a fact about a commit, so the question is asked of whichever
+    /// commit is on screen — the tip of the branch being read, or the one
+    /// stepped into.
+    #[test]
+    fn checks_are_asked_of_the_commit_on_screen() {
+        assert_eq!(
+            browsing("dev", false).checks_key(),
+            Some((repo(), "tip".to_string()))
+        );
+        assert_eq!(
+            one_commit(CommitFrom::Alone).checks_key(),
+            Some((repo(), "abc1234def".to_string()))
+        );
+        assert_eq!(Workspace::Empty.checks_key(), None);
     }
 }

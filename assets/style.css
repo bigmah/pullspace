@@ -1442,6 +1442,63 @@ button { font-family: inherit; user-select: none; }
   user-select: text;
 }
 
+/* ---------- conversation pane: branches ---------- */
+
+/* A branch is somewhere to go, like a commit — so the row is the control, and
+   it is lit the same way when it is the one being read. */
+.convbranch {
+  cursor: pointer;
+  box-shadow: inset 2px 0 0 transparent;
+  transition: background-color 80ms var(--ease), box-shadow 80ms var(--ease);
+}
+
+.convbranch:hover { background: var(--bg-2); }
+
+.convbranch.on {
+  background: var(--bg-2);
+  box-shadow: inset 2px 0 0 var(--accent);
+  cursor: default;
+}
+
+/* Monospaced, because a branch name is a git ref and not prose: `release/1.2`
+   and `release/l.2` are two different branches. */
+.branchname {
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--fg);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The box over a long list. It scrolls with the branches rather than sitting in
+   the header, because it belongs to them and goes away with them. */
+.branchfind {
+  display: flex;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+.branchfind .ghinput { height: 28px; }
+
+/* The one row at the foot of a branch's history that is not a commit: the way
+   further back along it. A pull request has an end and needs no such thing. */
+.convolder {
+  display: block;
+  width: calc(100% - 24px);
+  margin: 12px;
+  height: 30px;
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  border-radius: var(--r);
+  color: var(--fg-dim);
+  cursor: pointer;
+  font-size: 11.5px;
+  transition: background-color var(--quick) var(--ease), color var(--quick) var(--ease);
+}
+
+.convolder:hover { background: var(--bg-3); color: var(--fg); }
+
 /* ---------- conversation pane: checks ---------- */
 
 /* The verdict on the whole commit, kept at the top of the list while the list

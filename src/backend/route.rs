@@ -1,8 +1,9 @@
 //! What is open, said in the address bar — and read back out of it.
 //!
 //! `#/owner/repo/pull/123`, `#/owner/repo/commit/<sha>` for one commit of it,
-//! and `#/owner/repo` for a repository being read on its own — the three words
-//! github.com writes the same three things under. Behind the `#` on purpose:
+//! `#/owner/repo` for a repository being read on its own and
+//! `#/owner/repo/tree/<branch>` for one of its branches — the four words
+//! github.com writes the same four things under. Behind the `#` on purpose:
 //! this is a static page, and the fragment
 //! is the one part of a URL no host ever sees, so a deep link works on GitHub
 //! Pages, on a bare directory, and under any `base_path` — with nothing to
@@ -35,6 +36,9 @@ pub enum Target {
     Home,
     /// A repository being read on its own, at its default branch.
     Repo(RepoRef),
+    /// The same, at a branch somebody named — which is the one thing a link
+    /// with no branch in it cannot come back to.
+    Branch(RepoRef, String),
     Pr(RepoRef, u64),
     /// One commit, diffed against the one before it.
     Commit(RepoRef, String),
@@ -46,7 +50,7 @@ impl Target {
     fn marker(&self) -> Option<&'static str> {
         match self {
             Target::Home => None,
-            Target::Repo(_) => Some("blob"),
+            Target::Repo(_) | Target::Branch(..) => Some("blob"),
             Target::Pr(..) | Target::Commit(..) => Some("files"),
         }
     }
@@ -86,6 +90,12 @@ impl Route {
         let mut out = match &self.at {
             Target::Home => "#/".to_string(),
             Target::Repo(repo) => format!("#/{}/{}", repo.owner, repo.name),
+            Target::Branch(repo, branch) => format!(
+                "#/{}/{}/tree/{}",
+                repo.owner,
+                repo.name,
+                encoded_ref(branch)
+            ),
             Target::Pr(repo, number) => {
                 format!("#/{}/{}/pull/{number}", repo.owner, repo.name)
             }
@@ -122,10 +132,14 @@ pub fn parse(hash: &str) -> Route {
     // answer with the repository every time.
     let at = match parse_commit_target(&head) {
         Some((repo, sha)) => Target::Commit(repo, sha),
-        None => match parse_target(&head) {
-            Some((repo, Some(number))) => Target::Pr(repo, number),
-            Some((repo, None)) => Target::Repo(repo),
-            None => Target::Home,
+        // And a branch before a bare repository, for the same reason.
+        None => match branch_target(&head) {
+            Some((repo, branch)) => Target::Branch(repo, branch),
+            None => match parse_target(&head) {
+                Some((repo, Some(number))) => Target::Pr(repo, number),
+                Some((repo, None)) => Target::Repo(repo),
+                None => Target::Home,
+            },
         },
     };
     // A file named under nothing is a file nobody can open.
@@ -144,6 +158,13 @@ fn split(text: &str) -> (String, Option<Place>) {
     let cut = match parts.as_slice() {
         [_, _, "pull" | "pulls", _, "files", ..] => 5,
         [_, _, "commit" | "commits", _, "files", ..] => 5,
+        // A branch may have slashes in it, so the marker after one is wherever
+        // it falls rather than at a fixed depth — but never before the branch
+        // itself, so a branch actually called `blob` still names a branch.
+        [_, _, "tree", _, ..] => match parts.iter().skip(4).position(|p| *p == "blob") {
+            Some(at) => at + 5,
+            None => return (rest.to_string(), None),
+        },
         [_, _, "blob", ..] => 3,
         _ => return (rest.to_string(), None),
     };
@@ -179,6 +200,50 @@ fn place_of(tail: &str) -> Option<Place> {
         }
     }
     (!path.as_os_str().is_empty()).then_some(Place { path, line })
+}
+
+/// The branch one piece of text names, when it names one: `owner/repo` and
+/// whatever follows the word github.com writes a branch under.
+///
+/// Everything after `tree/` is the branch, joined back up with the slashes it
+/// was written with — `feat/thing` is one branch, not a branch and a path.
+/// Each segment is unescaped on the way, so a name written the way [`Route`]
+/// writes it and one pasted out of a browser both come back as themselves.
+///
+/// Checked before [`parse_target`] wherever both could answer, since that reads
+/// the same text as a bare repository with something after it.
+pub fn branch_target(input: &str) -> Option<(RepoRef, String)> {
+    let text = input.trim();
+    let rest = strip_host(text).unwrap_or(text);
+    let parts: Vec<&str> = rest.split('/').filter(|p| !p.is_empty()).collect();
+    let [owner, name, "tree", branch @ ..] = parts.as_slice() else {
+        return None;
+    };
+    if branch.is_empty() {
+        return None;
+    }
+    Some((
+        RepoRef {
+            owner: owner.to_string(),
+            name: name.trim_end_matches(".git").to_string(),
+        },
+        branch
+            .iter()
+            .map(|s| decoded(s))
+            .collect::<Vec<_>>()
+            .join("/"),
+    ))
+}
+
+/// A branch as a link: segment by segment, like the path it is written as on
+/// github.com, so `feat/thing` stays two segments and everything else in the
+/// name is escaped.
+fn encoded_ref(name: &str) -> String {
+    name.split('/')
+        .filter(|s| !s.is_empty())
+        .map(encode_segment)
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 /// A whole path, segment by segment — the separators are the one thing not
@@ -311,6 +376,79 @@ mod tests {
     }
 
     #[test]
+    fn a_branch_round_trips() {
+        let route = Route::to(Target::Branch(
+            repo("DioxusLabs", "dioxus"),
+            "main".to_string(),
+        ));
+        assert_eq!(route.hash(), "#/DioxusLabs/dioxus/tree/main");
+        assert_eq!(parse(&route.hash()), route);
+
+        // And a file of one, which is what a link into a branch is usually
+        // made to point at.
+        let route = Route {
+            at: Target::Branch(repo("o", "r"), "dev".to_string()),
+            place: place("src/main.rs", Some(42)),
+        };
+        assert_eq!(route.hash(), "#/o/r/tree/dev/blob/src/main.rs:L42");
+        assert_eq!(parse(&route.hash()), route);
+    }
+
+    /// Branches are named `release/1.2` as often as not, and the slash in one
+    /// is part of the name rather than a step down into anything.
+    #[test]
+    fn a_branch_with_a_slash_in_it_round_trips() {
+        let route = Route {
+            at: Target::Branch(repo("o", "r"), "feat/branch-list".to_string()),
+            place: place("src/ui/app.rs", None),
+        };
+        assert_eq!(
+            route.hash(),
+            "#/o/r/tree/feat/branch-list/blob/src/ui/app.rs"
+        );
+        assert_eq!(parse(&route.hash()), route);
+
+        // Written out in full, with no file after it.
+        let route = Route::to(Target::Branch(repo("o", "r"), "a/b/c".to_string()));
+        assert_eq!(route.hash(), "#/o/r/tree/a/b/c");
+        assert_eq!(parse(&route.hash()), route);
+    }
+
+    /// github.com's own branch URL, which is the one anybody has to hand.
+    #[test]
+    fn a_branch_link_pasted_after_the_hash_is_read_as_one() {
+        assert_eq!(
+            parse("#https://github.com/rust-lang/rust/tree/master"),
+            Route::to(Target::Branch(
+                repo("rust-lang", "rust"),
+                "master".to_string()
+            ))
+        );
+        // And `tree` with nothing after it is just the repository.
+        assert_eq!(
+            parse("#/rust-lang/rust/tree/"),
+            Route::to(Target::Repo(repo("rust-lang", "rust")))
+        );
+    }
+
+    /// The marker is only a marker after the branch, so a branch that shares
+    /// its name is still a branch.
+    #[test]
+    fn a_branch_called_blob_is_still_a_branch() {
+        assert_eq!(
+            parse("#/o/r/tree/blob"),
+            Route::to(Target::Branch(repo("o", "r"), "blob".to_string()))
+        );
+        assert_eq!(
+            parse("#/o/r/tree/blob/blob/a.rs"),
+            Route {
+                at: Target::Branch(repo("o", "r"), "blob".to_string()),
+                place: place("a.rs", None),
+            }
+        );
+    }
+
+    #[test]
     fn a_line_of_a_pull_request_round_trips() {
         let route = Route {
             at: Target::Pr(repo("rust-lang", "rust"), 7),
@@ -400,6 +538,10 @@ mod tests {
         assert_eq!(
             parse("#/torvalds/blob"),
             Route::to(Target::Repo(repo("torvalds", "blob")))
+        );
+        assert_eq!(
+            parse("#/torvalds/tree/pull/9"),
+            Route::to(Target::Pr(repo("torvalds", "tree"), 9))
         );
     }
 

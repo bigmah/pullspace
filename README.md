@@ -35,6 +35,18 @@ one puts *that commit's* diff in the two panes — what it changed, against the
 commit before it — while the list stays where it is, so a branch can be read the
 way it was written, one commit at a time.
 
+A repository opened on its own has no discussion, and **BRANCHES** takes the
+conversation's place at the head of that pane: every branch it has, with the
+commit at the tip of each — and a filter box over the list once there are more
+than eight. Opening one reads the repository as that branch has it, carrying the
+file you were on across wherever that branch still has it, and the branch is
+written into the address bar as `#/owner/repo/tree/<branch>`, so a link to one is
+a link somebody else can open. **COMMITS** beside it is then that branch's
+history rather than a pull request's — newest first, a hundred at a time, with
+*Show older commits* at the foot for the ones behind them — and every row of it
+opens as a diff the same way. Reading a branch commit by commit is the same
+clicking down the same list, with or without a pull request around it.
+
 **CHECKS** is the third heading on that pane: what ran against the commit on
 screen — the check runs and the older commit statuses in one list, failures
 first, each with a tick, a cross or a pulsing dot, the app that ran it and how
@@ -183,7 +195,7 @@ src/
   backend/          UI-agnostic engine
     mod.rs          FileContent: one side of a diff
     http.rs         one GET, on the browser's fetch
-    github.rs       GitHub REST: repo search, PR lists, PR files, trees, blobs
+    github.rs       GitHub REST: repo search, PRs, branches, commits, trees, blobs
     auth.rs         the token, and localStorage
     store.rs        localStorage: what a desktop app would put in ~/.config
     route.rs        what is open, as `#/owner/repo/pull/123/files/x.rs:L42`
@@ -254,6 +266,13 @@ patterns, URL parsing — is pure.
 - Checks are read for the commit on screen, so stepping into a commit from the
   COMMITS tab asks again for that commit — which is the honest answer, since a
   check is a fact about a commit and not about the branch.
+- A branch is browsed, not diffed: nothing in the explorer is marked as changed,
+  because a branch is not a comparison. Its commits are, one at a time.
+- The branch list is the first 300 GitHub answers with, alphabetically — the
+  order it keeps them in, and the only one that is free: sorting by when each
+  was last pushed to would be a request per branch. A branch's history arrives a
+  hundred commits at a time, one request each; a pull request's arrives whole,
+  up to GitHub's own limit of 250.
 - The top bar flags a partial explorer: `truncated` (over GitHub's 3000-file
   cap per PR), `partial tree` (repo past GitHub's recursive-tree limit, about
   100k entries or 7 MB), or `changed files only` (the tree could not be read at

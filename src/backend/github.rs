@@ -49,6 +49,14 @@ const MAX_ANNOTATION_PAGES: u32 = 2;
 /// asked for in one request — a second page of a list nobody scrolls to the
 /// bottom of is not worth the wait or the budget.
 pub const PR_PAGE: usize = 100;
+/// 100 branches a page. Three pages is three hundred of them — more than any
+/// list is read down, and the pane says when it stopped there.
+const MAX_BRANCH_PAGES: u32 = 3;
+/// How many commits of a branch's history arrive at once. A branch is not a
+/// pull request: there is no end to it, so it comes down a page at a time and
+/// the list asks for the next one when somebody scrolls to the bottom of this
+/// one.
+pub const HISTORY_PAGE: usize = 100;
 
 /// Percent-encode one path segment into `out`. Avoids a dependency for the
 /// handful of characters that actually show up in repo paths.
@@ -599,19 +607,88 @@ pub async fn repo_head(token: &str, repo: &RepoRef) -> Result<RepoHead> {
         raw.default_branch
     };
 
-    let commit: RawCommit = get_json(
+    let sha = branch_head(token, repo, &branch)
+        .await
+        .with_context(|| format!("{repo} may have no commits yet"))?;
+
+    Ok(RepoHead { branch, sha })
+}
+
+/// The commit at the tip of one branch.
+///
+/// The same endpoint a sha goes to: git's names for a commit and the commit
+/// itself are interchangeable there, which is what lets a link naming a branch
+/// open the way a link naming a commit does — and what makes `⟳` on a branch
+/// pick up whatever has been pushed to it since.
+pub async fn branch_head(token: &str, repo: &RepoRef, branch: &str) -> Result<String> {
+    let raw: RawCommit = get_json(
         token,
         &format!(
-            "{API}/repos/{owner}/{name}/commits/{}",
-            encode_segment(&branch)
+            "{API}/repos/{}/{}/commits/{}",
+            encode_segment(&repo.owner),
+            encode_segment(&repo.name),
+            encode_ref(branch),
         ),
     )
     .await
-    .with_context(|| format!("reading the tip of {branch} — {repo} may have no commits yet"))?;
+    .with_context(|| format!("reading the tip of {branch}"))?;
+    Ok(raw.sha)
+}
 
-    Ok(RepoHead {
-        branch,
-        sha: commit.sha,
+/// One branch: what it is called, and the commit at its tip.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct Branch {
+    pub name: String,
+    pub sha: String,
+    /// Whether GitHub refuses pushes straight at it — which is nearly always
+    /// the branch everything else is merged into.
+    pub protected: bool,
+}
+
+/// A repository's branches, by name, as GitHub keeps them.
+#[derive(Clone, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+pub struct Branches {
+    pub items: Vec<Branch>,
+    /// More branches than [`MAX_BRANCH_PAGES`] holds, and this says so.
+    pub truncated: bool,
+}
+
+#[derive(Deserialize)]
+struct RawBranch {
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    commit: RawCommit,
+    #[serde(default)]
+    protected: bool,
+}
+
+/// Every branch of a repository — what the pane lists, and what each row is a
+/// way into.
+///
+/// Alphabetical, because that is the order GitHub answers in and the only one
+/// that costs nothing: sorting by when each was last pushed to would be a
+/// request per branch.
+pub async fn list_branches(token: &str, repo: &RepoRef) -> Result<Branches> {
+    let base = format!(
+        "{API}/repos/{}/{}/branches",
+        encode_segment(&repo.owner),
+        encode_segment(&repo.name),
+    );
+    let (raw, truncated): (Vec<RawBranch>, bool) = get_paged(token, &base, MAX_BRANCH_PAGES)
+        .await
+        .with_context(|| format!("reading the branches of {repo}"))?;
+    Ok(Branches {
+        items: raw
+            .into_iter()
+            .filter(|b| !b.name.is_empty())
+            .map(|b| Branch {
+                name: b.name,
+                sha: b.commit.sha,
+                protected: b.protected,
+            })
+            .collect(),
+        truncated,
     })
 }
 
@@ -625,6 +702,10 @@ pub struct RepoView {
     pub repo: RepoRef,
     /// The branch `head_sha` came from, for the breadcrumb.
     pub branch: String,
+    /// Whether that is the repository's default branch — which is what a link
+    /// with no branch written in it opens, and so what decides which of the two
+    /// forms the address bar takes. See [`Target`](super::route::Target).
+    pub default: bool,
     pub head_sha: String,
     /// Every file in the repository at `head_sha`.
     pub tree: Snapshot,
@@ -638,6 +719,19 @@ impl RepoView {
             self.repo.owner, self.repo.name, self.branch
         )
     }
+}
+
+/// A git ref as part of a URL path.
+///
+/// Segment by segment, because a branch called `feat/thing` is two segments of
+/// the path and not one escaped string — GitHub answers `commits/feat/thing`
+/// and not `commits/feat%2Fthing`.
+fn encode_ref(name: &str) -> String {
+    name.split('/')
+        .filter(|s| !s.is_empty())
+        .map(encode_segment)
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 #[derive(Deserialize)]
@@ -930,8 +1024,9 @@ struct RawCompare {
     merge_base_commit: RawCommit,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Default)]
 struct RawCommit {
+    #[serde(default)]
     sha: String,
 }
 
@@ -1326,15 +1421,16 @@ pub struct CommitSummary {
     pub html_url: String,
 }
 
+/// The seven characters everybody actually says a commit by.
+pub fn short_sha(sha: &str) -> &str {
+    let end = sha.char_indices().nth(7).map_or(sha.len(), |(i, _)| i);
+    &sha[..end]
+}
+
 impl CommitSummary {
     /// The seven characters everybody actually says a commit by.
     pub fn short(&self) -> &str {
-        let end = self
-            .sha
-            .char_indices()
-            .nth(7)
-            .map_or(self.sha.len(), |(i, _)| i);
-        &self.sha[..end]
+        short_sha(&self.sha)
     }
 
     /// The first line, which is what a list of commits is a list of.
@@ -1351,13 +1447,20 @@ impl CommitSummary {
     }
 }
 
-/// The commits of one pull request, oldest first — the order they were written
-/// in, which is the order they are read in.
+/// A list of commits: everything on a pull request, oldest first — the order
+/// they were written in, which is the order they are read in — or a page of a
+/// branch's history, newest first, which is the order `git log` writes it in.
 #[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
 pub struct Commits {
     pub items: Vec<CommitSummary>,
-    /// GitHub stops at 250 commits on this endpoint, and this says when it did.
+    /// There is more than this. On a pull request that means GitHub's own limit
+    /// of 250 was reached and the rest cannot be had; on a branch it means the
+    /// last page came back full, and the next one is a request away.
     pub truncated: bool,
+    /// How many pages of a branch's history are in `items`. Zero for a pull
+    /// request, whose commits arrive in one go — see [`branch_commits`].
+    #[serde(default)]
+    pub pages: u32,
 }
 
 #[derive(Deserialize)]
@@ -1416,6 +1519,24 @@ fn commit_of(raw: RawPrCommit) -> CommitSummary {
     }
 }
 
+/// What a commit was opened out of — and so what the pane beside it goes on
+/// showing while it is read.
+///
+/// A commit is nearly always reached from a list of them, and that list is the
+/// context for reading it: the pull request whose branch it is on, or the
+/// branch whose history it is part of. Either travels along inside the commit
+/// so that stepping into one does not empty the pane the row was clicked in.
+#[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
+pub enum CommitFrom {
+    /// A link, or a sha pasted into the picker: nothing around it.
+    #[default]
+    Alone,
+    /// One commit of a pull request — whose conversation stays beside it.
+    Pr(PrHeader),
+    /// One commit of a branch's history — which stays beside it.
+    Branch(String),
+}
+
 /// One commit, opened the way a pull request is: the files it changes, diffed
 /// against the commit before it.
 ///
@@ -1444,11 +1565,28 @@ pub struct CommitView {
     pub tree: Snapshot,
     /// And at the parent, which every left-hand side is read from.
     pub base_tree: Snapshot,
-    /// The pull request this was opened out of, when it was opened out of one.
-    pub pr: Option<PrHeader>,
+    /// What this was opened out of, when it was opened out of anything.
+    pub from: CommitFrom,
 }
 
 impl CommitView {
+    /// The pull request this commit belongs to, when it was read out of one.
+    pub fn pr(&self) -> Option<&PrHeader> {
+        match &self.from {
+            CommitFrom::Pr(pr) => Some(pr),
+            _ => None,
+        }
+    }
+
+    /// The branch whose history it was read out of, when it was read out of
+    /// one.
+    pub fn branch(&self) -> Option<&str> {
+        match &self.from {
+            CommitFrom::Branch(name) => Some(name),
+            _ => None,
+        }
+    }
+
     pub fn blob_key(&self, path: &std::path::Path) -> Cow<'_, str> {
         blob_key_in(&self.tree, &self.base_tree, &self.files, path)
     }
@@ -1544,7 +1682,7 @@ pub async fn load_commit(token: &str, repo: &RepoRef, sha: &str) -> Result<Commi
         merge,
         files,
         truncated,
-        pr: None,
+        from: CommitFrom::Alone,
     })
 }
 
@@ -1562,6 +1700,38 @@ pub async fn pr_commits(token: &str, repo: &RepoRef, number: u64) -> Result<Comm
     Ok(Commits {
         items: raw.into_iter().map(commit_of).collect(),
         truncated,
+        pages: 0,
+    })
+}
+
+/// One page of a branch's history, newest first — `git log`, as a list.
+///
+/// A branch does not end the way a pull request does, so this is a page at a
+/// time rather than all of it: [`HISTORY_PAGE`] commits, and `truncated` says
+/// the page came back full, which is as close as GitHub comes to saying there
+/// is more behind it.
+///
+/// The ref goes in the query rather than the path, which is what lets the same
+/// call answer for a branch, a tag or a sha.
+pub async fn branch_commits(
+    token: &str,
+    repo: &RepoRef,
+    branch: &str,
+    page: u32,
+) -> Result<Commits> {
+    let url = format!(
+        "{API}/repos/{}/{}/commits?sha={}&per_page={HISTORY_PAGE}&page={page}",
+        encode_segment(&repo.owner),
+        encode_segment(&repo.name),
+        encode_segment(branch),
+    );
+    let raw: Vec<RawPrCommit> = get_json(token, &url)
+        .await
+        .with_context(|| format!("reading the commits on {branch}"))?;
+    Ok(Commits {
+        truncated: raw.len() == HISTORY_PAGE,
+        items: raw.into_iter().map(commit_of).collect(),
+        pages: page,
     })
 }
 
@@ -2543,7 +2713,7 @@ mod tests {
             truncated: false,
             tree: snapshot(&[("src/a.rs", "now")]),
             base_tree: snapshot(&[("src/a.rs", "before"), ("gone.rs", "was-here")]),
-            pr: None,
+            from: CommitFrom::Alone,
         };
         // The head side, exactly as a pull request's is…
         assert_eq!(view.blob_key(Path::new("src/a.rs")), "now");

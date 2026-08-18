@@ -51,7 +51,11 @@ fn title(ws: &Workspace) -> String {
     match ws {
         Workspace::Empty => "pullspace".to_string(),
         Workspace::Pr(pr) => format!("{} #{} · pullspace", pr.repo, pr.number),
-        Workspace::Repo(view) => format!("{} · pullspace", view.repo),
+        // The branch only when it is not the default one: four tabs on four
+        // branches of one repository are four tabs to tell apart, and "the
+        // repository" is what the default branch is usually called.
+        Workspace::Repo(view) if view.default => format!("{} · pullspace", view.repo),
+        Workspace::Repo(view) => format!("{} @ {} · pullspace", view.repo, view.branch),
         Workspace::Commit(view) => {
             format!("{} {} · pullspace", view.repo, view.commit.short())
         }

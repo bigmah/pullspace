@@ -1,10 +1,10 @@
 use dioxus::prelude::*;
 
 use crate::backend::auth::open_browser;
-use crate::backend::github::{PrHeader, RepoRef};
+use crate::backend::github::{CommitFrom, RepoRef};
 
 use super::app::{Account, Fetch, St, Workspace};
-use super::github::{PrListBody, PrStates, browse_repo, open_commit, open_pr};
+use super::github::{PrListBody, PrStates, browse_branch, browse_repo, open_commit, open_pr};
 use super::ide;
 
 /// What the bar says is open, and what it offers to do about it.
@@ -85,7 +85,7 @@ pub fn TopBar() -> Element {
             lead: v.repo.to_string(),
             trail: format!("@ {}", v.branch),
             why: format!(
-                "{} at {} — no pull request, just the code\nOpen one of this repository's pull requests",
+                "{} at {} — no pull request, just the code\nOpen one of this repository's pull requests. Its branches are in the pane on the right.",
                 v.repo, v.branch
             ),
             url: v.html_url(),
@@ -96,15 +96,20 @@ pub fn TopBar() -> Element {
         Workspace::Commit(v) => Some(Crumb {
             lead: v.commit.short().to_string(),
             trail: v.commit.subject().to_string(),
-            why: match &v.pr {
-                Some(pr) => format!(
+            why: match (v.pr(), v.branch()) {
+                (Some(pr), _) => format!(
                     "{} — {}\nOne commit of #{}. Its other commits are in the pane on the right; the pull requests of {} are in here.",
                     v.commit.short(),
                     v.commit.subject(),
                     pr.number,
                     v.repo,
                 ),
-                None => format!(
+                (None, Some(branch)) => format!(
+                    "{} — {}\nOne commit of {branch}. The rest of that branch is in the pane on the right.",
+                    v.commit.short(),
+                    v.commit.subject(),
+                ),
+                (None, None) => format!(
                     "{} — {}\nOne commit of {}, diffed against the commit before it",
                     v.commit.short(),
                     v.commit.subject(),
@@ -117,10 +122,14 @@ pub fn TopBar() -> Element {
         }),
     };
     let pr_target = workspace.pr().map(|p| (p.repo.clone(), p.number));
-    let repo_target = workspace.repo().map(|v| v.repo.clone());
+    // The branch as well as the repository: `⟳` on a branch means that branch
+    // as it is now, not whatever the default one has moved to.
+    let repo_target = workspace
+        .repo()
+        .map(|v| (v.repo.clone(), v.branch.clone(), v.default));
     let commit_target = workspace
         .commit()
-        .map(|v| (v.repo.clone(), v.commit.sha.clone(), v.pr.clone()));
+        .map(|v| (v.repo.clone(), v.commit.sha.clone(), v.from.clone()));
     let ws_open = workspace.is_open();
 
     let (reload_note, reload_error) = match &*st.fetch.read() {
@@ -519,8 +528,8 @@ fn SearchBox() -> Element {
 #[component]
 fn RefreshButton(
     pr_target: Option<(RepoRef, u64)>,
-    repo_target: Option<RepoRef>,
-    commit_target: Option<(RepoRef, String, Option<PrHeader>)>,
+    repo_target: Option<(RepoRef, String, bool)>,
+    commit_target: Option<(RepoRef, String, CommitFrom)>,
     reloading: bool,
     refresh_title: &'static str,
 ) -> Element {
@@ -546,11 +555,17 @@ fn RefreshButton(
                 (Some((repo, number)), ..) => {
                     spawn_forever(open_pr(st, repo, number));
                 }
-                (_, Some(repo), _) => {
+                // The default branch is looked up again rather than taken as
+                // read: it is a setting on the repository, and reloading is
+                // when a change to one shows up.
+                (_, Some((repo, _, true)), _) => {
                     spawn_forever(browse_repo(st, repo));
                 }
-                (.., Some((repo, sha, pr))) => {
-                    spawn_forever(open_commit(st, repo, sha, pr));
+                (_, Some((repo, branch, false)), _) => {
+                    spawn_forever(browse_branch(st, repo, branch, None));
+                }
+                (.., Some((repo, sha, from))) => {
+                    spawn_forever(open_commit(st, repo, sha, from));
                 }
                 // The bar only exists while something is open, so one of the
                 // three targets above is always there to take the click.

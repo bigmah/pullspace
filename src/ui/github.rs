@@ -539,8 +539,10 @@ const SUGGESTION_LIMIT: u32 = 8;
 ///
 /// Search is metered by the minute rather than by the hour — ten of them to an
 /// anonymous caller — so this is the difference between a name typed with a
-/// pause in it costing one request and costing four.
-const SEARCH_DEBOUNCE: Duration = Duration::from_millis(350);
+/// pause in it costing one request and costing four. Shared with the branch
+/// box in the pane on the right, which is the same bargain over a different
+/// list.
+pub(super) const SEARCH_DEBOUNCE: Duration = Duration::from_millis(350);
 
 /// Below this, a query is not worth a request: one letter matches most of
 /// GitHub, and nobody reads what comes back.

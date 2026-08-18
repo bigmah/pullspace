@@ -699,18 +699,79 @@ fn CommitRow(c: CommitSummary, repo: RepoRef, from: CommitFrom, current: bool) -
 /// Below which a list of branches is a list, and above which it is a haystack.
 const BRANCH_FILTER_AT: usize = 8;
 
+/// What one lookup on GitHub turned up, and what it was looking for.
+///
+/// The query travels with the answer because the box runs ahead of it: it is
+/// the only way the list can tell "there is no such branch" from "the answer
+/// for what you have typed is still on its way".
+#[derive(Clone, PartialEq)]
+struct Found {
+    query: String,
+    got: Result<Vec<Branch>, String>,
+}
+
+/// The rows to draw: what the list in hand matches, and after it whatever
+/// GitHub found that was not in the list at all.
+///
+/// Nothing is drawn twice — a branch inside the first pages *and* returned by
+/// the lookup is the row that was already there, which is the one that knows
+/// whether it is protected.
+fn merged(local: Vec<Branch>, found: &[Branch]) -> Vec<Branch> {
+    let mut out = local;
+    for b in found {
+        if !out.iter().any(|had| had.name == b.name) {
+            out.push(b.clone());
+        }
+    }
+    out
+}
+
 /// Every branch of the repository, and each one a way into the code on it.
 ///
 /// The whole repository, not a diff: opening a branch is browsing it at its
 /// tip, with the file being read carried across wherever that branch still has
 /// it — see [`St::enter_repo`](super::app::St::enter_repo). What the branch is
 /// made of is the tab beside this one.
+///
+/// The box over the list is a filter while the list is all there is, and a
+/// search once it is not: past a few hundred branches GitHub's list is a
+/// beginning rather than the whole, and what is typed goes to GitHub as well —
+/// see [`github::matching_branches`].
 #[component]
 fn BranchesBody(repo: RepoRef, at: Option<String>) -> Element {
     let st = use_context::<St>();
     let mut filter = use_signal(String::new);
-    let held = st.branches.read();
 
+    // Before the early returns below: a hook skipped on one render and run on
+    // the next is a hook dioxus counts wrong.
+    let found = use_resource(move || {
+        // Read the dependencies here, in the synchronous part, so that a
+        // keystroke cancels the lookup in flight and starts the next one.
+        let typed = filter.read().trim().to_string();
+        let token = st.api_token();
+        let repo = st.workspace.read().repo_ref().cloned();
+        // Only where the list is not the whole of what the repository has.
+        // Where it is, filtering it is the complete answer and a request would
+        // buy nothing.
+        let cut_short = matches!(&*st.branches.read(), BranchList::Ready(list) if list.truncated);
+        async move {
+            let repo = repo?;
+            if typed.is_empty() || !cut_short {
+                return None;
+            }
+            // The next keystroke drops this task where it stands, so nothing
+            // reaches GitHub until the typing stops.
+            super::compat::sleep(super::github::SEARCH_DEBOUNCE).await;
+            Some(Found {
+                got: github::matching_branches(&token, &repo, &typed)
+                    .await
+                    .map_err(|e| format!("{e:#}")),
+                query: typed,
+            })
+        }
+    });
+
+    let held = st.branches.read();
     let list = match &*held {
         // Idle only ever lasts as long as it takes the effect in `App` to see
         // that this tab is up — the same as the commits beside it.
@@ -732,17 +793,30 @@ fn BranchesBody(repo: RepoRef, at: Option<String>) -> Element {
         BranchList::Ready(list) => list,
     };
 
-    // Alphabetical is the order GitHub answers in, and on a repository with two
+    // By name is the order GitHub answers in, and on a repository with two
     // hundred branches it is the wrong one for finding the one you want. The
     // box is the answer to that, and it is not worth its line on a repository
     // with four.
     let searching = list.items.len() > BRANCH_FILTER_AT;
-    let typed = filter.read().trim().to_lowercase();
-    let shown: Vec<&Branch> = list
+    let typed = filter.read().trim().to_string();
+    let needle = typed.to_lowercase();
+    let here: Vec<Branch> = list
         .items
         .iter()
-        .filter(|b| typed.is_empty() || b.name.to_lowercase().contains(&typed))
+        .filter(|b| needle.is_empty() || b.name.to_lowercase().contains(&needle))
+        .cloned()
         .collect();
+
+    // And what GitHub had to say about the rest of them, when there is a rest
+    // and somebody has typed something to look for in it.
+    let asked = list.truncated && !typed.is_empty();
+    let answer = found.cloned().flatten().filter(|f| f.query == typed);
+    let looking = asked && answer.is_none();
+    let (shown, error) = match answer.as_ref().map(|f| &f.got) {
+        Some(Ok(hits)) => (merged(here, hits), None),
+        Some(Err(e)) => (here, Some(e.clone())),
+        None => (here, None),
+    };
 
     rsx! {
         if searching {
@@ -750,7 +824,8 @@ fn BranchesBody(repo: RepoRef, at: Option<String>) -> Element {
                 input {
                     class: "ghinput",
                     r#type: "text",
-                    placeholder: "Filter {list.items.len()} branches…",
+                    placeholder: if list.truncated { "Find a branch…".to_string() } else { format!("Filter {} branches…", list.items.len()) },
+                    title: if list.truncated { "Filters the branches listed here, and asks GitHub for the ones past them" } else { "Filters the branches listed here" },
                     spellcheck: "false",
                     autocomplete: "off",
                     value: "{filter}",
@@ -761,17 +836,34 @@ fn BranchesBody(repo: RepoRef, at: Option<String>) -> Element {
         for b in shown.iter() {
             BranchRow {
                 key: "{b.name}",
-                b: (*b).clone(),
+                b: b.clone(),
                 repo: repo.clone(),
                 current: at.as_deref() == Some(b.name.as_str()),
             }
         }
-        if shown.is_empty() {
-            div { class: "panel-empty", "No branch of {repo} matches that." }
+        if let Some(e) = error {
+            div { class: "gherror", "{e}" }
         }
-        if list.truncated {
+        if looking {
+            div { class: "panel-empty", "Looking for “{typed}” on GitHub…" }
+        } else if shown.is_empty() {
+            div { class: "panel-empty", "No branch of {repo} matches “{typed}”." }
+            // The one thing that turns a wrong-looking answer into a usable
+            // one. Past the listed branches this is GitHub's ref index
+            // answering, and it matches from the start of the name and
+            // letter for letter — so a fragment from the middle, or the right
+            // name in the wrong case, finds nothing however many branches
+            // there are. The rows above are filtered here instead, which is
+            // why the same box can be kinder about both.
+            if list.truncated {
+                div { class: "panel-empty",
+                    "Past the first {list.items.len()}, GitHub looks a branch up by what it starts "
+                    "with, exactly as written — try the beginning of the name, capitals and all."
+                }
+            }
+        } else if list.truncated && typed.is_empty() {
             div { class: "panel-empty",
-                "This repository has more branches than pullspace lists — the rest are on github.com."
+                "The first {list.items.len()} branches of {repo}. Type to look up the rest on GitHub."
             }
         }
     }
@@ -1193,5 +1285,37 @@ fn CommentRow(c: Comment) -> Element {
                 Body { text: c.body.clone() }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn branch(name: &str, protected: bool) -> Branch {
+        Branch {
+            name: name.to_string(),
+            sha: format!("sha-of-{name}"),
+            protected,
+        }
+    }
+
+    /// The list stops a few hundred branches in, so what GitHub finds past it
+    /// is added rather than swapped in — and a branch in both is the row that
+    /// was already there, which is the one that knows it is protected.
+    #[test]
+    fn what_github_finds_is_added_to_what_was_already_listed() {
+        let here = vec![branch("main", true), branch("feat/a", false)];
+        let found = [branch("main", false), branch("zygotic-cicada", false)];
+        let rows = merged(here, &found);
+        let names: Vec<&str> = rows.iter().map(|b| b.name.as_str()).collect();
+        assert_eq!(names, ["main", "feat/a", "zygotic-cicada"]);
+        assert!(rows[0].protected, "the listed row is the one that was kept");
+    }
+
+    #[test]
+    fn nothing_found_leaves_the_list_as_it_was() {
+        let here = vec![branch("main", true)];
+        assert_eq!(merged(here.clone(), &[]), here);
     }
 }

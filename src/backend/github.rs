@@ -642,6 +642,11 @@ pub struct Branch {
     pub sha: String,
     /// Whether GitHub refuses pushes straight at it — which is nearly always
     /// the branch everything else is merged into.
+    ///
+    /// False for one found by [`matching_branches`], which answers out of
+    /// GitHub's index of refs and says nothing about protection. Unknown
+    /// rather than untrue, and it costs a pill on a row rather than anything
+    /// that could mislead.
     pub protected: bool,
 }
 
@@ -663,12 +668,69 @@ struct RawBranch {
     protected: bool,
 }
 
+/// One ref as the refs endpoints write it: the whole `refs/heads/…` name, and
+/// the object it points at.
+#[derive(Deserialize)]
+struct RawMatchingRef {
+    #[serde(rename = "ref", default)]
+    name: String,
+    #[serde(default)]
+    object: RawCommit,
+}
+
+/// What a ref is called once it is not a ref: `refs/heads/dev` is the branch
+/// `dev`, and anything else under `refs/` is not a branch at all.
+fn branch_of_ref(raw: RawMatchingRef) -> Option<Branch> {
+    let name = raw.name.strip_prefix("refs/heads/")?;
+    (!name.is_empty()).then(|| Branch {
+        name: name.to_string(),
+        sha: raw.object.sha,
+        protected: false,
+    })
+}
+
+/// The branches whose names begin with `prefix`, asked of GitHub rather than of
+/// the list already in hand.
+///
+/// A repository with thousands of branches is one [`list_branches`] stops short
+/// of, and a filter over what was fetched cannot find what was not fetched:
+/// microsoft/vscode has some forty-eight hundred branches, of which the list
+/// holds the first three hundred. This is the way to the rest — one request,
+/// answered straight out of GitHub's index of refs, and cheap enough to spend
+/// on somebody typing.
+///
+/// Prefix, and only prefix, and case-sensitively: the REST API has no substring
+/// search for refs, so `ocr` will not find `client-ocr-telemetry` and `dileepy`
+/// will not find `DileepY/1.109` — both confirmed against microsoft/vscode. The
+/// pane says so rather than letting either read as "no such branch".
+pub async fn matching_branches(token: &str, repo: &RepoRef, prefix: &str) -> Result<Vec<Branch>> {
+    let prefix = prefix.trim();
+    // No prefix matches every ref there is, which is the request this exists to
+    // avoid making.
+    if prefix.is_empty() {
+        return Ok(Vec::new());
+    }
+    let url = format!(
+        "{API}/repos/{}/{}/git/matching-refs/heads/{}?per_page=100",
+        encode_segment(&repo.owner),
+        encode_segment(&repo.name),
+        encode_ref(prefix),
+    );
+    let raw: Vec<RawMatchingRef> = get_json(token, &url)
+        .await
+        .with_context(|| format!("looking for branches starting with {prefix}"))?;
+    Ok(raw.into_iter().filter_map(branch_of_ref).collect())
+}
+
 /// Every branch of a repository — what the pane lists, and what each row is a
 /// way into.
 ///
-/// Alphabetical, because that is the order GitHub answers in and the only one
-/// that costs nothing: sorting by when each was last pushed to would be a
-/// request per branch.
+/// In GitHub's own order, which is by name, and the only one that costs
+/// nothing: sorting by when each was last pushed to would be a request per
+/// branch. The first [`MAX_BRANCH_PAGES`] pages of it, which on a repository
+/// with thousands of branches is a small part of the front — so a list that
+/// says it was cut short is one to search rather than to scroll, and
+/// [`matching_branches`] is what searches it.
 pub async fn list_branches(token: &str, repo: &RepoRef) -> Result<Branches> {
     let base = format!(
         "{API}/repos/{}/{}/branches",
@@ -2697,6 +2759,31 @@ mod tests {
         assert!(is_sha(&"a".repeat(40)));
         assert!(!is_sha(&"a".repeat(41)));
         assert!(!is_sha("abc123"));
+    }
+
+    /// The refs endpoint answers with whole ref names, and only the ones under
+    /// `refs/heads/` are branches.
+    #[test]
+    fn a_ref_is_read_back_as_the_branch_it_names() {
+        let branch = |name: &str| {
+            branch_of_ref(
+                serde_json::from_str(&format!(
+                    r#"{{"ref":"{name}","object":{{"sha":"abc1234","type":"commit"}}}}"#
+                ))
+                .unwrap(),
+            )
+        };
+        let got = branch("refs/heads/feat/branch-list").expect("a branch");
+        assert_eq!(got.name, "feat/branch-list");
+        assert_eq!(got.sha, "abc1234");
+        // Not knowing is not the same as knowing it is unprotected — see
+        // `Branch::protected`.
+        assert!(!got.protected);
+
+        // A tag is not a branch, and neither is a ref name with nothing after
+        // the prefix.
+        assert!(branch("refs/tags/v1.0").is_none());
+        assert!(branch("refs/heads/").is_none());
     }
 
     #[test]

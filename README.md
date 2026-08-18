@@ -268,11 +268,19 @@ patterns, URL parsing — is pure.
   check is a fact about a commit and not about the branch.
 - A branch is browsed, not diffed: nothing in the explorer is marked as changed,
   because a branch is not a comparison. Its commits are, one at a time.
-- The branch list is the first 300 GitHub answers with, alphabetically — the
-  order it keeps them in, and the only one that is free: sorting by when each
-  was last pushed to would be a request per branch. A branch's history arrives a
-  hundred commits at a time, one request each; a pull request's arrives whole,
-  up to GitHub's own limit of 250.
+- The branch list is the first 300 GitHub answers with, in its own order, which
+  is by name — the only order that is free: sorting by when each was last pushed
+  to would be a request per branch. On a repository with thousands of them that
+  is a beginning rather than the whole (microsoft/vscode has some forty-eight
+  hundred), so the box over the list stops being a filter and becomes a search:
+  what is typed narrows the rows here **and** goes to GitHub's ref index for the
+  ones past them. That index matches from the start of a name and letter for
+  letter, so a fragment from the middle finds nothing and `dileepy` will not
+  find `DileepY/1.109` — the pane says so where it would otherwise read as "no
+  such branch". A branch's history arrives a hundred commits at a time, one
+  request each; a pull request's arrives whole, up to GitHub's own limit of 250.
+- Branches are the open repository's own. A branch that lives on a fork is on
+  that fork — open it as the repository it is.
 - The top bar flags a partial explorer: `truncated` (over GitHub's 3000-file
   cap per PR), `partial tree` (repo past GitHub's recursive-tree limit, about
   100k entries or 7 MB), or `changed files only` (the tree could not be read at

@@ -23,6 +23,7 @@ use super::ide;
 use super::imgcache::{all_settled, drawable, ensure_image};
 use super::markdown::Target;
 use super::prcache::ensure_path;
+use super::tabs::{self, TabStrip};
 
 /// Files offered in Preview. The browser lays HTML out itself, so this is the
 /// whole test — there is no renderer here with opinions of its own.
@@ -330,18 +331,26 @@ pub fn Viewer() -> Element {
         }))
     });
 
-    // A new file starts at the top. The scroll container outlives the file in
-    // it, so without this, opening something short after reading deep into
-    // something long lands you at the bottom of it.
+    // A file arrives where it was left — and, the first time, at the top of
+    // itself. The scroll container outlives the file in it, so without this,
+    // opening something short after reading deep into something long lands you
+    // at the bottom of it.
     //
     // Unless it was opened *at* somewhere, in which case the effect above is
     // already on its way there and this would fight it.
+    //
+    // The pane is read as well as the file: something still coming off the
+    // network has no height to be scrolled through, and this runs again when
+    // it lands.
     use_effect(move || {
-        let _ = st.open.read();
+        let _ = data.read();
+        let Some(rel) = st.open.read().clone() else {
+            return;
+        };
         if st.at_line.peek().is_some() {
             return;
         }
-        document::eval("var e=document.querySelector('.codewrap'); if(e) e.scrollTop=0;");
+        document::eval(&tabs::restore_js(&rel));
     });
 
     // Markdown's fenced blocks are highlighted where they are drawn, so the
@@ -472,6 +481,10 @@ pub fn Viewer() -> Element {
 
     rsx! {
         div { class: "viewer",
+            // Every file that has been opened and not put down, so that
+            // following a definition three files away costs nothing but the
+            // click it takes to come back.
+            TabStrip {}
             div { class: "viewhdr",
                 // Following a definition three files away is only worth doing
                 // if getting back is one key. These are that key, drawn.
@@ -542,6 +555,11 @@ pub fn Viewer() -> Element {
             }
             div {
                 class: "codewrap",
+                // Which file is in it, for the page's own record of where each
+                // one is scrolled to — see `super::tabs`. On the element
+                // rather than passed to the script, so that a scroll event is
+                // always filed under whatever is actually on screen.
+                "data-path": "{rel_str}",
                 // A browser already knows where a word starts and ends, and a
                 // double-click is how it is asked. Wrapping every token of
                 // every line in its own clickable span to find out the same

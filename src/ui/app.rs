@@ -33,6 +33,7 @@ use super::landing::Landing;
 use super::page::Tab;
 use super::panes::{self, Drag, DragMask, Edge};
 use super::prefs::PrefsPanel;
+use super::tabs;
 use super::topbar::TopBar;
 use super::viewer::Viewer;
 
@@ -551,6 +552,27 @@ pub struct Spot {
 /// nice name.
 const TRAIL: usize = 60;
 
+/// A file held open in the strip above the code.
+///
+/// The [`Spot`] inside it is the same three things the trail is made of, for
+/// the same reason: coming back to a tab has to be coming back to what was
+/// being read there, not to the top of that file in whatever view something
+/// else was last in. Where it was scrolled to belongs with these and is
+/// deliberately not here — see [`super::tabs`] for where it is instead, and
+/// why.
+#[derive(Clone, PartialEq)]
+pub struct OpenTab {
+    pub at: Spot,
+    /// When this tab was last looked at, counted rather than clocked. What
+    /// decides which one is let go when the strip is full.
+    used: u32,
+}
+
+/// How many files the strip holds before the one looked at longest ago is let
+/// go. Enough for everything one change touches, and few enough that a tab is
+/// still wide enough to carry a name.
+const TABS: usize = 12;
+
 /// Both sides of one file, fetched on demand.
 ///
 /// The sides are `Rc` because every write to the cache re-runs the viewer's
@@ -643,6 +665,10 @@ pub struct St {
     /// every editor's Forward does.
     pub trail: Signal<Vec<Spot>>,
     pub ahead: Signal<Vec<Spot>>,
+    /// The files being held open, in the order the strip draws them. The one
+    /// on screen is whichever of them `open` names — there is no second place
+    /// recording which tab is current, because that is what `open` already is.
+    pub tabs: Signal<Vec<OpenTab>>,
 
     // --- the IDE ---
     /// The identifier picked out of the code, if one has been. What Go to
@@ -831,6 +857,10 @@ impl St {
         trail.set(Vec::new());
         let mut ahead = self.ahead;
         ahead.set(Vec::new());
+        // And the strip, every file of which belongs to what is being closed.
+        let mut tabs = self.tabs;
+        tabs.set(Vec::new());
+        tabs::forget_all();
     }
 
     /// Put down the results of reading the last thing.
@@ -1150,19 +1180,28 @@ impl St {
     /// Open a file from the tree: changed files land in split-diff view, and
     /// prose lands rendered — markdown is written to be read, and the source of
     /// it is one button away.
+    ///
+    /// All of which is about a file being opened for the first time. One that
+    /// is already in the strip above the code opens as its tab has it, because
+    /// that is where whoever asked for it left it.
     pub fn open_file(&self, rel: PathBuf) {
-        self.mark(&rel);
+        // Before the tab is read back, not after: a file that is already open
+        // is one whose tab this is what brings up to date.
+        self.stow();
+        if let Some(spot) = self.tabbed(&rel) {
+            return self.go(spot);
+        }
         let changed = self.statuses.peek().get(&rel).is_some();
-        let mut vm = self.view_mode;
-        vm.set(match () {
+        let mode = match () {
             _ if changed => ViewMode::Split,
             _ if markdown::is_markdown(&rel) => ViewMode::Preview,
             _ => ViewMode::Source,
+        };
+        self.go(Spot {
+            path: rel,
+            mode,
+            line: None,
         });
-        let mut open = self.open;
-        open.set(Some(rel));
-        let mut at = self.at_line;
-        at.set(None);
     }
 
     // ----------------------------------------------------- marking files read
@@ -1406,15 +1445,12 @@ impl St {
     /// Jump to a specific line — what a comment on the diff, a search hit and a
     /// definition all link to.
     pub fn open_at(&self, rel: PathBuf, line: usize) {
-        self.mark(&rel);
-        let mut vm = self.view_mode;
-        vm.set(ViewMode::Source);
-        let mut open = self.open;
-        open.set(Some(rel));
-        let mut ps = self.scroll_to;
-        ps.set(Some(line));
-        let mut at = self.at_line;
-        at.set(Some(line));
+        self.stow();
+        self.go(Spot {
+            path: rel,
+            mode: ViewMode::Source,
+            line: Some(line),
+        });
     }
 
     // ------------------------------------------------------------ the trail
@@ -1487,14 +1523,145 @@ impl St {
     /// Show a spot as it was — and without marking the trail, since moving
     /// along it is not the same as leaving it.
     fn land(&self, spot: Spot) {
+        self.stow();
+        self.install(spot);
+    }
+
+    // -------------------------------------------------------------- the tabs
+
+    /// Where `rel` was left, when it is one of the files being held open.
+    fn tabbed(&self, rel: &Path) -> Option<Spot> {
+        self.tabs
+            .peek()
+            .iter()
+            .find(|t| t.at.path == rel)
+            .map(|t| t.at.clone())
+    }
+
+    /// Note where the reader is standing in what is on screen, so that its tab
+    /// comes back to that rather than to the top of the file.
+    ///
+    /// Done on the way out of a file rather than on every move inside one: the
+    /// view and the line only change when something changes them, and both are
+    /// read straight off the signals that hold them. Where the file is
+    /// scrolled to is the exception, and is not kept here at all — see
+    /// [`super::tabs`].
+    fn stow(&self) {
+        let Some(here) = self.here() else { return };
+        let mut tabs = self.tabs;
+        let mut held = tabs.write();
+        if let Some(tab) = held.iter_mut().find(|t| t.at.path == here.path) {
+            tab.at = here;
+        }
+    }
+
+    /// Put a file in the viewer, with a tab for it in the strip above.
+    ///
+    /// One tab per file, ever: opening something that is already open brings
+    /// its tab forward rather than making a second one. New tabs go on the
+    /// end, and once the strip is full the one nobody has been back to for
+    /// longest is let go — never the file being opened, which is the one just
+    /// used.
+    ///
+    /// Callers [`stow`](Self::stow) first. This does not, because the two that
+    /// do not want it to — closing a tab, and coming back along the trail —
+    /// have already dealt with the place being left.
+    fn install(&self, spot: Spot) {
+        {
+            let mut tabs = self.tabs;
+            let mut held = tabs.write();
+            let used = held.iter().map(|t| t.used).max().unwrap_or(0) + 1;
+            match held.iter_mut().find(|t| t.at.path == spot.path) {
+                Some(tab) => {
+                    tab.at = spot.clone();
+                    tab.used = used;
+                }
+                None => held.push(OpenTab {
+                    at: spot.clone(),
+                    used,
+                }),
+            }
+            if held.len() > TABS
+                && let Some(oldest) = (0..held.len()).min_by_key(|&i| held[i].used)
+            {
+                let gone = held.remove(oldest);
+                tabs::forget(&gone.at.path);
+            }
+        }
         let mut vm = self.view_mode;
         vm.set(spot.mode);
-        let mut open = self.open;
-        open.set(Some(spot.path));
-        let mut ps = self.scroll_to;
-        ps.set(spot.line);
         let mut at = self.at_line;
         at.set(spot.line);
+        // A line is a jump, and the viewer is listening for the write rather
+        // than for what the signal holds — see `St::scroll_to`. Without one
+        // there is nowhere to jump to, and the file arrives back where it was
+        // left instead.
+        if spot.line.is_some() {
+            let mut ps = self.scroll_to;
+            ps.set(spot.line);
+        }
+        let mut open = self.open;
+        open.set(Some(spot.path));
+    }
+
+    /// Somewhere new: the trail remembers where we were, and the strip gets a
+    /// tab for where we are going.
+    fn go(&self, spot: Spot) {
+        self.mark(&spot.path);
+        self.install(spot);
+    }
+
+    /// Close one tab, and hand the viewer to the file beside it — the one to
+    /// its right, or, closing the last of them, the one to its left. Which is
+    /// what makes closing something you have finished with land on the next
+    /// thing rather than on nothing.
+    ///
+    /// Closing the only tab leaves the welcome page, because there is nothing
+    /// else it could leave. Closing one that is not the one being read moves
+    /// nothing at all.
+    pub fn close_tab(&self, rel: &Path) {
+        let mut tabs = self.tabs;
+        let Some(at) = tabs.peek().iter().position(|t| t.at.path == rel) else {
+            return;
+        };
+        let leaving = self.open.peek().as_deref() == Some(rel);
+        let next = {
+            let mut held = tabs.write();
+            held.remove(at);
+            // Whatever has slid into its place, or the end of the strip.
+            held.get(at).or_else(|| held.last()).map(|t| t.at.clone())
+        };
+        tabs::forget(rel);
+        if !leaving {
+            return;
+        }
+        match next {
+            Some(spot) => {
+                // The trail can already name what we are landing on: it is
+                // where the reader was before they opened the tab they have
+                // just closed. Left there, the next Back would be a key that
+                // did nothing.
+                let mut trail = self.trail;
+                if trail.peek().last().is_some_and(|s| s.path == spot.path) {
+                    trail.write().pop();
+                }
+                self.install(spot);
+            }
+            None => {
+                let mut open = self.open;
+                open.set(None);
+                let mut line = self.at_line;
+                line.set(None);
+            }
+        }
+    }
+
+    /// Close the tab being read — what ⌥W is.
+    pub fn close_open_tab(&self) {
+        let Some(rel) = self.open.peek().clone() else {
+            return;
+        };
+        self.close_tab(&rel);
     }
 }
 
@@ -1556,6 +1723,7 @@ pub fn App() -> Element {
             refresh_tick: root(0),
             trail: root(Vec::new()),
             ahead: root(Vec::new()),
+            tabs: root(Vec::new()),
 
             selected: root(None),
             panel: root(Panel::Hidden),
@@ -1755,6 +1923,10 @@ pub fn App() -> Element {
     // And the other thing listened for on the document: a click on a line
     // number, which is how a line gets picked out to link to.
     use_future(move || super::viewer::lines(st));
+
+    // The third: where each open file is scrolled to, which the page keeps on
+    // our behalf — a wheel notch is not worth a render. See `super::tabs`.
+    use_effect(tabs::watch);
 
     // Pull the conversation as soon as a pull request opens — three requests,
     // next to the tree and every changed file, and the pane is the first thing

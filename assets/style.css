@@ -676,6 +676,90 @@ button { font-family: inherit; user-select: none; }
 
 .viewer { display: flex; flex-direction: column; flex: 1; min-height: 0; }
 
+/* ---------- the open files ---------- */
+
+/* The strip of them, above the header that describes whichever one is being
+   read. Its ground is the app's own background and the tab on top of it is the
+   header's, so the file on screen reads as continuous with the pane below it
+   and the others read as what is waiting behind. */
+.tabstrip {
+  display: flex;
+  align-items: stretch;
+  flex: none;
+  height: var(--hdr);
+  background: var(--bg);
+  border-bottom: 1px solid var(--border);
+  overflow-x: auto;
+  overflow-y: hidden;
+  /* No bar under them: the strip holds a dozen files at the most, the one
+     being read is always scrolled into view, and a bar wide enough to grab
+     would take a fifth of the height the names are drawn in. */
+  scrollbar-width: none;
+}
+
+.tabstrip::-webkit-scrollbar { display: none; }
+
+.tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex: none;
+  max-width: 210px;
+  padding: 0 4px 0 11px;
+  border-right: 1px solid var(--border-soft);
+  color: var(--fg);
+  cursor: pointer;
+  /* What separates the file being read from the ones merely open. It is the
+     tab that fades and not its name, so that a changed file goes on saying
+     which colour of change it is from either state. */
+  opacity: 0.58;
+  transition: background-color var(--quick) var(--ease), opacity var(--quick) var(--ease);
+}
+
+.tab:hover { opacity: 1; background: var(--bg-1); }
+
+/* The one on screen: the surface of the pane under it, and the accent along
+   its top edge. */
+.tab.on {
+  opacity: 1;
+  background: var(--bg-1);
+  box-shadow: inset 0 2px 0 var(--accent);
+}
+
+/* No colour of its own — it inherits the tab's, which is what leaves the
+   status classes free to say M, A or D in the one place there is room for it. */
+.tname {
+  font-family: var(--mono);
+  font-size: 11.5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Kept out of the way until it is wanted: a row of crosses is a row of things
+   to misclick. The one on the tab being read is out from the start, because
+   that is the file somebody is about to be finished with. */
+.tabx {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 17px;
+  height: 17px;
+  border: none;
+  border-radius: 3px;
+  background: transparent;
+  color: var(--fg-faint);
+  cursor: pointer;
+  font-size: 13px;
+  line-height: 1;
+  opacity: 0;
+  transition: background-color var(--quick) var(--ease), opacity var(--quick) var(--ease);
+}
+
+.tab.on .tabx, .tab:hover .tabx, .tabx:focus-visible { opacity: 1; }
+.tabx:hover { background: var(--bg-3); color: var(--fg); }
+
 .viewhdr {
   display: flex;
   align-items: center;

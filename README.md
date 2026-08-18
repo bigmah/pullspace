@@ -23,6 +23,16 @@ Two panes, like a traditional IDE but without the weight:
   back up again — `Reset` puts the whole file back the way it arrived. Markdown
   opens as the prose it is, with **Source** one button away.
 
+Above the code is the strip of **files you have open**. Following a definition
+three files away used to cost you the file it was called from; now that one
+stays open beside it, one click back — and it comes back as you left it: the
+same view, the same line picked out of it, scrolled to the same place. One tab
+per file however many times it is opened, named by the file and by as much of
+the path in front of it as it takes to tell two `mod.rs` apart, and coloured by
+what the change does to it. `×`, a middle click or `⌥W` puts one down and hands
+the pane to the file beside it. The strip holds a dozen; past that the one
+nobody has been back to for longest is let go.
+
 A third pane holds the **conversation**: the description, the discussion, the
 review summaries and the comments left on lines of the diff, merged into one
 list in the order they were written. Bodies are drawn as the markdown they are
@@ -236,6 +246,7 @@ src/
     topbar.rs       what is on screen, warm-up progress, account, refresh
     filetree.rs     recursive tree with status badges
     viewer.rs       source view, inline & split diff views
+    tabs.rs         the files held open, and where each one is scrolled to
     ide.rs          search, definitions, references, and the keyboard
     nav.rs          the address bar read back: links, Back and Forward
     bottom.rs       the panel under the code: hits, definitions, a peek at one

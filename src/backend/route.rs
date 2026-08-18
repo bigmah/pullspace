@@ -25,10 +25,21 @@
 //! It is the same three things a link is for whichever form it takes: a review
 //! that can be sent to somebody, a line that can be pointed at, and a tab that
 //! comes back to where it was on reload.
+//!
+//! Links arrive from github.com as well as from here, and github.com writes
+//! two of these six differently enough to need their own reading: its
+//! `blob/main/src/main.rs` puts the branch where ours puts the path. That is
+//! [`github_link`], which is checked first wherever text could be either — the
+//! host on the front is what tells them apart, and it is why [`strip_host`]
+//! answers with an `Option`. [`take_handoff`] is the same thing arriving in a
+//! query field instead, which is how something outside the page — a browser
+//! extension, a bookmarklet — says "open this".
 
 use std::path::{Path, PathBuf};
 
-use super::github::{RepoRef, encode_segment, parse_commit_target, parse_target, strip_host};
+use super::github::{
+    RepoRef, encode_segment, is_sha, parse_commit_target, parse_target, strip_host,
+};
 
 /// Which pull request, commit or repository is open.
 #[derive(Clone, Default, PartialEq, Eq, Debug)]
@@ -50,6 +61,19 @@ pub enum Target {
 }
 
 impl Target {
+    /// The repository this is inside, which everything but home is inside one
+    /// of.
+    pub fn repo(&self) -> Option<&RepoRef> {
+        match self {
+            Target::Home => None,
+            Target::Repo(repo)
+            | Target::Branch(repo, _)
+            | Target::Compare(repo, ..)
+            | Target::Pr(repo, _)
+            | Target::Commit(repo, _) => Some(repo),
+        }
+    }
+
     /// The word that separates the repository from the path inside it, as
     /// github.com writes it. `None` for home, which has no inside.
     fn marker(&self) -> Option<&'static str> {
@@ -350,6 +374,208 @@ pub fn decoded(seg: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
+// ------------------------------------------------------------- github.com
+
+/// The query field a link is handed over in: `?url=…`.
+///
+/// See [`take_handoff`].
+const HANDOFF: &str = "url";
+
+/// What a github.com URL names.
+///
+/// The address bar of whatever browser somebody is reading GitHub in, handed
+/// over whole — a link pasted into the picker, dropped in after our own `#`,
+/// or passed by an extension with the repository page still on screen.
+///
+/// github.com writes four of the six things this app opens exactly as it does,
+/// once the host is off the front. The other two it writes differently enough
+/// that reading them takes a question only the repository can answer.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum Link {
+    /// A pull request, a commit, a comparison, a repository: already a route.
+    At(Route),
+    /// `blob/…` or `tree/…`, which are not.
+    ///
+    /// Those write the ref and the path inside it with one separator and no
+    /// mark between them, so `main/src/main.rs` is the branch `main` holding
+    /// `src/main.rs` — or the branch `main/src` holding `main.rs`, and nothing
+    /// in the URL says which. github.com knows its own branches and this page
+    /// does not, so the pair travels un-split as far as whatever can ask: see
+    /// [`longest_ref`].
+    Ref {
+        repo: RepoRef,
+        /// Everything after the word, unescaped — `main/src/main.rs`.
+        rest: String,
+        /// `#L58`, which github.com writes in a fragment of its own.
+        line: Option<usize>,
+    },
+}
+
+/// Read a github.com URL, in github.com's own grammar.
+///
+/// `None` for anything that is not one, which is what keeps this from touching
+/// the links this app writes: `#/owner/repo/blob/src/main.rs` has the path
+/// where github.com puts the branch, and only the host on the front tells the
+/// two apart. That is the same signal [`strip_host`] exists to give, and the
+/// reason it answers with an `Option`.
+///
+/// Everything github.com has no answer for here — issues, actions, settings —
+/// comes back as the repository, which is the part of such a page this app can
+/// open. A URL naming no repository at all is `None`, so an account page is
+/// still left to the picker's own search.
+pub fn github_link(input: &str) -> Option<Link> {
+    let text = input.trim();
+    // The fragment first and the query second, in the order a URL writes them:
+    // `#L58` is the line being linked to and `?plain=1` is the view it was
+    // being read in, and neither is part of the path. A `#` inside a filename
+    // reaches us as `%23`, so cutting at the first one cuts in the right place.
+    let (head, frag) = match text.split_once('#') {
+        Some((head, frag)) => (head, frag),
+        None => (text, ""),
+    };
+    let head = head.split_once('?').map_or(head, |(path, _)| path);
+    let rest = strip_host(head)?;
+    let line = anchor_line(frag);
+
+    let parts: Vec<String> = rest
+        .split('/')
+        .filter(|p| !p.is_empty())
+        .map(decoded)
+        .collect();
+    let [owner, name, tail @ ..] = parts.as_slice() else {
+        return None;
+    };
+    let name = name.trim_end_matches(".git");
+    if owner.is_empty() || name.is_empty() {
+        return None;
+    }
+    let repo = RepoRef {
+        owner: owner.clone(),
+        name: name.to_string(),
+    };
+    let tail: Vec<&str> = tail.iter().map(String::as_str).collect();
+    let joined = |rest: &[&str]| {
+        Some(Link::Ref {
+            repo: repo.clone(),
+            rest: rest.join("/"),
+            line,
+        })
+    };
+
+    match tail.as_slice() {
+        // The two github.com writes differently. `blob`, `blame` and `raw` are
+        // three ways of looking at one file and `tree` is the directory it sits
+        // in; all four put a ref where our own links put the path.
+        ["blob" | "blame" | "raw" | "tree", rest @ ..] if !rest.is_empty() => joined(rest),
+        // `commits/<ref>` is a branch's history, which is the branch — and the
+        // same ref-or-path question. `commits/<sha>` is a commit, and falls
+        // through with the rest.
+        ["commits", rest @ ..] if !rest.is_empty() && !is_sha(rest[0]) => joined(rest),
+        // One commit of a pull request is that commit. The pull request it was
+        // being read inside of is not something this app's links can hold, and
+        // the commit is what was linked to.
+        ["pull" | "pulls", _, "commits", sha, ..] if is_sha(sha) => {
+            Some(Link::At(Route::to(Target::Commit(repo, sha.to_string()))))
+        }
+        // And everything else github.com writes as this app does, once the host
+        // is off the front: a pull request on whichever of its tabs, a commit,
+        // a comparison — `owner:ref` and all — and, for anything it has a page
+        // for that this app does not, the repository that page is of.
+        //
+        // Read by `parse`, which is where that grammar already lives rather
+        // than a second copy of it here.
+        _ => {
+            let route = parse(rest);
+            (route.at != Target::Home).then_some(Link::At(route))
+        }
+    }
+}
+
+/// The line a github.com anchor names.
+///
+/// `#L58`, and the `#L58-L72` and `#L58C5-L72C13` a selection is written as —
+/// the first line of one, since that is where a reader wants to be put down.
+/// Anything else github.com anchors with, `#diff-…` and `#issuecomment-…`
+/// among them, names no line.
+fn anchor_line(frag: &str) -> Option<usize> {
+    let digits = frag.trim().trim_start_matches('#').strip_prefix('L')?;
+    let end = digits
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(digits.len());
+    match digits[..end].parse::<usize>() {
+        Ok(line) if line > 0 => Some(line),
+        _ => None,
+    }
+}
+
+/// The ref `rest` begins with, out of the names that could be it: the longest
+/// one that is the whole front of it, up to a separator.
+///
+/// `main/src/main.rs` in a repository with both `main` and `main/src` is the
+/// second — the longer name accounts for more of what was written, and where
+/// two branches could both be meant the one that reaches further into the URL
+/// is the one whose page it came off.
+///
+/// `None` when nothing matches, which is what a link to a tag looks like: tags
+/// are not branches, and no list of branches will ever hold one.
+pub fn longest_ref<S: AsRef<str>>(rest: &str, names: &[S]) -> Option<String> {
+    names
+        .iter()
+        .map(AsRef::as_ref)
+        .filter(|name| {
+            !name.is_empty()
+                && (rest == *name || rest.strip_prefix(*name).is_some_and(|r| r.starts_with('/')))
+        })
+        .max_by_key(|name| name.len())
+        .map(str::to_string)
+}
+
+/// The route a github.com `blob`/`tree` tail names, once its ref is known.
+///
+/// Whatever `name` does not account for is the path inside it, and an empty
+/// remainder is the branch on its own — `tree/main` names no file.
+pub fn ref_route(repo: RepoRef, rest: &str, name: &str, line: Option<usize>) -> Route {
+    let tail = rest
+        .strip_prefix(name)
+        .unwrap_or_default()
+        .trim_start_matches('/');
+    Route {
+        at: Target::Branch(repo, name.to_string()),
+        place: path_of(tail).map(|path| Place { path, line }),
+    }
+}
+
+/// A path inside the repository, out of the segments github.com wrote it as.
+///
+/// No `:L42` to pick off the end the way [`place_of`] does: github.com writes
+/// the line in a fragment, so everything here is name.
+fn path_of(tail: &str) -> Option<PathBuf> {
+    let mut path = PathBuf::new();
+    for seg in tail.split('/') {
+        match seg {
+            // A link that climbs out of the repository names nothing in it.
+            "" | "." => {}
+            ".." => return None,
+            other => path.push(other),
+        }
+    }
+    (!path.as_os_str().is_empty()).then_some(path)
+}
+
+/// One field of a query string, decoded.
+///
+/// Form encoding, which is what a query string is: `+` is a space and the rest
+/// is `%XX`. Written out here rather than handed to `URLSearchParams` so that
+/// it can be tested off a browser, like everything else in this module.
+pub fn param(query: &str, name: &str) -> Option<String> {
+    query
+        .trim_start_matches('?')
+        .split('&')
+        .filter_map(|pair| pair.split_once('='))
+        .find(|(key, _)| *key == name)
+        .map(|(_, value)| decoded(&value.replace('+', " ")))
+}
+
 fn location() -> Option<web_sys::Location> {
     Some(web_sys::window()?.location())
 }
@@ -360,6 +586,60 @@ pub fn current() -> Route {
         .and_then(|l| l.hash().ok())
         .map(|hash| parse(&hash))
         .unwrap_or_default()
+}
+
+/// The fragment as written, before anything has been made of it.
+///
+/// What arrives there is not always one of our own links — a github.com URL
+/// dropped in after the `#` is read as what it obviously means, and telling
+/// which of the two it is takes [`github_link`] rather than [`parse`].
+pub fn fragment() -> String {
+    location().and_then(|l| l.hash().ok()).unwrap_or_default()
+}
+
+/// The link something outside the page handed over, out of the query string.
+///
+/// ```text
+/// …/?url=https%3A%2F%2Fgithub.com%2Fo%2Fr%2Fblob%2Fmain%2Fsrc%2Fmain.rs%23L58
+/// ```
+///
+/// This is how anything holding a github.com URL says "open this" — a browser
+/// extension with the repository page on screen, a bookmarklet, a link in a
+/// chat. The query and not the fragment because github.com writes the line in
+/// a fragment of its own and a URL has room for exactly one: `#L58` handed
+/// over unescaped would be read as *this* page's fragment, and the file it
+/// belongs to would be lost with it.
+///
+/// It is taken back out of the address bar as it is read, whether or not it
+/// parsed. What a reload re-opens should be the route the app went on to
+/// write — the fragment, which by then names the same place and is the link
+/// worth keeping — rather than the handoff that started it.
+pub fn take_handoff() -> Option<Link> {
+    let at = location()?;
+    let handed = param(&at.search().ok()?, HANDOFF)?;
+    // Before the parse, so that a URL this page cannot read is still gone on
+    // the next visit rather than failing again forever.
+    let hash = at.hash().unwrap_or_default();
+    clear_query(&at);
+    let mut link = github_link(&handed)?;
+    // The line, for a handoff that let `#L58` fall through to us: unescaped,
+    // the fragment of the URL being handed over becomes the fragment of the
+    // page it is handed to, and this is the other half of it arriving.
+    if let Link::Ref { line, .. } = &mut link
+        && line.is_none()
+    {
+        *line = anchor_line(&hash);
+    }
+    Some(link)
+}
+
+/// Put the address back to the page itself, with neither the handoff nor
+/// whatever fragment came in beside it — the route replaces both.
+fn clear_query(at: &web_sys::Location) {
+    let Some(win) = web_sys::window() else { return };
+    let Ok(history) = win.history() else { return };
+    let path = at.pathname().unwrap_or_else(|_| "/".to_string());
+    let _ = history.replace_state_with_url(&wasm_bindgen::JsValue::NULL, "", Some(&path));
 }
 
 /// The whole address, as something to paste somewhere else.
@@ -408,7 +688,7 @@ pub fn replace(route: &Route) {
 mod tests {
     use super::*;
 
-    fn repo(owner: &str, name: &str) -> RepoRef {
+    fn repo_of(owner: &str, name: &str) -> RepoRef {
         RepoRef {
             owner: owner.to_string(),
             name: name.to_string(),
@@ -424,14 +704,14 @@ mod tests {
 
     #[test]
     fn a_pull_request_round_trips() {
-        let route = Route::to(Target::Pr(repo("rust-lang", "rust"), 12345));
+        let route = Route::to(Target::Pr(repo_of("rust-lang", "rust"), 12345));
         assert_eq!(route.hash(), "#/rust-lang/rust/pull/12345");
         assert_eq!(parse(&route.hash()), route);
     }
 
     #[test]
     fn a_repository_round_trips() {
-        let route = Route::to(Target::Repo(repo("DioxusLabs", "dioxus")));
+        let route = Route::to(Target::Repo(repo_of("DioxusLabs", "dioxus")));
         assert_eq!(route.hash(), "#/DioxusLabs/dioxus");
         assert_eq!(parse(&route.hash()), route);
     }
@@ -439,7 +719,7 @@ mod tests {
     #[test]
     fn a_branch_round_trips() {
         let route = Route::to(Target::Branch(
-            repo("DioxusLabs", "dioxus"),
+            repo_of("DioxusLabs", "dioxus"),
             "main".to_string(),
         ));
         assert_eq!(route.hash(), "#/DioxusLabs/dioxus/tree/main");
@@ -448,7 +728,7 @@ mod tests {
         // And a file of one, which is what a link into a branch is usually
         // made to point at.
         let route = Route {
-            at: Target::Branch(repo("o", "r"), "dev".to_string()),
+            at: Target::Branch(repo_of("o", "r"), "dev".to_string()),
             place: place("src/main.rs", Some(42)),
         };
         assert_eq!(route.hash(), "#/o/r/tree/dev/blob/src/main.rs:L42");
@@ -460,7 +740,7 @@ mod tests {
     #[test]
     fn a_branch_with_a_slash_in_it_round_trips() {
         let route = Route {
-            at: Target::Branch(repo("o", "r"), "feat/branch-list".to_string()),
+            at: Target::Branch(repo_of("o", "r"), "feat/branch-list".to_string()),
             place: place("src/ui/app.rs", None),
         };
         assert_eq!(
@@ -470,7 +750,7 @@ mod tests {
         assert_eq!(parse(&route.hash()), route);
 
         // Written out in full, with no file after it.
-        let route = Route::to(Target::Branch(repo("o", "r"), "a/b/c".to_string()));
+        let route = Route::to(Target::Branch(repo_of("o", "r"), "a/b/c".to_string()));
         assert_eq!(route.hash(), "#/o/r/tree/a/b/c");
         assert_eq!(parse(&route.hash()), route);
     }
@@ -478,7 +758,7 @@ mod tests {
     #[test]
     fn a_comparison_round_trips() {
         let route = Route::to(Target::Compare(
-            repo("o", "r"),
+            repo_of("o", "r"),
             "main".to_string(),
             "feat/thing".to_string(),
         ));
@@ -487,7 +767,7 @@ mod tests {
 
         // And a line of a file inside one.
         let route = Route {
-            at: Target::Compare(repo("o", "r"), "v1.0".to_string(), "main".to_string()),
+            at: Target::Compare(repo_of("o", "r"), "v1.0".to_string(), "main".to_string()),
             place: place("src/main.rs", Some(9)),
         };
         assert_eq!(
@@ -504,7 +784,7 @@ mod tests {
     fn a_comparison_of_two_slashed_branches_round_trips() {
         let route = Route {
             at: Target::Compare(
-                repo("o", "r"),
+                repo_of("o", "r"),
                 "release/1.2".to_string(),
                 "feat/deep/work".to_string(),
             ),
@@ -524,7 +804,7 @@ mod tests {
         assert_eq!(
             parse("#https://github.com/o/r/compare/main...dev"),
             Route::to(Target::Compare(
-                repo("o", "r"),
+                repo_of("o", "r"),
                 "main".to_string(),
                 "dev".to_string()
             ))
@@ -532,7 +812,7 @@ mod tests {
         assert_eq!(
             parse("#/o/r/compare/bigmah:ecbee88...bigmah:2740204"),
             Route::to(Target::Compare(
-                repo("o", "r"),
+                repo_of("o", "r"),
                 "bigmah:ecbee88".to_string(),
                 "bigmah:2740204".to_string()
             ))
@@ -549,7 +829,7 @@ mod tests {
         ] {
             assert_eq!(
                 parse(text),
-                Route::to(Target::Repo(repo("o", "r"))),
+                Route::to(Target::Repo(repo_of("o", "r"))),
                 "{text}"
             );
         }
@@ -561,14 +841,14 @@ mod tests {
         assert_eq!(
             parse("#https://github.com/rust-lang/rust/tree/master"),
             Route::to(Target::Branch(
-                repo("rust-lang", "rust"),
+                repo_of("rust-lang", "rust"),
                 "master".to_string()
             ))
         );
         // And `tree` with nothing after it is just the repository.
         assert_eq!(
             parse("#/rust-lang/rust/tree/"),
-            Route::to(Target::Repo(repo("rust-lang", "rust")))
+            Route::to(Target::Repo(repo_of("rust-lang", "rust")))
         );
     }
 
@@ -578,12 +858,12 @@ mod tests {
     fn a_branch_called_blob_is_still_a_branch() {
         assert_eq!(
             parse("#/o/r/tree/blob"),
-            Route::to(Target::Branch(repo("o", "r"), "blob".to_string()))
+            Route::to(Target::Branch(repo_of("o", "r"), "blob".to_string()))
         );
         assert_eq!(
             parse("#/o/r/tree/blob/blob/a.rs"),
             Route {
-                at: Target::Branch(repo("o", "r"), "blob".to_string()),
+                at: Target::Branch(repo_of("o", "r"), "blob".to_string()),
                 place: place("a.rs", None),
             }
         );
@@ -592,7 +872,7 @@ mod tests {
     #[test]
     fn a_line_of_a_pull_request_round_trips() {
         let route = Route {
-            at: Target::Pr(repo("rust-lang", "rust"), 7),
+            at: Target::Pr(repo_of("rust-lang", "rust"), 7),
             place: place("src/ui/app.rs", Some(42)),
         };
         assert_eq!(
@@ -605,14 +885,17 @@ mod tests {
     #[test]
     fn a_commit_round_trips() {
         let sha = "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0";
-        let route = Route::to(Target::Commit(repo("rust-lang", "rust"), sha.to_string()));
+        let route = Route::to(Target::Commit(
+            repo_of("rust-lang", "rust"),
+            sha.to_string(),
+        ));
         assert_eq!(route.hash(), format!("#/rust-lang/rust/commit/{sha}"));
         assert_eq!(parse(&route.hash()), route);
 
         // And a line of a file inside one, which is what a link to a commit is
         // usually made to point at.
         let route = Route {
-            at: Target::Commit(repo("o", "r"), "abc1234".to_string()),
+            at: Target::Commit(repo_of("o", "r"), "abc1234".to_string()),
             place: place("src/main.rs", Some(42)),
         };
         assert_eq!(route.hash(), "#/o/r/commit/abc1234/files/src/main.rs:L42");
@@ -624,7 +907,7 @@ mod tests {
     fn a_commit_link_pasted_after_the_hash_is_read_as_one() {
         assert_eq!(
             parse("#https://github.com/o/r/commit/abc1234"),
-            Route::to(Target::Commit(repo("o", "r"), "abc1234".to_string()))
+            Route::to(Target::Commit(repo_of("o", "r"), "abc1234".to_string()))
         );
     }
 
@@ -640,7 +923,7 @@ mod tests {
         ] {
             assert_eq!(
                 parse(text),
-                Route::to(Target::Repo(repo("o", "r"))),
+                Route::to(Target::Repo(repo_of("o", "r"))),
                 "{text}"
             );
         }
@@ -649,7 +932,7 @@ mod tests {
     #[test]
     fn a_file_of_a_repository_round_trips() {
         let route = Route {
-            at: Target::Repo(repo("rust-lang", "rust")),
+            at: Target::Repo(repo_of("rust-lang", "rust")),
             place: place("README.md", None),
         };
         assert_eq!(route.hash(), "#/rust-lang/rust/blob/README.md");
@@ -659,7 +942,7 @@ mod tests {
     #[test]
     fn a_path_with_something_in_it_that_a_url_cannot_hold() {
         let route = Route {
-            at: Target::Repo(repo("o", "r")),
+            at: Target::Repo(repo_of("o", "r")),
             place: place("docs/getting started #1.md", Some(3)),
         };
         assert_eq!(
@@ -674,15 +957,15 @@ mod tests {
     fn a_repository_called_files_is_still_a_repository() {
         assert_eq!(
             parse("#/torvalds/files/pull/9"),
-            Route::to(Target::Pr(repo("torvalds", "files"), 9))
+            Route::to(Target::Pr(repo_of("torvalds", "files"), 9))
         );
         assert_eq!(
             parse("#/torvalds/blob"),
-            Route::to(Target::Repo(repo("torvalds", "blob")))
+            Route::to(Target::Repo(repo_of("torvalds", "blob")))
         );
         assert_eq!(
             parse("#/torvalds/tree/pull/9"),
-            Route::to(Target::Pr(repo("torvalds", "tree"), 9))
+            Route::to(Target::Pr(repo_of("torvalds", "tree"), 9))
         );
     }
 
@@ -707,18 +990,18 @@ mod tests {
     fn a_link_pasted_after_the_hash_is_read_as_one() {
         assert_eq!(
             parse("#https://github.com/rust-lang/rust/pull/7"),
-            Route::to(Target::Pr(repo("rust-lang", "rust"), 7))
+            Route::to(Target::Pr(repo_of("rust-lang", "rust"), 7))
         );
         // And a trailing slash is not a third path segment.
         assert_eq!(
             parse("#/rust-lang/rust/"),
-            Route::to(Target::Repo(repo("rust-lang", "rust")))
+            Route::to(Target::Repo(repo_of("rust-lang", "rust")))
         );
         // github.com's own file link, which is the one people have to hand.
         assert_eq!(
             parse("#https://github.com/rust-lang/rust/pull/7/files/src/main.rs:L2"),
             Route {
-                at: Target::Pr(repo("rust-lang", "rust"), 7),
+                at: Target::Pr(repo_of("rust-lang", "rust"), 7),
                 place: place("src/main.rs", Some(2)),
             }
         );
@@ -728,7 +1011,7 @@ mod tests {
     fn a_pull_number_that_is_not_a_number_is_still_the_repository() {
         assert_eq!(
             parse("#/rust-lang/rust/pull/abc"),
-            Route::to(Target::Repo(repo("rust-lang", "rust")))
+            Route::to(Target::Repo(repo_of("rust-lang", "rust")))
         );
     }
 
@@ -742,6 +1025,258 @@ mod tests {
     #[test]
     fn line_zero_is_not_a_line() {
         assert_eq!(parse("#/o/r/blob/a.rs:L0").place, place("a.rs:L0", None));
+    }
+
+    // ---------------------------------------------------------- github.com
+
+    fn refs(link: &Link) -> (&str, Option<usize>) {
+        match link {
+            Link::Ref { rest, line, .. } => (rest, *line),
+            other => panic!("not a ref: {other:?}"),
+        }
+    }
+
+    /// The whole reason this grammar is read separately: github.com writes the
+    /// branch where our own links write the path, and the pair arrives joined.
+    #[test]
+    fn a_github_blob_url_keeps_the_ref_and_the_path_together() {
+        let link = github_link("https://github.com/bigmah/arxiv-reader/blob/main/src/main.rs#L58")
+            .unwrap();
+        assert_eq!(refs(&link), ("main/src/main.rs", Some(58)));
+        let Link::Ref { repo, .. } = &link else {
+            unreachable!()
+        };
+        assert_eq!(*repo, repo_of("bigmah", "arxiv-reader"));
+    }
+
+    /// And a directory, which is what the page a reader is on usually is.
+    #[test]
+    fn a_github_tree_url_is_a_ref_and_a_directory() {
+        let link = github_link("https://github.com/bigmah/arxiv-reader/blob/main/src/").unwrap();
+        assert_eq!(refs(&link), ("main/src", None));
+        let link = github_link("github.com/o/r/tree/main/src/ui").unwrap();
+        assert_eq!(refs(&link), ("main/src/ui", None));
+    }
+
+    /// Nothing but a github.com URL: our own links put the path straight after
+    /// `blob`, and reading one in github.com's grammar would eat a directory
+    /// as the branch.
+    #[test]
+    fn our_own_links_are_not_github_links() {
+        for ours in [
+            "#/o/r/blob/src/main.rs",
+            "/o/r/blob/src/main.rs",
+            "o/r/tree/main",
+            "o/r",
+            "",
+        ] {
+            assert!(github_link(ours).is_none(), "{ours}");
+        }
+        // A URL naming no repository is the picker's business, not ours.
+        assert!(github_link("https://github.com/torvalds").is_none());
+    }
+
+    /// The three other words for a file, and the selection anchors github.com
+    /// writes when more than one line is picked out.
+    #[test]
+    fn the_other_ways_github_writes_a_file() {
+        for url in [
+            "https://github.com/o/r/blob/main/a.rs#L58-L72",
+            "https://github.com/o/r/blame/main/a.rs#L58C5-L72C13",
+            "http://www.github.com/o/r/raw/main/a.rs#L58",
+            "https://github.com/o/r/blob/main/a.rs?plain=1#L58",
+        ] {
+            assert_eq!(
+                refs(&github_link(url).unwrap()),
+                ("main/a.rs", Some(58)),
+                "{url}"
+            );
+        }
+        // An anchor that is not a line names none: a diff, and a comment.
+        for url in [
+            "https://github.com/o/r/blob/main/a.rs#diff-2740204",
+            "https://github.com/o/r/blob/main/a.rs#L0",
+            "https://github.com/o/r/blob/main/a.rs",
+        ] {
+            assert_eq!(
+                refs(&github_link(url).unwrap()),
+                ("main/a.rs", None),
+                "{url}"
+            );
+        }
+    }
+
+    /// Everything github.com writes the way this app does, which needs no
+    /// asking after.
+    #[test]
+    fn the_forms_github_and_this_app_agree_on() {
+        fn at(url: &str) -> Route {
+            match github_link(url) {
+                Some(Link::At(route)) => route,
+                other => panic!("not a route: {other:?}"),
+            }
+        }
+        assert_eq!(
+            at("https://github.com/rust-lang/rust/pull/12345/files"),
+            Route::to(Target::Pr(repo_of("rust-lang", "rust"), 12345))
+        );
+        // A pull request's other tabs are the same pull request.
+        assert_eq!(
+            at("https://github.com/o/r/pull/7/checks?check_run_id=1"),
+            Route::to(Target::Pr(repo_of("o", "r"), 7))
+        );
+        let sha = "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0";
+        assert_eq!(
+            at(&format!("https://github.com/o/r/commit/{sha}#diff-abc")),
+            Route::to(Target::Commit(repo_of("o", "r"), sha.to_string()))
+        );
+        // One commit of a pull request is that commit.
+        assert_eq!(
+            at(&format!("https://github.com/o/r/pull/7/commits/{sha}")),
+            Route::to(Target::Commit(repo_of("o", "r"), sha.to_string()))
+        );
+        assert_eq!(
+            at("https://github.com/o/r/compare/main...feat/thing"),
+            Route::to(Target::Compare(
+                repo_of("o", "r"),
+                "main".to_string(),
+                "feat/thing".to_string()
+            ))
+        );
+        // A branch's history is that branch, and needs the same asking after
+        // as any other ref.
+        assert_eq!(
+            refs(&github_link("https://github.com/o/r/commits/main").unwrap()),
+            ("main", None)
+        );
+        // And the pages this app has nothing of its own to show for are the
+        // repository they are pages of.
+        for url in [
+            "https://github.com/o/r",
+            "https://github.com/o/r.git",
+            "https://github.com/o/r/issues/12",
+            "https://github.com/o/r/actions",
+            "https://github.com/o/r/pull/not-a-number",
+            "https://github.com/o/r/compare/main",
+        ] {
+            assert_eq!(at(url), Route::to(Target::Repo(repo_of("o", "r"))), "{url}");
+        }
+    }
+
+    /// The shared forms go through `parse`, so a file named inside one is
+    /// still read — the two grammars only part company at `blob` and `tree`.
+    #[test]
+    fn a_file_named_inside_a_shared_form_survives_the_host() {
+        let Some(Link::At(route)) =
+            github_link("https://github.com/rust-lang/rust/pull/7/files/src/main.rs:L2")
+        else {
+            panic!("not a route")
+        };
+        assert_eq!(
+            route,
+            Route {
+                at: Target::Pr(repo_of("rust-lang", "rust"), 7),
+                place: place("src/main.rs", Some(2)),
+            }
+        );
+        // And the same link with no host on it reads identically.
+        assert_eq!(parse("#/rust-lang/rust/pull/7/files/src/main.rs:L2"), route);
+    }
+
+    /// The question the branch list answers: the longest name that is the
+    /// whole front of what was written, up to a separator.
+    #[test]
+    fn the_longest_branch_that_fits_is_the_branch() {
+        let rest = "main/src/main.rs";
+        assert_eq!(longest_ref(rest, &["main"]).as_deref(), Some("main"));
+        assert_eq!(
+            longest_ref(rest, &["main", "main/src", "mainline"]).as_deref(),
+            Some("main/src")
+        );
+        // A name that is not the front of it at a separator is not it.
+        assert_eq!(longest_ref(rest, &["mainline", "ma", "src"]), None);
+        // The whole of it, with nothing after: a branch with no file named.
+        assert_eq!(
+            longest_ref("feat/thing", &["feat", "feat/thing"]).as_deref(),
+            Some("feat/thing")
+        );
+        assert_eq!(longest_ref("main", &[] as &[&str]), None);
+    }
+
+    /// And what falls out of the answer, both ways round.
+    #[test]
+    fn a_ref_and_a_path_become_a_route() {
+        assert_eq!(
+            ref_route(repo_of("o", "r"), "main/src/main.rs", "main", Some(58)),
+            Route {
+                at: Target::Branch(repo_of("o", "r"), "main".to_string()),
+                place: place("src/main.rs", Some(58)),
+            }
+        );
+        assert_eq!(
+            ref_route(repo_of("o", "r"), "feat/thing/a.rs", "feat/thing", None),
+            Route {
+                at: Target::Branch(repo_of("o", "r"), "feat/thing".to_string()),
+                place: place("a.rs", None),
+            }
+        );
+        // A branch with nothing after it names no file.
+        assert_eq!(
+            ref_route(repo_of("o", "r"), "feat/thing", "feat/thing", None),
+            Route::to(Target::Branch(repo_of("o", "r"), "feat/thing".to_string()))
+        );
+        // And the route it becomes is one of ours, which round-trips.
+        let route = ref_route(repo_of("o", "r"), "main/src/main.rs", "main", Some(58));
+        assert_eq!(route.hash(), "#/o/r/tree/main/blob/src/main.rs:L58");
+        assert_eq!(parse(&route.hash()), route);
+    }
+
+    /// A path that climbs out of the repository names nothing in it, here as
+    /// much as in a link of our own.
+    #[test]
+    fn a_github_path_cannot_climb_out_of_the_repository() {
+        let route = ref_route(repo_of("o", "r"), "main/../../etc/passwd", "main", None);
+        assert_eq!(route.place, None);
+    }
+
+    /// What github.com escapes, and what it does not: a space in a filename is
+    /// `%20`, and the slashes of a branch are slashes.
+    #[test]
+    fn a_github_url_is_unescaped_segment_by_segment() {
+        let link = github_link("https://github.com/o/r/blob/feat/a%20b/docs/getting%20started.md")
+            .unwrap();
+        assert_eq!(refs(&link), ("feat/a b/docs/getting started.md", None));
+        assert_eq!(
+            ref_route(
+                repo_of("o", "r"),
+                "feat/a b/docs/getting started.md",
+                "feat/a b",
+                None
+            ),
+            Route {
+                at: Target::Branch(repo_of("o", "r"), "feat/a b".to_string()),
+                place: place("docs/getting started.md", None),
+            }
+        );
+    }
+
+    /// The handoff, as an extension will write it: the whole URL escaped into
+    /// one field, `#L58` and all.
+    #[test]
+    fn a_handed_over_url_is_read_out_of_the_query() {
+        let query = "?url=https%3A%2F%2Fgithub.com%2Fo%2Fr%2Fblob%2Fmain%2Fsrc%2Fmain.rs%23L58";
+        let handed = param(query, "url").unwrap();
+        assert_eq!(handed, "https://github.com/o/r/blob/main/src/main.rs#L58");
+        assert_eq!(
+            refs(&github_link(&handed).unwrap()),
+            ("main/src/main.rs", Some(58))
+        );
+
+        // Among other fields, and with the form encoding a query string has.
+        assert_eq!(param("?a=1&url=o%2Br&b=2", "url").as_deref(), Some("o+r"));
+        assert_eq!(param("url=a+b", "url").as_deref(), Some("a b"));
+        assert_eq!(param("?other=1", "url"), None);
+        assert_eq!(param("", "url"), None);
     }
 
     #[test]

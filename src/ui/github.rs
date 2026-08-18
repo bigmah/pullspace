@@ -25,7 +25,7 @@ use crate::backend::github::{
     self, CommitFrom, OwnerHit, PR_PAGE, PrState, PrSummary, RepoHit, RepoRef, RepoView,
     parse_commit_target, parse_owner, parse_target,
 };
-use crate::backend::route;
+use crate::backend::route::{self, Link, Route, Target};
 
 use super::app::{Account, Fetch, Got, PrList, St};
 use super::compat;
@@ -1211,6 +1211,14 @@ fn do_sign_out(st: St) {
 /// diff.
 async fn open_target(st: St) {
     let raw = st.repo_input.peek().clone();
+    // A github.com URL, read in github.com's own grammar: its `blob/main/…`
+    // writes a branch where this app's own links write a path, so what came
+    // off a browser's address bar has to be read as that browser had it. Only
+    // a URL comes through here — `owner/repo/tree/main` typed by hand is still
+    // one of ours, and is read below.
+    if let Some(link) = route::github_link(&raw) {
+        return open_route(st, read_link(st, link).await).await;
+    }
     // Before the repository: `owner/repo/commit/<sha>` names a repository as
     // well, and answering with that one would drop the half that was pasted.
     if let Some((repo, sha)) = parse_commit_target(&raw) {
@@ -1264,6 +1272,70 @@ pub(super) async fn load_repo_prs(st: St, repo: RepoRef) {
     if wanted {
         prs.set(Some(PrList { repo, state, got }));
     }
+}
+
+/// Open what a route names, and wait for it.
+///
+/// The awaited half of [`nav::go`](super::nav), for the callers that are
+/// already inside a task rather than starting one — the picker, and a link
+/// arriving from outside.
+pub(super) async fn open_route(st: St, route: Route) {
+    // The file it names, if it names one, kept for the moment there is a tree
+    // to find it in — which is several requests away.
+    let mut pending = st.pending;
+    pending.set(route.place);
+    match route.at {
+        Target::Home => st.close_workspace(),
+        Target::Repo(repo) => browse_repo(st, repo).await,
+        Target::Branch(repo, branch) => browse_branch(st, repo, branch, None).await,
+        Target::Compare(repo, base, head) => open_compare(st, repo, base, head).await,
+        Target::Pr(repo, number) => open_pr(st, repo, number).await,
+        Target::Commit(repo, sha) => open_commit(st, repo, sha, CommitFrom::Alone).await,
+    }
+}
+
+/// One piece of address, read in whichever grammar it is written in: this
+/// app's own links, and github.com's.
+pub(super) async fn read_route(st: St, text: &str) -> Route {
+    match route::github_link(text) {
+        Some(link) => read_link(st, link).await,
+        None => route::parse(text),
+    }
+}
+
+/// Finish reading a github.com link: the ref told from the path.
+///
+/// `blob/main/src/main.rs` is a branch and a file inside it, and only the
+/// repository knows where the first ends — a branch may be called `main/src`
+/// as readily as `main`. So a link with more than one segment left costs one
+/// request to GitHub's index of refs, and the longest branch that is the front
+/// of what was written wins.
+///
+/// Nothing matching means no branch by that name at all, which is what a link
+/// to a tag looks like — and a tag is one segment, so the first segment is the
+/// answer. That is also what github.com's own URLs mean nearly every time,
+/// which is why the guess is worth making rather than refusing.
+pub(super) async fn read_link(st: St, link: Link) -> Route {
+    let (repo, rest, line) = match link {
+        Link::At(route) => return route,
+        Link::Ref { repo, rest, line } => (repo, rest, line),
+    };
+    let head = rest.split('/').next().unwrap_or_default();
+    // One segment is all ref and no path to tell it from, and a sha is never a
+    // directory of the tree it names. Neither is worth a request.
+    if head == rest || github::is_sha(head) {
+        return route::ref_route(repo, &rest, head, line);
+    }
+    let mut fetch = st.fetch;
+    fetch.set(Fetch::Working(format!("Looking for {head}…")));
+    let names: Vec<String> = github::matching_branches(&st.api_token(), &repo, head)
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .map(|b| b.name)
+        .collect();
+    let name = route::longest_ref(&rest, &names).unwrap_or_else(|| head.to_string());
+    route::ref_route(repo, &rest, &name, line)
 }
 
 /// Open a repository with no pull request involved: its default branch, at the

@@ -1107,11 +1107,49 @@ impl St {
     /// Go where a link points, inside what is already open.
     pub fn open_place(&self, place: Place) -> bool {
         if !self.has_file(&place.path) {
-            return false;
+            // Not a file: a link naming a directory, which github.com hands
+            // out as readily as one naming a file — and which a browser
+            // extension passing on the page it was called from will hand over
+            // whatever the reader happened to be looking at. The explorer
+            // opened down to it is all there is to show for one, since there
+            // is nothing to put in the viewer.
+            return self.reveal_dir(&place.path);
         }
         match place.line {
             Some(line) => self.open_at(place.path, line),
             None => self.open_file(place.path),
+        }
+        true
+    }
+
+    /// Whether a repo-relative path is a directory of what is on show —
+    /// which [`has_file`](Self::has_file) answers no to, the tree being built
+    /// from file paths alone.
+    pub fn has_dir(&self, rel: &Path) -> bool {
+        match &*self.workspace.peek() {
+            Workspace::Empty => false,
+            Workspace::Pr(pr) => pr.tree.has_dir(rel),
+            Workspace::Repo(view) => view.tree.has_dir(rel),
+            Workspace::Commit(view) => view.tree.has_dir(rel),
+            Workspace::Compare(view) => view.tree.has_dir(rel),
+        }
+    }
+
+    /// Open the explorer down to a directory, and say whether there was one.
+    ///
+    /// Writes the folds directly rather than going through the file being
+    /// read, which is what the explorer's own reveal hangs off — there is no
+    /// file here, and a directory is the whole of what was asked for.
+    fn reveal_dir(&self, rel: &Path) -> bool {
+        if !self.has_dir(rel) {
+            return false;
+        }
+        let mut expanded = self.expanded;
+        let mut folds = expanded.write();
+        let mut dir = Some(rel);
+        while let Some(d) = dir.filter(|d| !d.as_os_str().is_empty()) {
+            folds.insert(d.to_path_buf(), true);
+            dir = d.parent();
         }
         true
     }

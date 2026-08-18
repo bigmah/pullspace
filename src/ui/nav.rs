@@ -14,12 +14,12 @@ use std::time::Duration;
 
 use dioxus::prelude::*;
 
-use crate::backend::github::{CommitFrom, RepoRef};
+use crate::backend::github::RepoRef;
 use crate::backend::route::{self, Route, Target};
 
 use super::app::{Account, St};
 use super::compat;
-use super::github::{browse_branch, browse_repo, open_commit, open_compare, open_pr};
+use super::github::{open_route, read_link, read_route};
 
 /// How often to look in on the saved token while it is being checked. Short
 /// enough not to be felt on the way in to a link.
@@ -47,7 +47,7 @@ const HASH_JS: &str = r#"
 pub async fn watch(st: St) {
     let mut eval = document::eval(HASH_JS);
     while let Ok(hash) = eval.recv::<String>().await {
-        let asked = route::parse(&hash);
+        let asked = read_route(st, &hash).await;
         let here = st.route();
         // Our own writes come back through here. What is already on screen is
         // nothing to go and fetch — and reloading it under somebody would throw
@@ -74,12 +74,19 @@ pub async fn watch(st: St) {
 /// out. A private pull request asked for anonymously comes back 404, and a link
 /// to one is exactly the sort of link somebody pastes into a fresh tab.
 pub async fn landing(st: St) {
+    // Read before the wait, not after: the handoff is taken back out of the
+    // address bar as it is read, and there is nothing to be gained by leaving
+    // it sitting there while a token is checked.
+    let handed = route::take_handoff();
     while matches!(*st.account.peek(), Account::Checking) {
         compat::sleep(POLL).await;
     }
-    // Read now rather than at mount: nothing writes the bar before this runs,
-    // and reading it here is one less thing to keep in step.
-    let asked = route::current();
+    let asked = match handed {
+        Some(link) => read_link(st, link).await,
+        // Read now rather than at mount: nothing writes the bar before this
+        // runs, and reading it here is one less thing to keep in step.
+        None => read_route(st, &route::fragment()).await,
+    };
     // Nothing linked to. The landing page is already up, which is the whole of
     // what "home" means here.
     if asked.at != Target::Home {
@@ -89,42 +96,19 @@ pub async fn landing(st: St) {
 
 /// Go where the address bar says.
 fn go(st: St, asked: Route) {
-    // The file it names, if it names one, kept for the moment there is a tree
-    // to find it in — which is several requests away.
-    let mut pending = st.pending;
-    pending.set(asked.place);
-    match asked.at {
-        Target::Home => st.close_workspace(),
-        Target::Repo(repo) => {
-            name_it(st, &repo);
-            // Root scope: a load outlives whatever component happens to be on
-            // screen when the URL changes.
-            spawn_forever(browse_repo(st, repo));
-        }
-        // A link naming a branch says nothing about where its tip is — that is
-        // the point of naming a branch rather than a commit — so it is looked
-        // up on the way in.
-        Target::Branch(repo, branch) => {
-            name_it(st, &repo);
-            spawn_forever(browse_branch(st, repo, branch, None));
-        }
-        Target::Compare(repo, base, head) => {
-            name_it(st, &repo);
-            spawn_forever(open_compare(st, repo, base, head));
-        }
-        Target::Pr(repo, number) => {
-            name_it(st, &repo);
-            spawn_forever(open_pr(st, repo, number));
-        }
-        // A commit reached by its own link — Back out of one, or a link
-        // somebody sent — arrives without the pull request or the branch it may
-        // have been opened out of. It is the commit that was linked to, so the
-        // commit is what opens.
-        Target::Commit(repo, sha) => {
-            name_it(st, &repo);
-            spawn_forever(open_commit(st, repo, sha, CommitFrom::Alone));
-        }
+    if let Some(repo) = asked.at.repo() {
+        name_it(st, repo);
     }
+    // Root scope: a load outlives whatever component happens to be on screen
+    // when the URL changes.
+    //
+    // A branch is looked up on the way in rather than carried in the link — a
+    // link naming a branch says nothing about where its tip is, which is the
+    // point of naming a branch rather than a commit. And a commit reached by
+    // its own link, Back out of one or a link somebody sent, arrives without
+    // the pull request or the branch it may have been opened out of: it is the
+    // commit that was linked to, so the commit is what opens.
+    spawn_forever(open_route(st, asked));
 }
 
 /// Put the repository in the picker's box on the way past, so that opening the

@@ -1034,6 +1034,16 @@ impl Snapshot {
         self.files.iter().map(|f| f.path.as_path())
     }
 
+    /// Whether anything in the repository is inside this directory.
+    ///
+    /// Directories are not entries of their own — the tree is rebuilt from the
+    /// blob paths alone, see [`repo_tree`] — so a directory is a path some file
+    /// is under. Component by component, so `src` is the front of `src/main.rs`
+    /// and not of `srcery/lib.rs`.
+    pub fn has_dir(&self, dir: &std::path::Path) -> bool {
+        !dir.as_os_str().is_empty() && self.files.iter().any(|f| f.path.starts_with(dir))
+    }
+
     /// The blob one path is made of at this commit.
     pub fn entry(&self, path: &std::path::Path) -> Option<&TreeEntry> {
         self.files
@@ -3250,6 +3260,29 @@ mod tests {
         assert_eq!(encode_path("a b/c#d.rs"), "a%20b/c%23d.rs");
         // Separators survive; segment contents do not.
         assert_eq!(encode_path("dir/sub dir/f.rs"), "dir/sub%20dir/f.rs");
+    }
+
+    /// Directories are not entries of the tree — it is rebuilt from the blob
+    /// paths — so this is what a link naming one is checked against.
+    #[test]
+    fn a_directory_is_a_path_some_file_is_under() {
+        let mut tree = Snapshot::default();
+        for path in ["src/main.rs", "src/ui/app.rs", "srcery/lib.rs", "README.md"] {
+            tree.files.push(TreeEntry {
+                path: PathBuf::from(path),
+                sha: String::new(),
+                size: 0,
+            });
+        }
+        assert!(tree.has_dir(Path::new("src")));
+        assert!(tree.has_dir(Path::new("src/ui")));
+        // Component by component: `src` is not the front of `srcery`.
+        assert!(!tree.has_dir(Path::new("sr")));
+        assert!(!tree.has_dir(Path::new("src/nope")));
+        // A file is not a directory to open, and the root is not one to name.
+        assert!(!tree.has_dir(Path::new("")));
+        // The root itself has no entry, and neither does an empty repository.
+        assert!(!Snapshot::default().has_dir(Path::new("src")));
     }
 
     #[test]

@@ -84,6 +84,47 @@ failing test is one click from the code that failed it.
 A panel across the bottom of the code holds the answer to "where else is this?"
 — search hits, references, definitions — and closes again once it has been read.
 
+## Opening from github.com
+
+Any github.com URL opens here. Paste one into the picker, drop one in after the
+`#`, or hand one over in a query field:
+
+```text
+…/?url=https%3A%2F%2Fgithub.com%2Fo%2Fr%2Fblob%2Fmain%2Fsrc%2Fmain.rs%23L58
+```
+
+```js
+// what the extension has to build, whatever it is written with —
+// `where` being wherever this page is served from
+const to = `${where}?url=${encodeURIComponent(tab.url)}`;
+```
+
+That last one is the way in for anything holding a URL rather than one of our
+own links — a browser extension with the repository page on screen, a
+bookmarklet, a link in a chat. It is the query and not the fragment because
+github.com writes the line it is pointing at in a fragment of its own, and a
+URL has room for exactly one: `#L58` handed over unescaped would be read as
+*this* page's fragment and the file it belongs to would be lost with it. The
+field is read once and taken back out of the address bar, so what a reload
+re-opens is the ordinary `#/owner/repo/…` link the app writes in its place.
+
+Nine of github.com's own words are read: `blob`, `blame` and `raw` are a file,
+`tree` is the directory it is in, `pull` is a pull request whichever of its tabs
+the URL is on, `commit` is a commit, `commits` is either a commit or a branch's
+history, and `compare` is a comparison. `#L58` opens that line, and `#L58-L72`
+opens the first of them. Anything else a repository has a page for — issues,
+actions, settings — opens the repository, which is the part of such a page this
+app has something to show for.
+
+The one thing that takes asking after is where a ref ends. `blob/main/src/main.rs`
+is the branch `main` holding `src/main.rs` — or the branch `main/src` holding
+`main.rs`, and nothing in the URL says which, since both are written with the
+same separator. github.com knows its own branches; this page has to ask, so a
+link with a path in it costs one request to GitHub's index of refs and the
+longest branch that is the whole front of what was written wins. Nothing
+matching means no branch by that name at all, which is what a link to a tag
+looks like — and the first segment is then the answer.
+
 ## Running it
 ```sh
 cargo install dioxus-cli --version 0.6.3 --locked   # once, for `dx`

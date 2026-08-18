@@ -94,10 +94,17 @@ Any github.com URL opens here. Paste one into the picker, drop one in after the
 ```
 
 ```js
-// what the extension has to build, whatever it is written with —
+// what a caller has to build, whatever it is written with —
 // `where` being wherever this page is served from
 const to = `${where}?url=${encodeURIComponent(tab.url)}`;
 ```
+
+[`extension/`](extension/) is a Chrome extension that does exactly that and
+nothing else: a toolbar button, a right-click entry and `Alt+Shift+P`, each of
+which opens the github.com page you are on in your copy of pullspace. It asks
+for `activeTab` and no host permissions, so it can read the address of the tab
+you pressed the button on and nothing else. Its README covers loading it from
+source and publishing it to the Chrome Web Store.
 
 That last one is the way in for anything holding a URL rather than one of our
 own links — a browser extension with the repository page on screen, a
@@ -139,6 +146,8 @@ cargo test      # the pure logic — diff model, markdown, tree, search, parsing
 cargo check     # host target, which is what `cargo test` builds
 cargo check --target wasm32-unknown-unknown   # what actually ships
 dx build --platform web --release
+
+cd extension && node --test test.js   # the browser extension's half of `?url=`
 ```
 
 ## Signing in (Private repos)
@@ -296,6 +305,10 @@ src/
     prefs.rs        the appearance panel
     page.rs         the browser tab: its name, and the icon on it
     panes.rs        draggable dividers
+
+extension/          a Chrome extension: the page you are on, opened here
+    handoff.js      the `?url=` a click builds — pure, and tested under node
+    background.js   the button, the menu and the shortcut
 ```
 
 One crate, one target, and no `#[cfg(target_arch)]` anywhere in it. Everything

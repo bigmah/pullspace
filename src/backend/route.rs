@@ -1183,6 +1183,68 @@ mod tests {
         assert_eq!(parse("#/rust-lang/rust/pull/7/files/src/main.rs:L2"), route);
     }
 
+    /// The other end of the extension's contract, in the escaping a browser
+    /// actually produces.
+    ///
+    /// Every string below came out of `URLSearchParams` in `extension/
+    /// handoff.js` — see its own `the escaping is what route.rs undoes`. The
+    /// four that matter are the ones a hand-written encoder gets wrong: a
+    /// space is `+`, a literal plus is `%2B`, and `&` and `=` inside the value
+    /// are escaped rather than left to be read as structure.
+    #[test]
+    fn what_a_browser_escapes_is_what_this_reads_back() {
+        for (query, meant) in [
+            (
+                "?url=https%3A%2F%2Fgithub.com%2Fo%2Fr%2Fblob%2Fmain%2Fsrc%2Fmain.rs%23L58",
+                "https://github.com/o/r/blob/main/src/main.rs#L58",
+            ),
+            (
+                "?url=https%3A%2F%2Fgithub.com%2Fo%2Fr%2Fblob%2Fmain%2Fdocs%2Fgetting+started.md",
+                "https://github.com/o/r/blob/main/docs/getting started.md",
+            ),
+            (
+                "?url=https%3A%2F%2Fgithub.com%2Fo%2Fr%2Fblob%2Fmain%2Fa.rs%3Fplain%3D1%23L58-L72",
+                "https://github.com/o/r/blob/main/a.rs?plain=1#L58-L72",
+            ),
+            (
+                "?url=https%3A%2F%2Fgithub.com%2Fo%2Fr%2Fcompare%2Fmain...user%3Afeat%2Bx",
+                "https://github.com/o/r/compare/main...user:feat+x",
+            ),
+            (
+                "?url=https%3A%2F%2Fgithub.com%2Fo%2Fr%2Fblob%2Fmain%2Fdocs%2F%E6%97%A5%E6%9C%AC%E8%AA%9E.md",
+                "https://github.com/o/r/blob/main/docs/日本語.md",
+            ),
+            (
+                "?url=https%3A%2F%2Fgithub.com%2Fo%2Fr%2Fblob%2Fmain%2Fa%26b%3Dc.md",
+                "https://github.com/o/r/blob/main/a&b=c.md",
+            ),
+        ] {
+            assert_eq!(param(query, "url").as_deref(), Some(meant), "{query}");
+        }
+
+        // And the whole way through, which is what the extension's button
+        // actually does: a query field in, a route out.
+        let handed = param(
+            "?url=https%3A%2F%2Fgithub.com%2Fo%2Fr%2Fblob%2Fmain%2Fdocs%2Fgetting+started.md%23L4",
+            "url",
+        )
+        .unwrap();
+        let link = github_link(&handed).unwrap();
+        assert_eq!(refs(&link), ("main/docs/getting started.md", Some(4)));
+        assert_eq!(
+            ref_route(
+                repo_of("o", "r"),
+                "main/docs/getting started.md",
+                "main",
+                Some(4)
+            ),
+            Route {
+                at: Target::Branch(repo_of("o", "r"), "main".to_string()),
+                place: place("docs/getting started.md", Some(4)),
+            }
+        );
+    }
+
     /// The question the branch list answers: the longest name that is the
     /// whole front of what was written, up to a separator.
     #[test]

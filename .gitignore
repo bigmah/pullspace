@@ -1,2 +1,4 @@
 target/
 .DS_Store
+# `extension/make.sh` builds this; the store gets it, git does not.
+extension/*.zip

@@ -45,3 +45,12 @@ jobs:
       # it a wasm-only breakage lands green.
       - name: Check wasm32-unknown-unknown
         run: cargo check --target wasm32-unknown-unknown
+
+      # The browser extension's half of the `?url=` handoff. No dependencies
+      # and no browser — `extension/handoff.js` touches no `chrome.*` API for
+      # exactly this reason, and the escaping it produces is pinned on the Rust
+      # side by `what_a_browser_escapes_is_what_this_reads_back`. Break either
+      # end and one of the two suites says so.
+      - name: Extension
+        working-directory: extension
+        run: node --test test.js

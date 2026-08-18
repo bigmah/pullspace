@@ -1,0 +1,8 @@
+{
+  "private": true,
+  "type": "module",
+  "//": "Not part of the extension. It is here so that node reads the .js files beside it as the ES modules Chrome already reads them as — see test.js. `make.sh` leaves it out of the zip.",
+  "scripts": {
+    "test": "node --test test.js"
+  }
+}

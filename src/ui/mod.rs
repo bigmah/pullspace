@@ -13,6 +13,7 @@ mod page;
 mod panes;
 mod prcache;
 mod prefs;
+mod reader;
 mod tabs;
 mod topbar;
 mod viewer;

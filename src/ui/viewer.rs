@@ -17,12 +17,13 @@ use crate::backend::search::split_word;
 use crate::backend::tree::ChangeKind;
 use crate::backend::{FileContent, clip};
 
-use super::app::{PrFileState, St, ViewMode, Workspace};
+use super::app::{PrFileState, Reading, St, ViewMode, Workspace};
 use super::compat;
 use super::ide;
 use super::imgcache::{all_settled, drawable, ensure_image};
 use super::markdown::Target;
 use super::prcache::ensure_path;
+use super::reader::Reader;
 use super::tabs::{self, TabStrip};
 
 /// Files offered in Preview. The browser lays HTML out itself, so this is the
@@ -357,6 +358,18 @@ pub fn Viewer() -> Element {
     // pane has to be redrawn when the theme moves — the memo above only covers
     // the source view.
     let _ = st.prefs.read().theme;
+
+    // A description being read has the pane. The file it took it from is
+    // untouched underneath — still open, still in the strip, and one click on
+    // its tab from having it back.
+    if let Some(doc) = st.reading.read().clone() {
+        return rsx! {
+            div { class: "viewer",
+                TabStrip {}
+                Reader { doc }
+            }
+        };
+    }
 
     let guard = data.read();
     // Loading and failure replace the file, not the window around it: a header
@@ -730,6 +743,14 @@ fn SymBar(name: String) -> Element {
 #[component]
 fn Welcome() -> Element {
     let st = use_context::<St>();
+    // With nothing picked yet, the pane is empty and the description is the
+    // thing there is most reason to read first. So the offer is here as well
+    // as in the conversation: this is the moment it is wanted.
+    let desc = st
+        .workspace
+        .read()
+        .header()
+        .filter(|h| !h.body.trim().is_empty());
     let showing = match &*st.workspace.read() {
         Workspace::Pr(pr) => Some((
             format!("{} #{}", pr.repo, pr.number),
@@ -768,6 +789,21 @@ fn Welcome() -> Element {
             div { class: "welcome",
                 div { class: "welcome-title", "{title}" }
                 div { class: "welcome-hint", "{hint}" }
+                if let Some(desc) = desc {
+                    button {
+                        class: "welcome-read",
+                        title: "Read the description here, in the pane the code goes in",
+                        onclick: move |_| {
+                            st.read_doc(Reading {
+                                title: desc.title.clone(),
+                                meta: format!("#{} \u{00b7} {}", desc.number, desc.author),
+                                body: desc.body.trim().to_string(),
+                                url: desc.html_url.clone(),
+                            })
+                        },
+                        "Read the description"
+                    }
+                }
             }
         }
     }

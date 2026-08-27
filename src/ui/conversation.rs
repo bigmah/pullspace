@@ -19,13 +19,18 @@ use crate::backend::github::{
 use crate::backend::markdown;
 
 use super::app::{
-    Annots, BranchList, CheckList, CommitList, CommitSource, ConvTab, Conversation, Fetch, St,
+    Annots, BranchList, CheckList, CommitList, CommitSource, ConvTab, Conversation, Fetch, Reading,
+    St,
 };
 use super::panes::{Edge, Splitter};
 
 /// A comment's links are written from the root of the repository — there is no
 /// file they are relative to, the way a README's are.
 const ROOT: &str = "";
+
+/// How much writing makes a comment worth offering the middle pane for. About
+/// two screenfuls of the column on the right.
+const LONG: usize = 900;
 
 /// Fetch the conversation for a pull request, unless it has been closed or
 /// swapped out from under us in the meantime.
@@ -1283,12 +1288,42 @@ fn AnnotationRow(a: Annotation) -> Element {
 #[component]
 fn Body(text: String) -> Element {
     let st = use_context::<St>();
-    let doc = markdown::parse(&text);
+    // `#123` and `@name` in a review are references, and this is the
+    // repository they refer to.
+    let doc = markdown::parse_refs(&text, &refs_of(&st));
     rsx! {
         if doc.raw_html {
             HtmlNote {}
         }
         {super::markdown::render_body(st, Path::new(ROOT), &doc)}
+    }
+}
+
+/// Which repository the bodies in this pane were written against.
+fn refs_of(st: &St) -> markdown::Refs {
+    st.workspace
+        .peek()
+        .repo_ref()
+        .map(|r| markdown::Refs::of(r.to_string()))
+        .unwrap_or_default()
+}
+
+/// The button that hands a body to the middle pane.
+///
+/// A pull request's description is prose, and prose in a 380px column is a
+/// ribbon. This is the way out of it — and it is a button rather than the
+/// default because the column is the right place for the short ones, which is
+/// most of them.
+#[component]
+fn ReadHere(doc: Reading) -> Element {
+    let st = use_context::<St>();
+    rsx! {
+        button {
+            class: "iconbtn sm",
+            title: "Read this in the middle pane",
+            onclick: move |_| st.read_doc(doc.clone()),
+            "\u{2922}"
+        }
     }
 }
 
@@ -1299,7 +1334,7 @@ fn HtmlNote() -> Element {
     rsx! {
         span {
             class: "convkind convhtml",
-            title: "This comment contains HTML — a collapsed section, a table, an image. It is not drawn here; open the comment on github.com to read it.",
+            title: "This comment contains HTML beyond the folds, line breaks and pictures this app reads — a table written in tags, a centred banner. It is not drawn here; open the comment on github.com to read it.",
             "html not drawn"
         }
     }
@@ -1307,7 +1342,16 @@ fn HtmlNote() -> Element {
 
 #[component]
 fn Description(desc: PrHeader) -> Element {
+    let st = use_context::<St>();
     let url = desc.html_url.clone();
+    let body = desc.body.trim().to_string();
+    let written = !body.is_empty();
+    let doc = Reading {
+        title: desc.title.clone(),
+        meta: format!("#{} \u{00b7} {}", desc.number, desc.author),
+        body,
+        url: desc.html_url.clone(),
+    };
     rsx! {
         div { class: "convitem convdesc",
             div { class: "convmeta",
@@ -1317,6 +1361,9 @@ fn Description(desc: PrHeader) -> Element {
                     span { class: "prdraft", "draft" }
                 }
                 span { class: "spacer" }
+                if written {
+                    ReadHere { doc: doc.clone() }
+                }
                 button {
                     class: "iconbtn",
                     title: "Open on github.com",
@@ -1324,13 +1371,22 @@ fn Description(desc: PrHeader) -> Element {
                     "↗"
                 }
             }
-            div { class: "convtitle", "{desc.title}" }
+            div {
+                class: if written { "convtitle readable" } else { "convtitle" },
+                title: if written { "Read this in the middle pane" } else { "" },
+                onclick: move |_| {
+                    if written {
+                        st.read_doc(doc.clone());
+                    }
+                },
+                "{desc.title}"
+            }
             // Trailing blank lines are common in a template-filled description
             // and would be drawn as empty space at the foot of the card.
-            if desc.body.trim().is_empty() {
-                div { class: "convnone", "No description." }
-            } else {
+            if written {
                 Body { text: desc.body.trim().to_string() }
+            } else {
+                div { class: "convnone", "No description." }
             }
         }
     }
@@ -1353,6 +1409,17 @@ fn CommentRow(c: Comment) -> Element {
     let has_link = !url.is_empty();
     let kind_cls = kind_class(&c);
     let label = kind_label(&c).to_string();
+    // A review that runs to pages is prose too, and the offer to read it in
+    // the pane belongs on it for the same reason it belongs on a description.
+    // Only on the long ones: a button on all forty rows of a busy pull request
+    // is a column of buttons.
+    let long = c.body.len() > LONG;
+    let doc = long.then(|| Reading {
+        title: format!("{} \u{00b7} {}", c.author, kind_label(&c)),
+        meta: day.clone(),
+        body: c.body.trim().to_string(),
+        url: c.html_url.clone(),
+    });
 
     rsx! {
         div { class: "convitem",
@@ -1363,6 +1430,9 @@ fn CommentRow(c: Comment) -> Element {
                     span { class: "convdate", "{day}" }
                 }
                 span { class: "spacer" }
+                if let Some(doc) = doc {
+                    ReadHere { doc }
+                }
                 if has_link {
                     button {
                         class: "iconbtn sm",

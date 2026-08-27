@@ -163,6 +163,7 @@ pub fn TabStrip() -> Element {
     // and any of them can be off the end of a strip that has scrolled.
     use_effect(move || {
         let _ = st.open.read();
+        let _ = st.reading.read();
         document::eval(
             "var e=document.querySelector('.tab.on');\
              if(e) e.scrollIntoView({block:'nearest',inline:'nearest'});",
@@ -170,15 +171,39 @@ pub fn TabStrip() -> Element {
     });
 
     let tabs = st.tabs.read();
-    if tabs.is_empty() {
+    // What is being read in the pane, when it is prose rather than a file. It
+    // gets a tab of its own at the head of the strip: it is a thing that is
+    // open, and the strip is what says what is open.
+    let doc = st.reading.read().as_ref().map(|d| d.title.clone());
+    if tabs.is_empty() && doc.is_none() {
         return rsx! {};
     }
-    let here = st.open.read().clone();
+    // A file's tab is the one being read only while nothing else has the pane.
+    let here = match doc.is_some() {
+        true => None,
+        false => st.open.read().clone(),
+    };
     let statuses = st.statuses.read();
     let paths: Vec<&Path> = tabs.iter().map(|t| t.at.path.as_path()).collect();
 
     rsx! {
         div { class: "tabstrip",
+            if let Some(title) = doc {
+                div {
+                    class: "tab doc on",
+                    title: "{title}",
+                    span { class: "tname", "{title}" }
+                    button {
+                        class: "tabx",
+                        title: "Close  (\u{2325}W)",
+                        onclick: move |e| {
+                            e.stop_propagation();
+                            st.stop_reading();
+                        },
+                        "\u{00d7}"
+                    }
+                }
+            }
             for (i, tab) in tabs.iter().enumerate() {
                 {
                     let path = tab.at.path.clone();

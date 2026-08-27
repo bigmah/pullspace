@@ -45,6 +45,15 @@ one puts *that commit's* diff in the two panes — what it changed, against the
 commit before it — while the list stays where it is, so a branch can be read the
 way it was written, one commit at a time.
 
+A description is the one thing in a review written to be *read*, and the column
+it lands in is 380 pixels wide. So `⤢` on the description — or **Read the
+description** on the empty middle pane — moves it into the pane the code goes
+in: one column at a reading measure, its headings listed down the side with the
+section you are in marked as you scroll, and a hairline across the top saying
+how much is left. The file it took the pane from is untouched underneath, keeps
+its tab, and comes back the moment that tab is clicked. Long comments and review
+summaries carry the same button.
+
 A repository opened on its own has no discussion, and **BRANCHES** takes the
 conversation's place at the head of that pane: every branch it has, with the
 commit at the tip of each — and a filter box over the list once there are more
@@ -222,10 +231,20 @@ boxes, with fenced code run through the same syntax highlighter as the source
 view. `Source` shows the file exactly as written, and the two swap without
 reloading anything.
 
+GitHub's own additions are drawn as themselves. `> [!WARNING]` and the four
+beside it become callouts in the colour they mean; `- [x]` is a box rather than
+a character; a fenced block carries its language and a Copy button, because half
+the samples in a pull request are a command somebody is meant to run.
+
 Links work. An outside one opens in a new tab; one pointing at a file in the
 repository opens it in this viewer, resolved relative to the document it is
 written in — so a README that links to `docs/design.md` is a way around the
-repository rather than a dead end.
+repository rather than a dead end. One pointing at a heading — `#test-plan` —
+goes to it: headings carry github.com's own slug, deduplicated github.com's own
+way, so a table of contents written for github.com works here unchanged. In a
+body that came from a repository's own pull requests, a bare URL, a `#123` and
+an `@name` are links too; in a README they are a fragment and an npm scope, and
+are left as the text they are.
 
 Pictures are drawn — the ones the repository holds. `![a diff](diff.png)` is
 read out of the repository like any other file, off the local copy where it is
@@ -242,16 +261,25 @@ proxies those through camo for exactly that reason, and a static page has
 nothing to proxy with.
 
 What is *not* drawn is anything the file smuggles in as HTML. The bar says
-`raw HTML not drawn` when a file contained some — including an `<img>` written
-that way, which is worth knowing if your README centres its screenshots in a
-`<div>`.
+`raw HTML not drawn` when a file contained some — which is worth knowing if your
+README centres its screenshots in a `<div>`.
+
+Four kinds are the exception, because a pull request's description is full of
+them and dropping them loses the shape of what was written: a `<details>` and
+its `<summary>` become a fold that opens where it was written — and unfolds
+itself when the contents down the side is used to reach a section inside it — a
+`<br>` is a line break, an `<img>` is a picture like any other, and the
+instructions left behind by a pull request template are dropped without a
+warning about markup nobody was going to see. Every one of those is *read out
+of* the markup and rebuilt as elements of this app. None of it is markup this
+page is ever handed.
 
 The conversation pane goes through the same renderer, at the size of the column
 it is in — which is the answer to the obvious worry about drawing text that
 anybody with a GitHub account can write on a pull request. There is no HTML
-path to attack: the parse produces blocks and styled runs, the viewer builds
-elements out of them, and a comment that was mostly a `<details>` block says
-`html not drawn` under it rather than quietly losing half of itself.
+path to attack: the parse produces blocks and styled runs, and the viewer builds
+elements out of them. A comment whose markup went beyond the four kinds above
+says `html not drawn` under it rather than quietly losing half of itself.
 
 HTML files get a **Preview** that is the real page, rendered in an `iframe` with
 an empty `sandbox` — no scripts, no forms, no navigation, and no same-origin
@@ -301,6 +329,7 @@ src/
     nav.rs          the address bar read back: links, Back and Forward
     bottom.rs       the panel under the code: hits, definitions, a peek at one
     markdown.rs     markdown drawn as elements; link targets, pictures
+    reader.rs       a description given the middle pane: measure, contents
     conversation.rs the pull request's description and comments, drawn
     prefs.rs        the appearance panel
     page.rs         the browser tab: its name, and the icon on it

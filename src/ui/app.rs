@@ -559,6 +559,25 @@ pub struct Spot {
 /// nice name.
 const TRAIL: usize = 60;
 
+/// A body being read in the middle pane rather than in the column on the
+/// right: a pull request's description, or a comment long enough that a 380px
+/// column was the wrong shape for it.
+///
+/// The text and not the parse: what it takes to draw this is a few hundred
+/// microseconds, and holding the parse here would mean holding one copy of
+/// every description ever opened for as long as the app is up.
+#[derive(Clone, PartialEq)]
+pub struct Reading {
+    /// What the strip above the code calls it, and the heading it is read
+    /// under.
+    pub title: String,
+    /// The line under the title: who wrote it, and what it is.
+    pub meta: String,
+    pub body: String,
+    /// Where it is on github.com, for the button that opens it there.
+    pub url: String,
+}
+
 /// A file held open in the strip above the code.
 ///
 /// The [`Spot`] inside it is the same three things the trail is made of, for
@@ -616,6 +635,19 @@ pub struct St {
     /// a repository on its own — nothing there is changed.
     pub statuses: Signal<HashMap<PathBuf, ChangeKind>>,
     pub open: Signal<Option<PathBuf>>,
+    /// The description or comment being read in the middle pane, when one is.
+    ///
+    /// Beside `open` rather than instead of it: what it takes the pane over
+    /// from is still open, still in the strip, and comes back as it was the
+    /// moment its tab is clicked.
+    pub reading: Signal<Option<Reading>>,
+    /// Whether the reader is set to the full width of the pane rather than to
+    /// a measure. A fact about how somebody likes to read, so it outlives the
+    /// document it was set on.
+    pub read_wide: Signal<bool>,
+    /// Whether the reader draws its contents down the side. On by default,
+    /// and worth turning off for a description with three headings in it.
+    pub read_toc: Signal<bool>,
     pub view_mode: Signal<ViewMode>,
     /// A request to put a line on screen: written by everything that jumps —
     /// a comment on the diff, a search hit, a definition.
@@ -626,6 +658,14 @@ pub struct St {
     /// which is what `at_line` says now. So the effect fires on each write and
     /// the value left behind means nothing.
     pub scroll_to: Signal<Option<usize>>,
+    /// The heading a link has just asked for, so that a `<details>` holding
+    /// it can unfold itself on the way there.
+    ///
+    /// Set, never cleared — like `scroll_to`, what reads this is listening for
+    /// the write and what the signal holds afterwards means nothing. Asking
+    /// twice for the same heading has to fire twice, and a value that was
+    /// cleared could not say the difference between the two.
+    pub anchor: Signal<Option<String>>,
     /// The line the open file was entered at, if it was entered at one — a
     /// fact about where the reader is rather than a request to go anywhere.
     ///
@@ -852,6 +892,7 @@ impl St {
     fn clear_view(&self) {
         let mut open = self.open;
         open.set(None);
+        self.stop_reading();
         let mut ps = self.scroll_to;
         ps.set(None);
         self.reset_tree_folds();
@@ -1647,6 +1688,30 @@ impl St {
         }
         let mut open = self.open;
         open.set(Some(spot.path));
+        // The middle pane shows one thing. Opening a file is asking for it to
+        // be that file — and whatever was being read there is still in the
+        // conversation, one click from being picked up again.
+        self.stop_reading();
+    }
+
+    // ------------------------------------------------------- reading a body
+
+    /// Hand the middle pane to a description or a comment.
+    ///
+    /// Nothing is closed to make room: the file that was there keeps its tab
+    /// and its place in it, and clicking that tab is what comes back.
+    pub fn read_doc(&self, doc: Reading) {
+        self.stow();
+        let mut reading = self.reading;
+        reading.set(Some(doc));
+    }
+
+    /// Put it down, and let the file underneath have the pane back.
+    pub fn stop_reading(&self) {
+        let mut reading = self.reading;
+        if reading.peek().is_some() {
+            reading.set(None);
+        }
     }
 
     /// Somewhere new: the trail remembers where we were, and the strip gets a
@@ -1702,7 +1767,14 @@ impl St {
     }
 
     /// Close the tab being read — what ⌥W is.
+    ///
+    /// A description in the pane has a tab of its own at the head of the
+    /// strip, and it is the one marked as being read. So it is the one this
+    /// closes, and the file underneath is what ⌥W reaches next.
     pub fn close_open_tab(&self) {
+        if self.reading.peek().is_some() {
+            return self.stop_reading();
+        }
         let Some(rel) = self.open.peek().clone() else {
             return;
         };
@@ -1755,9 +1827,13 @@ pub fn App() -> Element {
         St {
             statuses: root(HashMap::new()),
             open: root(None),
+            reading: root(None),
+            read_wide: root(false),
+            read_toc: root(true),
             view_mode: root(ViewMode::Source),
             scroll_to: root(None),
             at_line: root(None),
+            anchor: root(None),
             expanded: root(HashMap::new()),
             expansions: root(HashMap::new()),
             tree_seeded: root(false),

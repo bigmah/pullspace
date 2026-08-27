@@ -23,6 +23,10 @@
   --added: #4fbf7a;
   --modified: #e2b34c;
   --deleted: #e06c75;
+  /* The fifth tone: what an `> [!IMPORTANT]` is drawn in, and the only purple
+     in the app. Set here and in `backend::prefs` with the rest of the
+     palette, so it turns over with the theme like everything else. */
+  --violet: #a78bfa;
   --add-bg: rgba(79, 191, 122, 0.13);
   --add-emph: rgba(79, 191, 122, 0.34);
   --del-bg: rgba(224, 108, 117, 0.13);
@@ -1003,6 +1007,29 @@ button { font-family: inherit; user-select: none; }
 }
 
 .welcome-hint { color: var(--fg-faint); font-size: 12px; line-height: 1.7; }
+
+/* The other thing there is to do here. Quiet — picking a file is still what
+   this pane is for — but present, because with nothing open yet the
+   description is what a review is read from first. */
+.welcome-read {
+  margin-top: 16px;
+  height: var(--ctl);
+  padding: 0 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--r);
+  background: var(--bg-2);
+  color: var(--fg-dim);
+  font-size: 12px;
+  cursor: pointer;
+  transition: background-color var(--quick) var(--ease), color var(--quick) var(--ease),
+    border-color var(--quick) var(--ease);
+}
+
+.welcome-read:hover {
+  background: var(--bg-3);
+  color: var(--fg);
+  border-color: var(--accent-line);
+}
 
 .notice { color: var(--fg-dim); padding: 24px; font-family: var(--mono); font-size: 12px; }
 
@@ -2533,6 +2560,11 @@ button { font-family: inherit; user-select: none; }
 
 /* ---------- markdown ---------- */
 
+/* Three surfaces draw the same document: a file opened in Preview, a comment
+   in the column on the right, and a description given the middle pane to be
+   read in. `.mddoc` is what they share, and the two classes under it are the
+   whole of the difference — one renderer, three sizes. */
+
 .mdwrap { display: flex; flex-direction: column; align-items: stretch; }
 
 .mdbar {
@@ -2556,7 +2588,18 @@ button { font-family: inherit; user-select: none; }
 
 .mdempty { color: var(--fg-faint); font-size: 12px; }
 
-.mdh { font-weight: 700; line-height: 1.3; margin: 26px 0 10px; color: var(--fg-bright); }
+/* The vertical rhythm: every block owes the one above it more space than it
+   owes the one below, so a heading belongs to what follows it rather than
+   floating between two sections. Collapsing margins do the rest. */
+.mdh {
+  position: relative;
+  font-weight: 700;
+  line-height: 1.3;
+  margin: 26px 0 10px;
+  color: var(--fg-bright);
+  scroll-margin-top: 16px;
+}
+
 .mddoc > .mdh:first-child { margin-top: 0; }
 
 /* The two that open sections get the rule under them, as they do everywhere
@@ -2567,6 +2610,32 @@ button { font-family: inherit; user-select: none; }
 .mdh4 { font-size: 14px; }
 .mdh5 { font-size: 13px; }
 .mdh6 { font-size: 12.5px; color: var(--fg-dim); }
+
+/* The mark that every documentation site puts beside a heading. Out of the way
+   until the pointer is on the line, and a way to put this section at the top of
+   the pane — which is the other half of a table of contents written in the
+   description working at all. */
+.mdanchor {
+  position: absolute;
+  left: -0.95em;
+  top: 0;
+  color: var(--fg-faint);
+  font-weight: 400;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity var(--quick) var(--ease);
+}
+
+.mdh:hover .mdanchor { opacity: 0.55; }
+.mdanchor:hover { opacity: 1; color: var(--accent); }
+
+/* Where a link to a section lands, said for long enough to be seen. */
+.mdflash { animation: mdflash 1.2s var(--ease); }
+
+@keyframes mdflash {
+  from { background: var(--accent-soft); }
+  to { background: transparent; }
+}
 
 /* Hard line breaks are kept, which is the whole reason the source's own
    wrapping had to be normalised to spaces before it got here. */
@@ -2586,7 +2655,7 @@ button { font-family: inherit; user-select: none; }
 }
 
 .mda { color: var(--accent); cursor: pointer; }
-.mda:hover { text-decoration: underline; }
+.mda:hover { text-decoration: underline; text-underline-offset: 2px; }
 
 /* A picture out of the repository. Held to the column it is in, and to a
    height that leaves the prose around it readable — a full-page screenshot
@@ -2622,16 +2691,63 @@ button { font-family: inherit; user-select: none; }
    that will not be drawn, it is one that is not drawn yet. */
 .mdimgwait { border-style: dotted; opacity: 0.6; }
 
+/* A fenced block and the bar over it. The bar carries the language and the
+   Copy button, so the block below it is nothing but the code — which is what
+   a reader is looking at it for. */
+.mdcodewrap {
+  margin: 14px 0;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--r);
+  background: var(--bg-1);
+  overflow: hidden;
+}
+
+.mdcodebar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 26px;
+  padding: 0 6px 0 10px;
+  background: var(--bg-2);
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.mdlang {
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.4px;
+  text-transform: uppercase;
+  color: var(--fg-faint);
+}
+
+/* Half the fenced blocks in a description are a command somebody is meant to
+   run. Faded until the block is under the pointer, so a page of samples is not
+   a page of buttons. */
+.mdcopy {
+  flex: none;
+  height: 19px;
+  padding: 0 8px;
+  border: 1px solid transparent;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--fg-faint);
+  font-size: 10.5px;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity var(--quick) var(--ease), color var(--quick) var(--ease),
+    background-color var(--quick) var(--ease);
+}
+
+.mdcodewrap:hover .mdcopy, .mdcopy:focus-visible { opacity: 1; }
+.mdcopy:hover { background: var(--bg-3); color: var(--fg); border-color: var(--line); }
+.mdcopy.done { opacity: 1; color: var(--added); }
+
 .mdcode {
   font-family: var(--mono);
   tab-size: var(--tab);
   font-size: 12px;
   line-height: 1.55;
-  background: var(--bg-1);
-  border: 1px solid var(--border-soft);
-  border-radius: var(--r);
   padding: 10px 12px;
-  margin: 12px 0;
   overflow-x: auto;
 }
 
@@ -2643,6 +2759,107 @@ button { font-family: inherit; user-select: none; }
   margin: 12px 0;
   color: var(--fg-dim);
 }
+
+/* `> [!NOTE]` and the four beside it. One rule for the shape and one line per
+   tone, because that is all that separates them — the border, the wash and
+   the heading are the same colour, and every one of them comes out of the
+   palette so the whole set turns over with the theme. */
+.mdalert {
+  margin: 14px 0;
+  padding: 10px 14px;
+  border: 1px solid var(--border-soft);
+  border-left: 3px solid var(--tone);
+  border-radius: var(--r);
+  background: var(--bg-1);
+  color: var(--fg-dim);
+}
+
+.mdalerthd {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin-bottom: 4px;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.2px;
+  color: var(--tone);
+}
+
+/* The glyph in a ring, so the five read as one family of marks rather than as
+   five loose characters at five different weights. */
+.mdalertmark {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 15px;
+  height: 15px;
+  border: 1px solid currentColor;
+  border-radius: 50%;
+  font-size: 9px;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.mdalert > :first-child { margin-top: 0; }
+.mdalert > :last-child { margin-bottom: 0; }
+
+.mdnote { --tone: var(--accent); }
+.mdtip { --tone: var(--added); }
+.mdimportant { --tone: var(--violet); }
+.mdwarning { --tone: var(--modified); }
+.mdcaution { --tone: var(--deleted); }
+
+/* A `<details>`. Folded, it is one row: the point of it is that a description
+   with six of them is six rows and not six sections. */
+.mdfold {
+  margin: 12px 0;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--r);
+  background: var(--bg-1);
+  overflow: hidden;
+}
+
+.mdfoldhd {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 8px 12px;
+  cursor: pointer;
+  font-weight: 600;
+  color: var(--fg);
+  user-select: none;
+  transition: background-color var(--quick) var(--ease);
+}
+
+.mdfoldhd:hover { background: var(--bg-2); }
+
+/* The arrow turns down when the fold opens, which is the one animation in the
+   document and the only one worth having: it says which way it went. */
+.mdfoldmark {
+  flex: none;
+  color: var(--fg-faint);
+  font-size: 14px;
+  line-height: 1;
+  transform: translateY(1px);
+  transition: transform var(--quick) var(--ease);
+}
+
+.mdfold.open .mdfoldmark { transform: translateY(1px) rotate(90deg); }
+.mdfold.open .mdfoldhd { border-bottom: 1px solid var(--border-soft); }
+
+/* How much is behind it, for deciding whether to open it. */
+.mdfoldcount {
+  flex: none;
+  margin-left: auto;
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--fg-faint);
+}
+
+.mdfoldbody { padding: 4px 14px 12px; }
+.mdfoldbody > :first-child { margin-top: 0; }
+.mdfoldbody > :last-child { margin-bottom: 0; }
 
 .mdlist { margin: 8px 0; }
 
@@ -2658,6 +2875,32 @@ button { font-family: inherit; user-select: none; }
   font-variant-numeric: tabular-nums;
   user-select: none;
 }
+
+/* A `- [x]` is a box and not a character: a review reads a checklist by
+   scanning the left edge of it, and a row of ☑ and ☐ at text weight does not
+   give that edge to scan. */
+.mdbox {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 13px;
+  width: 13px;
+  height: 13px;
+  align-self: center;
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  background: var(--bg-2);
+  color: transparent;
+  font-size: 10px;
+  line-height: 1;
+}
+
+.mdbox.on { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
+
+/* Done is done. Dimmed rather than struck through: half a test plan crossed
+   out is unreadable, and the box already says which half. */
+.mdtasks .mditem.done .mdbody { color: var(--fg-faint); }
+.mdtasks .mditem { align-items: flex-start; margin: 3px 0; }
 
 .mdbody { min-width: 0; flex: 1; }
 .mdbody > .mdp:first-child { margin-top: 0; }
@@ -2701,17 +2944,191 @@ button { font-family: inherit; user-select: none; }
 .mdsmall .mdh4, .mdsmall .mdh5, .mdsmall .mdh6 { font-size: 12px; }
 .mdsmall .mdp { margin: 6px 0; }
 .mdsmall .mdb { color: var(--fg); }
-.mdsmall .mdcode { font-size: 11px; margin: 8px 0; padding: 7px 9px; }
+.mdsmall .mdcodewrap { margin: 8px 0; }
+.mdsmall .mdcode { font-size: 11px; padding: 7px 9px; }
+.mdsmall .mdcodebar { height: 22px; }
 .mdsmall .mdc { font-size: 11px; }
 .mdsmall .mdlist { margin: 6px 0; }
 .mdsmall .mditem { margin: 2px 0; gap: 7px; }
 .mdsmall .mdquote { margin: 8px 0; padding-left: 10px; }
+.mdsmall .mdalert { margin: 8px 0; padding: 7px 10px; }
+.mdsmall .mdfold { margin: 8px 0; }
+.mdsmall .mdfoldhd { padding: 6px 9px; }
+.mdsmall .mdfoldbody { padding: 2px 10px 8px; }
 .mdsmall .mdrule { margin: 12px 0; }
 .mdsmall .mdtablewrap { margin: 8px 0; }
 .mdsmall .mdtable { font-size: 11.5px; }
 .mdsmall .mdtable th, .mdsmall .mdtable td { padding: 4px 7px; }
 .mdsmall > :first-child { margin-top: 0; }
 .mdsmall > :last-child { margin-bottom: 0; }
+
+/* And the same markdown a third time, given the middle pane. This is the one
+   that is *read* rather than referred to, so everything opens up: a measure
+   near the sixty-five characters a line wants to be, a line height that leaves
+   room between them, and headings far enough apart to be the sections they
+   mark rather than bold paragraphs. */
+.mdread {
+  max-width: none;
+  padding: 0;
+  font-size: 14.5px;
+  line-height: 1.72;
+  color: var(--fg);
+  /* Long prose set in the interface face at interface weight looks like a
+     dialog box. This is a shade lighter than the browser's default rendering
+     of it and reads as a page. */
+  font-weight: 400;
+  letter-spacing: 0.05px;
+}
+
+.mdread .mdp { margin: 15px 0; }
+.mdread .mdh { margin: 34px 0 12px; letter-spacing: -0.2px; }
+.mdread > .mdh:first-child { margin-top: 4px; }
+.mdread .mdh1 { font-size: 28px; padding-bottom: 10px; }
+.mdread .mdh2 { font-size: 21px; padding-bottom: 7px; margin-top: 38px; }
+.mdread .mdh3 { font-size: 17px; }
+.mdread .mdh4 { font-size: 15px; }
+.mdread .mdh5, .mdread .mdh6 { font-size: 14px; }
+.mdread .mdc { font-size: 13px; padding: 2px 6px; }
+.mdread .mdcode { font-size: 12.5px; line-height: 1.6; padding: 12px 14px; }
+.mdread .mdcodewrap { margin: 18px 0; }
+.mdread .mdlist { margin: 14px 0; }
+.mdread .mditem { margin: 6px 0; gap: 12px; }
+.mdread .mdquote { margin: 18px 0; padding-left: 18px; border-left-width: 3px; }
+.mdread .mdalert { margin: 18px 0; padding: 12px 16px; }
+.mdread .mdfold { margin: 18px 0; }
+.mdread .mdfoldhd { padding: 10px 14px; font-size: 14px; }
+.mdread .mdrule { margin: 34px 0; }
+.mdread .mdtable { font-size: 13.5px; }
+.mdread .mdimage { margin: 18px 0; }
+.mdread > :last-child { margin-bottom: 0; }
+
+/* ---------- reading a description ---------- */
+
+.reader { display: flex; flex-direction: column; flex: 1; min-height: 0; }
+
+.rdhdr { gap: 10px; }
+
+.rdtitle {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--fg-bright);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rdmeta {
+  flex: none;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--fg-faint);
+}
+
+/* How far down it you are. A description long enough to want this pane is one
+   whose scrollbar thumb barely moves, and a hairline across the top is the
+   answer to "how much of this is left" that costs no room to give. */
+.rdtrack {
+  flex: none;
+  height: 2px;
+  background: var(--border-soft);
+}
+
+.rdprog {
+  height: 100%;
+  width: 0;
+  background: var(--accent);
+  transition: width 90ms linear;
+}
+
+.rdmain { display: flex; flex: 1; min-height: 0; }
+
+/* The headings, down the side. Its own column rather than a floating card:
+   the eye goes to the same place every time, and the text beside it keeps its
+   measure whether the contents is up or not. */
+.rdtoc {
+  flex: none;
+  width: 208px;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  padding: 14px 0 20px 14px;
+  border-right: 1px solid var(--border-soft);
+  background: var(--bg);
+  overflow-y: auto;
+}
+
+.rdtochd { flex: none; padding: 0 8px 8px; }
+.rdtoclist { display: flex; flex-direction: column; gap: 1px; }
+
+.rdtocrow {
+  padding: 3px 8px;
+  border-left: 2px solid transparent;
+  border-radius: 0 var(--r-sm) var(--r-sm) 0;
+  color: var(--fg-faint);
+  font-size: 11.5px;
+  line-height: 1.45;
+  cursor: pointer;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  transition: color var(--quick) var(--ease), background-color var(--quick) var(--ease);
+}
+
+.rdtocrow:hover { color: var(--fg); background: var(--bg-1); }
+
+/* The section being read, marked from the page as it is scrolled — see
+   `ui::reader`. A rule down its left edge rather than a fill: the column is
+   a list of places, and the mark has to say which one you are standing in
+   without turning into a selected row. */
+.rdtocrow.on {
+  color: var(--accent);
+  border-left-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.rdtocrow.d1 { padding-left: 20px; font-size: 11px; }
+.rdtocrow.d2 { padding-left: 32px; font-size: 11px; color: var(--fg-faint); opacity: 0.85; }
+
+.rdscroll { flex: 1; overflow: auto; min-height: 0; background: var(--bg-1); }
+
+/* The column the description is read in. Centred in whatever the pane has
+   left, and half a screen of air under it so the last paragraph can be
+   scrolled up to where the eye is rather than read off the bottom edge. */
+.rdcol {
+  max-width: 720px;
+  margin: 0 auto;
+  padding: 30px 40px 55vh;
+}
+
+/* Turned off, it is the pane's own width — for a description that is mostly
+   wide tables, or a window that has room for both. */
+.rdcol.wide { max-width: none; margin: 0; padding: 30px 32px 55vh; }
+
+.rdnote {
+  display: inline-block;
+  margin-bottom: 16px;
+  padding: 2px 7px;
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  font-size: 10.5px;
+  color: var(--modified);
+}
+
+/* The description's own tab, at the head of the strip. Prose rather than a
+   file, so its name is set in the interface face — which is the difference
+   you can see at a glance between it and the paths beside it. */
+.tab.doc .tname { font-family: var(--sans); font-size: 12px; max-width: 200px; }
+.tab.doc { padding-left: 10px; }
+
+.tab.doc .tname::before {
+  content: "\00b6";
+  margin-right: 6px;
+  color: var(--fg-faint);
+}
+
+/* A title with a description behind it is a way into it. */
+.convtitle.readable { cursor: pointer; }
+.convtitle.readable:hover { color: var(--accent); }
 
 /* ---------- scrollbars ---------- */
 

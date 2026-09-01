@@ -30,6 +30,7 @@ use super::filetree::FileTreePane;
 use super::github::GhPanel;
 use super::ide::{Index, Panel};
 use super::landing::Landing;
+use super::opening::Opening;
 use super::page::Tab;
 use super::panes::{self, Drag, DragMask, Edge};
 use super::prefs::PrefsPanel;
@@ -755,6 +756,12 @@ pub struct St {
     /// last time something was.
     pub fetch: Signal<Fetch>,
     pub workspace: Signal<Workspace>,
+    /// Where this space is going, while it is still on its way there — see
+    /// [`spaces::Held`]. An empty workspace with this set is an arrival in
+    /// progress rather than an app with nothing in it, and that is the
+    /// difference between the landing page and the frame that stands in for
+    /// what is coming.
+    pub incoming: Signal<Option<Route>>,
     /// Per-file base/head content for what is open — decoded, and only for
     /// files somebody has actually looked at. The repository itself lives on
     /// disk; this is the shelf by the desk, not the library.
@@ -1139,6 +1146,9 @@ impl St {
         let link = Route::to(ws.target());
         let mut w = self.workspace;
         w.set(ws);
+        // Landed. Whatever was standing in for this while it was fetched has a
+        // workspace to give way to now.
+        self.arrived();
         // The address bar follows whatever is open, so every review has a link:
         // one to send to somebody, and one this tab comes back to on reload.
         //
@@ -1246,11 +1256,33 @@ impl St {
         at.set((now != Some(line)).then_some(line));
     }
 
+    /// Say that this space is on its way somewhere, so that what stands in for
+    /// it until it lands is the place it is going rather than the front page.
+    ///
+    /// Home is nowhere to be on the way to: it *is* the landing page, and
+    /// saying so would have the app stand in for itself forever.
+    pub fn arriving_at(&self, route: &Route) {
+        let mut incoming = self.incoming;
+        incoming.set((route.at != Target::Home).then(|| route.clone()));
+    }
+
+    /// And that it is not on its way any more — it landed, it failed, or what
+    /// the address bar said turned out to name nothing.
+    pub fn arrived(&self) {
+        let mut incoming = self.incoming;
+        if incoming.peek().is_some() {
+            incoming.set(None);
+        }
+    }
+
     /// Close whatever is open, back to nothing — which puts the landing page
     /// up, since choosing something is the only thing left to do.
     pub fn close_workspace(&self) {
         let mut w = self.workspace;
         w.set(Workspace::Empty);
+        // Nothing is coming, either: closing is the one way to ask for the
+        // landing page on purpose.
+        self.arrived();
         let mut commits = self.commits;
         commits.set(CommitList::Idle);
         let mut branches = self.branches;
@@ -1892,6 +1924,12 @@ pub fn App() -> Element {
             pr_state: root(h.pr_state),
             fetch: root(h.fetch),
             workspace: root(h.workspace),
+            // The one field not taken from `h`, because the answer is not in
+            // the app: a tab opened on a link is a tab that is already going
+            // somewhere, and this is read before the first frame so that the
+            // front page is never drawn over the top of it. The load itself
+            // is `nav::landing`, several ticks behind.
+            incoming: root(route::arriving()),
             pr_files: root(h.pr_files),
             warm_order: root(h.warm_order),
             images: root(h.images),
@@ -2106,7 +2144,14 @@ pub fn App() -> Element {
     // as either moves, so a reload comes back to the same dozen reviews rather
     // than to one.
     use_effect(move || {
-        let card = Card::of(&st.workspace.read(), st.open.read().as_deref());
+        let open = st.open.read();
+        let ws = st.workspace.read();
+        let card = match st.incoming.read().as_ref() {
+            // Still arriving: the link is all there is to go on, and it is
+            // better than the "New space" an empty workspace would be called.
+            Some(route) if !ws.is_open() => Card::arriving(route),
+            _ => Card::of(&ws, open.as_deref()),
+        };
         spaces::describe(&st, card);
         spaces::save(&st);
     });
@@ -2266,6 +2311,12 @@ pub fn App() -> Element {
                 if *st.gh_open.read() {
                     GhPanel {}
                 }
+            } else if let Some(route) = st.incoming.read().clone() {
+                // Empty, but not for long: something is being fetched into
+                // this space. The front page is not what somebody who followed
+                // a link is waiting to read, so this says where they are going
+                // instead — see `super::opening`.
+                Opening { route }
             } else {
                 Landing {}
             }

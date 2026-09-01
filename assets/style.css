@@ -2749,6 +2749,104 @@ button { font-family: inherit; user-select: none; }
   margin-top: auto;
 }
 
+/* ---------- opening ---------- */
+
+/* An empty space that is on its way somewhere — see `src/ui/opening.rs`. It
+   sits where the landing page sits and uses the landing page's column, so the
+   two never jump against each other when a link fails and the picker comes
+   back. Held back briefly: a space fetched from a warm cache lands in under a
+   frame, and a screen that appears only to vanish is worse than no screen. */
+.opening {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  justify-content: center;
+  animation: appear 200ms var(--ease) 120ms both;
+}
+
+.opening-col {
+  width: 420px;
+  max-width: calc(100vw - 48px);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  padding-top: 22vh;
+}
+
+/* The name, small: this screen is about where the reader is going, and the app
+   they are already inside does not need announcing again. */
+.opening-brand {
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 1.4px;
+  text-transform: uppercase;
+  color: var(--fg-faint);
+}
+
+.opening-name {
+  font-family: var(--mono);
+  font-size: 17px;
+  font-weight: 600;
+  color: var(--fg);
+  margin-top: 12px;
+  overflow-wrap: anywhere;
+}
+
+.opening-file {
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--fg-dim);
+  margin-top: 5px;
+  overflow-wrap: anywhere;
+}
+
+/* The same sweep the top bar runs while a review loads, so the two readings of
+   "still working" are one thing seen twice rather than two inventions. */
+.opening-bar {
+  width: 180px;
+  height: 2px;
+  margin: 18px 0 14px;
+  border-radius: 1px;
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    var(--accent) 40%,
+    var(--accent) 60%,
+    transparent 100%
+  );
+  background-size: 40% 100%;
+  background-repeat: no-repeat;
+  animation: sweep 1.4s var(--ease) infinite;
+}
+
+.opening-note {
+  font-size: 12px;
+  color: var(--fg-dim);
+  animation: warmpulse 2.4s ease-in-out infinite;
+}
+
+/* The way out, for the request that never answers — nothing else on this
+   screen ever clears one of those. Quiet, because wanting it is rare. */
+.opening-stop {
+  margin-top: 22px;
+  background: none;
+  border: none;
+  color: var(--fg-faint);
+  font-size: 11.5px;
+  cursor: pointer;
+}
+
+.opening-stop:hover { color: var(--fg-dim); text-decoration: underline; }
+
+@media (prefers-reduced-motion: reduce) {
+  .opening { animation: none; }
+  .opening-bar,
+  .opening-note { animation: none; }
+  .opening-bar { background-position: 30% 0; }
+}
+
 /* ---------- markdown ---------- */
 
 /* Three surfaces draw the same document: a file opened in Preview, a comment

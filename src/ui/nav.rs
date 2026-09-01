@@ -87,11 +87,13 @@ pub async fn landing(st: St) {
         // runs, and reading it here is one less thing to keep in step.
         None => read_route(st, &route::fragment()).await,
     };
-    // Nothing linked to. The landing page is already up, which is the whole of
-    // what "home" means here.
-    if asked.at != Target::Home {
-        go(st, asked);
+    // Nothing linked to. The landing page is what "home" means here — and if
+    // the address bar looked like a link on the way in, this is where the app
+    // stops standing in for something that turned out not to be coming.
+    if asked.at == Target::Home {
+        return st.arrived();
     }
+    go(st, asked);
 }
 
 /// Go where the address bar says.
@@ -99,6 +101,11 @@ fn go(st: St, asked: Route) {
     if let Some(repo) = asked.at.repo() {
         name_it(st, repo);
     }
+    // What an empty space shows while this is fetched. Set here rather than
+    // only at startup because this is also Back, Forward and a link pasted
+    // into a tab — and because a `blob/…` link is only now the route it names
+    // rather than the repository it was read as before the branch was known.
+    st.arriving_at(&asked);
     // Root scope: a load outlives whatever component happens to be on screen
     // when the URL changes.
     //

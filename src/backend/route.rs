@@ -74,6 +74,25 @@ impl Target {
         }
     }
 
+    /// What to call this in a sentence: `owner/repo #12`, a branch, a short
+    /// sha. `None` for home, which is not somewhere anybody arrives.
+    ///
+    /// The same two halves the switcher's card puts either side of a title,
+    /// said in one line — the screen this is for has nothing else on it yet.
+    pub fn label(&self) -> Option<String> {
+        Some(match self {
+            Target::Home => return None,
+            Target::Repo(repo) => repo.to_string(),
+            Target::Branch(repo, branch) => format!("{repo} @ {branch}"),
+            Target::Compare(repo, base, head) => format!("{repo} {base}...{head}"),
+            Target::Pr(repo, number) => format!("{repo} #{number}"),
+            Target::Commit(repo, sha) => {
+                let short: String = sha.chars().take(7).collect();
+                format!("{repo} {short}")
+            }
+        })
+    }
+
     /// The word that separates the repository from the path inside it, as
     /// github.com writes it. `None` for home, which has no inside.
     fn marker(&self) -> Option<&'static str> {
@@ -647,6 +666,47 @@ pub fn take_handoff() -> Option<Link> {
         *line = anchor_line(&hash);
     }
     Some(link)
+}
+
+/// What the page was opened on, read without taking anything.
+///
+/// The same address [`take_handoff`] and [`fragment`] are read out of, asked
+/// the one question that has to be answered before the first frame is drawn:
+/// is somebody arriving somewhere, or arriving at nothing? A tab opened on a
+/// link — pasted, bookmarked, handed over by the extension — is a tab whose
+/// reader has already chosen; showing them the front page while the pull
+/// request they asked for is fetched is showing them a page they did not ask
+/// for and will not read.
+///
+/// So this runs at startup, before anything is fetched, and it answers with
+/// nothing but the address. That rules out the one reading that costs a
+/// request: a `blob/…` link's ref cannot be told from the path inside it
+/// without asking GitHub — see [`longest_ref`] — so what comes back for one of
+/// those is the repository, which is the half already known and enough to name
+/// what is coming. Whoever goes on to open it refines this to the real route
+/// the moment the question is answered.
+pub fn arriving() -> Option<Route> {
+    let at = location()?;
+    // The handoff first: an extension's `?url=` is the whole of what the tab
+    // was opened for, and whatever fragment came in beside it belongs to the
+    // link being handed over rather than to this page.
+    let text = at
+        .search()
+        .ok()
+        .and_then(|q| param(&q, HANDOFF))
+        .unwrap_or_else(|| at.hash().unwrap_or_default());
+    arriving_at(&text)
+}
+
+/// The reading itself, given the piece of address rather than the window — the
+/// half of [`arriving`] that can be checked without a browser.
+fn arriving_at(text: &str) -> Option<Route> {
+    let route = match github_link(text) {
+        Some(Link::At(route)) => route,
+        Some(Link::Ref { repo, .. }) => Route::to(Target::Repo(repo)),
+        None => parse(text),
+    };
+    (route.at != Target::Home).then_some(route)
 }
 
 /// Put the address back to the page itself, with neither the handoff nor
@@ -1355,6 +1415,85 @@ mod tests {
         assert_eq!(param("url=a+b", "url").as_deref(), Some("a b"));
         assert_eq!(param("?other=1", "url"), None);
         assert_eq!(param("", "url"), None);
+    }
+
+    /// What the front page is not shown for. Every form of address the app can
+    /// be opened on names something, and something is not the landing page.
+    #[test]
+    fn a_link_arrived_on_is_read_before_anything_is_fetched() {
+        let pr = Route::to(Target::Pr(repo_of("o", "r"), 12));
+        assert_eq!(arriving_at("#/o/r/pull/12"), Some(pr.clone()));
+        // Our own links, github.com's, and a file named inside either.
+        assert_eq!(arriving_at("https://github.com/o/r/pull/12"), Some(pr));
+        assert_eq!(
+            arriving_at("#/o/r/pull/12/files/src/main.rs:L42"),
+            Some(Route {
+                at: Target::Pr(repo_of("o", "r"), 12),
+                place: place("src/main.rs", Some(42)),
+            })
+        );
+        assert_eq!(
+            arriving_at("#/o/r/commit/abc1234"),
+            Some(Route::to(Target::Commit(
+                repo_of("o", "r"),
+                "abc1234".to_string()
+            )))
+        );
+        // The one that cannot be finished without asking GitHub where the
+        // branch ends: the repository is the half that is already known, and
+        // it is enough to name what is coming.
+        assert_eq!(
+            arriving_at("https://github.com/o/r/blob/main/src/main.rs"),
+            Some(Route::to(Target::Repo(repo_of("o", "r"))))
+        );
+    }
+
+    /// And what it *is* shown for: an address naming nothing to arrive at.
+    #[test]
+    fn arriving_at_nothing_is_arriving_at_the_front_page() {
+        assert_eq!(arriving_at(""), None);
+        assert_eq!(arriving_at("#"), None);
+        assert_eq!(arriving_at("#/"), None);
+        assert_eq!(arriving_at("#/o"), None);
+    }
+
+    /// The name the tab and the screen that stands in for a space both say.
+    #[test]
+    fn every_place_can_say_what_it_is_called() {
+        let repo = repo_of("bigmah", "pullspace");
+        assert_eq!(Target::Home.label(), None);
+        assert_eq!(
+            Target::Pr(repo.clone(), 12).label().as_deref(),
+            Some("bigmah/pullspace #12")
+        );
+        assert_eq!(
+            Target::Repo(repo.clone()).label().as_deref(),
+            Some("bigmah/pullspace")
+        );
+        assert_eq!(
+            Target::Branch(repo.clone(), "dev".to_string())
+                .label()
+                .as_deref(),
+            Some("bigmah/pullspace @ dev")
+        );
+        assert_eq!(
+            Target::Compare(repo.clone(), "main".to_string(), "dev".to_string())
+                .label()
+                .as_deref(),
+            Some("bigmah/pullspace main...dev")
+        );
+        // A sha is shortened to the length everything else in this app shows
+        // one at, and a short one is left as it is.
+        assert_eq!(
+            Target::Commit(repo.clone(), "a".repeat(40))
+                .label()
+                .as_deref(),
+            Some("bigmah/pullspace aaaaaaa")
+        );
+        assert_eq!(
+            Target::Commit(repo, "abc12".to_string()).label().as_deref(),
+            Some("bigmah/pullspace abc12")
+        );
     }
 
     #[test]

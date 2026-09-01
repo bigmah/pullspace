@@ -109,6 +109,18 @@ macro_rules! held {
 held! {
     // --- what is open, and what it says about the files in it ---
     workspace: Workspace = Workspace::Empty,
+    /// Where this space is on its way to, while it is still on its way.
+    ///
+    /// An empty workspace is two different things, and this is what tells them
+    /// apart: nothing opened, which is what the landing page is for, and
+    /// something opening, which is a review three requests away. Kept per
+    /// space because arriving is per space — a link opened in one is not a
+    /// reason to cover the review in another.
+    ///
+    /// The route rather than a flag, because a space can be put down mid-
+    /// arrival: the fetch is retired with it, and coming back has to start
+    /// that fetch again rather than sit on a screen nothing is working for.
+    incoming: Option<Route> = None,
     statuses: HashMap<PathBuf, ChangeKind> = HashMap::new(),
     pending: Option<Place> = None,
 
@@ -198,17 +210,20 @@ impl Space {
     /// than in here, so it is asked of those instead.
     fn route(&self, st: &St) -> Route {
         if *st.space.peek() == self.id {
-            return st.route();
+            // Mid-arrival, where it is going is a better answer than the
+            // nothing it has to show for itself — that is the link a reload
+            // should bring it back to.
+            return st.incoming.peek().clone().unwrap_or_else(|| st.route());
         }
         match &self.state {
             State::Away(route) => route.clone(),
-            State::Live(held) => Route {
+            State::Live(held) => held.incoming.clone().unwrap_or_else(|| Route {
                 at: held.workspace.target(),
                 place: held.open.clone().map(|path| Place {
                     path,
                     line: held.at_line,
                 }),
-            },
+            }),
         }
     }
 }
@@ -231,6 +246,18 @@ impl Kind {
             Workspace::Repo(_) => Kind::Repo,
             Workspace::Commit(_) => Kind::Commit,
             Workspace::Compare(_) => Kind::Compare,
+        }
+    }
+
+    /// The same, for a space that is still on its way to one — the chip is up
+    /// before the workspace is, so it is read off the link instead.
+    pub fn going(at: &Target) -> Kind {
+        match at {
+            Target::Home => Kind::Empty,
+            Target::Pr(..) => Kind::Pr,
+            Target::Repo(..) | Target::Branch(..) => Kind::Repo,
+            Target::Commit(..) => Kind::Commit,
+            Target::Compare(..) => Kind::Compare,
         }
     }
 
@@ -279,6 +306,29 @@ impl Card {
             lead: "New space".to_string(),
             trail: String::new(),
             note: String::new(),
+        }
+    }
+
+    /// A space that is on its way somewhere, named for where it is going.
+    ///
+    /// Without this a space woken from a link reads "New space" for as long as
+    /// it takes to fetch — and, since the list is written down as it changes,
+    /// is *saved* as one. The label a reload comes back to would be the label
+    /// of the second the reader spent switching into it.
+    pub fn arriving(route: &Route) -> Card {
+        Card {
+            kind: Kind::going(&route.at),
+            lead: route.at.label().unwrap_or_default(),
+            // The title is on the pull request, which is the thing being
+            // fetched. Until it lands there are only the two halves the link
+            // itself carries.
+            trail: String::new(),
+            note: route
+                .place
+                .as_ref()
+                .and_then(|place| place.path.file_name())
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default(),
         }
     }
 
@@ -353,8 +403,16 @@ impl Claim {
     }
 
     /// And what went wrong, written the way every error in this app is.
+    ///
+    /// Also the end of an arrival, for a space that was still on its way to
+    /// something: nothing is coming any more, so the picker comes back — with
+    /// this error at the top of it, which is where the reader can do something
+    /// about it.
     pub fn failed(&self, e: impl std::fmt::Display) {
         self.say(Fetch::Failed(format!("{e:#}")));
+        if self.kept() {
+            self.st.arrived();
+        }
     }
 
     /// Nothing in flight any more.
@@ -399,7 +457,14 @@ pub fn go_to(st: &St, id: u32) {
         std::mem::replace(&mut list[at].state, State::Live(Box::new(Held::fresh())))
     };
     let (incoming, fetch) = match incoming {
-        State::Live(held) => (*held, None),
+        // A space put down in the middle of arriving somewhere: what it was
+        // waiting on was retired when it was left, so coming back is where
+        // that fetch starts again. Without this the screen that stands in for
+        // the arrival would be up with nothing working behind it.
+        State::Live(held) => {
+            let again = held.incoming.clone().filter(|_| !held.workspace.is_open());
+            (*held, again)
+        }
         State::Away(route) => (Held::fresh(), Some(route)),
     };
 
@@ -426,6 +491,11 @@ pub fn go_to(st: &St, id: u32) {
         // `St::enter` writes it, and writing it here would have the listener
         // on `hashchange` fetch the same thing a second time.
         Some(route) => {
+            // What the space shows until it lands: where it is going, rather
+            // than the front page of an app the reader is already inside.
+            // Home is the exception — a saved space with nothing in it opens
+            // on nothing, and nothing is what the landing page is for.
+            st.arriving_at(&route);
             spawn_forever(open_route(*st, route));
         }
         // The effect in `App` follows the address bar for anything open. It
@@ -865,6 +935,35 @@ mod tests {
         assert_eq!(card.kind, Kind::Empty);
         assert_eq!(card.lead, "New space");
         // Nothing open means nothing being read, whatever else is passed.
+        assert_eq!(card.note, "");
+    }
+
+    /// A space woken from a link is named for the link while it fetches — and
+    /// since the list is written down as it changes, that is also the label a
+    /// reload in the middle of one comes back to.
+    #[test]
+    fn a_space_on_its_way_somewhere_is_named_for_where_it_is_going() {
+        let repo = crate::backend::github::RepoRef {
+            owner: "bigmah".to_string(),
+            name: "pullspace".to_string(),
+        };
+        let card = Card::arriving(&Route {
+            at: Target::Pr(repo.clone(), 7),
+            place: Some(Place {
+                path: PathBuf::from("src/ui/app.rs"),
+                line: Some(42),
+            }),
+        });
+        assert_eq!(card.kind, Kind::Pr);
+        assert_eq!(card.lead, "bigmah/pullspace #7");
+        // The title is on the pull request, which has not arrived yet.
+        assert_eq!(card.trail, "");
+        assert_eq!(card.note, "app.rs");
+
+        // A branch is a browse, and a link naming no file names no file.
+        let card = Card::arriving(&Route::to(Target::Branch(repo, "dev".to_string())));
+        assert_eq!(card.kind, Kind::Repo);
+        assert_eq!(card.lead, "bigmah/pullspace @ dev");
         assert_eq!(card.note, "");
     }
 

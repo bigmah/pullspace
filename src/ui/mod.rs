@@ -9,6 +9,7 @@ mod imgcache;
 mod landing;
 mod markdown;
 mod nav;
+mod opening;
 mod page;
 mod panes;
 mod prcache;

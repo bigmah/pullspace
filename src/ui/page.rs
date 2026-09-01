@@ -70,7 +70,20 @@ fn title(ws: &Workspace) -> String {
 #[component]
 pub fn Tab() -> Element {
     let st = use_context::<St>();
-    let name = title(&st.workspace.read());
+    // A space still on its way somewhere is named for where it is going. The
+    // tab is the one part of the frame the browser keeps between the click and
+    // the arrival — on a link opened in a background tab it is the *only*
+    // part — so it should say what was clicked rather than the app's own name.
+    let going = st
+        .incoming
+        .read()
+        .as_ref()
+        .filter(|_| !st.workspace.read().is_open())
+        .and_then(|route| route.at.label());
+    let name = match going {
+        Some(going) => format!("{going} · pullspace"),
+        None => title(&st.workspace.read()),
+    };
     rsx! {
         document::Link {
             rel: "icon",

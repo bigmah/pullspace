@@ -588,6 +588,22 @@ pub fn current() -> Route {
         .unwrap_or_default()
 }
 
+/// This page, at some other route — a whole URL rather than a fragment.
+///
+/// What breaking a space out into a browser tab of its own needs: `window.open`
+/// wants an address, and the address of another space is this same static page
+/// with a different `#` on the end. Built from the page's own location, so it
+/// works wherever the app has been put — a subdirectory, a file:// path, a
+/// dev server on :8080.
+pub fn page_url(route: &Route) -> String {
+    let Some(at) = location() else {
+        return route.hash();
+    };
+    let origin = at.origin().unwrap_or_default();
+    let path = at.pathname().unwrap_or_else(|_| "/".to_string());
+    format!("{origin}{path}{}", route.hash())
+}
+
 /// The fragment as written, before anything has been made of it.
 ///
 /// What arrives there is not always one of our own links — a github.com URL

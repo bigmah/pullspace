@@ -180,7 +180,7 @@ pub fn Reader(doc: Reading) -> Element {
                 if showing_toc {
                     Contents { entries: outline.clone() }
                 }
-                div { class: "rdscroll",
+                div { class: "rdscroll", "data-keep": "doc",
                     div { class: if *wide.read() { "rdcol wide" } else { "rdcol" },
                         if parsed.raw_html {
                             div { class: "rdnote",

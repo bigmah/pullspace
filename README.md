@@ -93,6 +93,45 @@ failing test is one click from the code that failed it.
 A panel across the bottom of the code holds the answer to "where else is this?"
 — search hits, references, definitions — and closes again once it has been read.
 
+## Spaces
+
+A review is never one pull request. It is this one, the two it depends on, the
+branch you went to read for context, and the commit somebody linked in a
+comment — and everywhere else that means a browser tab each: the same app
+loaded five times over, five clones of the same repository, and five identical
+favicons to hunt through at the top of the window.
+
+pullspace holds them itself. A **space** is a whole pullspace — what is open,
+the files open inside it, where you are in each of them, what the explorer has
+unfolded, what the three panes are showing — and the app's own name in the
+corner is the list of them. Click it to move between them, `+ New space` to
+open an empty one, or `⌥⇧←` and `⌥⇧→` to step along the row without leaving the
+keyboard.
+
+**Nothing is lost on the way.** Not the strip of open files and not which of
+them is in front; not the line you picked out or how far down each file you had
+scrolled; not the folds in the explorer, the stretches of diff you had opened
+up, the boxes you had ticked, the text in the search box or the hits it found;
+not the conversation you were halfway down, the tab it was under, or the pane
+you had folded away. Coming back to a space is coming back to the desk exactly
+as you left it, down to the scroll offsets — which is the whole point, and is
+why it is a swap of state and not a reload. Nothing is re-fetched: the reviews
+you are not looking at cost no requests, and what was already read is still
+read.
+
+Each row of the list says what that space holds — pull request, branch, commit
+or comparison — its title, and the file you had in the middle pane, which is
+what tells two spaces on the same repository apart. `↗` on a row **breaks it
+out** into a browser tab of its own and lets go of it here, for the review that
+has earned a window; `×` puts it down. `⌥⇧T` opens a space and `⌥⇧W` closes
+one, which are `⌘T` and `⌘W` moved one modifier out of the browser's way.
+
+The list survives a reload — it is kept in session storage, which belongs to
+the browser tab and to nothing else, so opening pullspace in a second window
+gives you a second desk rather than a second view of this one. What is written
+down is a link per space and what to call it; a space that has not been opened
+since the reload is marked `link`, and clicking it fetches what it points at.
+
 ## Opening from github.com
 
 Any github.com URL opens here. Paste one into the picker, drop one in after the
@@ -298,7 +337,7 @@ src/
     http.rs         one GET, on the browser's fetch
     github.rs       GitHub REST: repo search, PRs, branches, commits, trees, blobs
     auth.rs         the token, and localStorage
-    store.rs        localStorage: what a desktop app would put in ~/.config
+    store.rs        localStorage — and sessionStorage, for the spaces
     route.rs        what is open: a PR, a commit, a branch or a comparison
     prefs.rs        theme, accent, font and size, as a `:root` stylesheet
     clip.rs         the clipboard, for the link to a line
@@ -324,7 +363,8 @@ src/
     topbar.rs       what is on screen, warm-up progress, account, refresh
     filetree.rs     recursive tree with status badges
     viewer.rs       source view, inline & split diff views
-    tabs.rs         the files held open, and where each one is scrolled to
+    tabs.rs         the files held open, and where each pane is scrolled to
+    spaces.rs       several pullspaces in one tab: the state swap, the switcher
     ide.rs          search, definitions, references, and the keyboard
     nav.rs          the address bar read back: links, Back and Forward
     bottom.rs       the panel under the code: hits, definitions, a peek at one

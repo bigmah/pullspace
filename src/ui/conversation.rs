@@ -509,7 +509,7 @@ pub fn ConvPane() -> Element {
                     "›"
                 }
             }
-            div { class: "conv-body",
+            div { class: "conv-body", "data-keep": "conv",
                 match showing {
                     ConvTab::Talk => rsx! {
                         if let Some(desc) = desc.clone() {

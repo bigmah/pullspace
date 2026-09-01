@@ -33,6 +33,7 @@ use super::landing::Landing;
 use super::page::Tab;
 use super::panes::{self, Drag, DragMask, Edge};
 use super::prefs::PrefsPanel;
+use super::spaces::{self, Card, Held, Space};
 use super::tabs;
 use super::topbar::TopBar;
 use super::viewer::Viewer;
@@ -820,6 +821,20 @@ pub struct St {
     pub drag: Signal<Option<Drag>>,
     /// The last divider pressed and when — how a double-click is spotted.
     pub last_grab: Signal<Option<(Edge, Instant)>>,
+
+    // --- the spaces ---
+    /// Every pullspace open in this browser tab, in the order the switcher
+    /// draws them. All of them but the one on screen keep their state in here;
+    /// the one on screen keeps it on the signals above — see
+    /// [`super::spaces`].
+    pub spaces: Signal<Vec<Space>>,
+    /// Which of them that is.
+    ///
+    /// Not part of a space's state, for the obvious reason, and not restored
+    /// by a switch either: it is what a switch *changes*, and it is what
+    /// everything fetching on a reader's behalf checks before it writes what
+    /// it fetched — see [`spaces::Claim`].
+    pub space: Signal<u32>,
 }
 
 impl St {
@@ -851,7 +866,7 @@ impl St {
         showing_tab(*self.conv_tab.read(), &held)
     }
 
-    fn bump_tick(&self) {
+    pub(super) fn bump_tick(&self) {
         let mut tick = self.refresh_tick;
         let v = *tick.peek();
         tick.set(v + 1);
@@ -1632,7 +1647,10 @@ impl St {
     /// read straight off the signals that hold them. Where the file is
     /// scrolled to is the exception, and is not kept here at all — see
     /// [`super::tabs`].
-    fn stow(&self) {
+    ///
+    /// Leaving a *space* is one more way out of a file, which is why this is
+    /// reachable from [`super::spaces`].
+    pub(super) fn stow(&self) {
         let Some(here) = self.here() else { return };
         let mut tabs = self.tabs;
         let mut held = tabs.write();
@@ -1824,62 +1842,71 @@ pub fn App() -> Element {
         // app is never briefly drawn in a theme nobody chose.
         let look = prefs::load();
         highlight::use_light(look.theme.is_light());
+        // And so do the spaces, if this tab has been here before. Every one of
+        // them comes back as a link; the one that was on screen is opened by
+        // the address bar, which is where it was written on the way out.
+        let (mut spaces, on) = spaces::load();
+        spaces::wake(&mut spaces, on);
+        // The state of the space the app starts in. Every per-space signal
+        // below is seeded from it, so what an empty space holds is stated in
+        // one place — see `spaces::Held`.
+        let h = Held::fresh();
         St {
-            statuses: root(HashMap::new()),
-            open: root(None),
-            reading: root(None),
+            statuses: root(h.statuses),
+            open: root(h.open),
+            reading: root(h.reading),
             read_wide: root(false),
             read_toc: root(true),
-            view_mode: root(ViewMode::Source),
-            scroll_to: root(None),
-            at_line: root(None),
-            anchor: root(None),
-            expanded: root(HashMap::new()),
-            expansions: root(HashMap::new()),
-            tree_seeded: root(false),
-            tree_filter: root(String::new()),
-            changes_only: root(false),
-            viewed: root(HashSet::new()),
-            changed_files: root(Vec::new()),
+            view_mode: root(h.view_mode),
+            scroll_to: root(h.scroll_to),
+            at_line: root(h.at_line),
+            anchor: root(h.anchor),
+            expanded: root(h.expanded),
+            expansions: root(h.expansions),
+            tree_seeded: root(h.tree_seeded),
+            tree_filter: root(h.tree_filter),
+            changes_only: root(h.changes_only),
+            viewed: root(h.viewed),
+            changed_files: root(h.changed_files),
             refresh_tick: root(0),
-            trail: root(Vec::new()),
-            ahead: root(Vec::new()),
-            tabs: root(Vec::new()),
+            trail: root(h.trail),
+            ahead: root(h.ahead),
+            tabs: root(h.tabs),
 
-            selected: root(None),
-            panel: root(Panel::Hidden),
-            index: root(Index::Off),
+            selected: root(h.selected),
+            panel: root(h.panel),
+            index: root(h.index),
             scan_seq: root(0),
-            search_text: root(String::new()),
-            search_opts: root(Options::default()),
-            search_error: root(None),
+            search_text: root(h.search_text),
+            search_opts: root(h.search_opts),
+            search_error: root(h.search_error),
 
             token: root(None),
             account: root(Account::Checking),
             // The overlay is asked for, never assumed: with nothing open the
             // landing page is the picker, and it is up because the workspace
             // is empty rather than because this is set.
-            gh_open: root(false),
-            repo_input: root(String::new()),
-            prs: root(None),
-            pr_state: root(PrState::default()),
-            fetch: root(Fetch::Idle),
-            workspace: root(Workspace::Empty),
-            pr_files: root(HashMap::new()),
-            warm_order: root(VecDeque::new()),
-            images: root(HashMap::new()),
-            image_order: root(VecDeque::new()),
-            cloning: root(None),
+            gh_open: root(h.gh_open),
+            repo_input: root(h.repo_input),
+            prs: root(h.prs),
+            pr_state: root(h.pr_state),
+            fetch: root(h.fetch),
+            workspace: root(h.workspace),
+            pr_files: root(h.pr_files),
+            warm_order: root(h.warm_order),
+            images: root(h.images),
+            image_order: root(h.image_order),
+            cloning: root(h.cloning),
             store_gen: root(0),
-            conv: root(Conversation::Loading),
-            conv_open: root(true),
-            commits: root(CommitList::Idle),
-            branches: root(BranchList::Idle),
-            checks: root(CheckList::Idle),
-            annots: root(HashMap::new()),
-            conv_tab: root(ConvTab::default()),
+            conv: root(h.conv),
+            conv_open: root(h.conv_open),
+            commits: root(h.commits),
+            branches: root(h.branches),
+            checks: root(h.checks),
+            annots: root(h.annots),
+            conv_tab: root(h.conv_tab),
 
-            pending: root(None),
+            pending: root(h.pending),
 
             prefs: root(look),
             prefs_open: root(false),
@@ -1890,6 +1917,9 @@ pub fn App() -> Element {
             main_size: root((0.0, 0.0)),
             drag: root(None),
             last_grab: root(None),
+
+            spaces: root(spaces),
+            space: root(on),
         }
     });
 
@@ -2018,6 +2048,17 @@ pub fn App() -> Element {
         let Some((head, base, changed)) = opened else {
             return;
         };
+        // This runs again whenever the workspace is written, and coming back
+        // to a space writes it. A clone that has already finished is the clone
+        // for what is open — `St::enter` is what clears the progress, so
+        // anything genuinely new still starts one.
+        if st
+            .cloning
+            .peek()
+            .is_some_and(|at| at.total > 0 && at.finished())
+        {
+            return;
+        }
         spawn_forever(super::prcache::clone_repo(st, head, base, changed));
     });
 
@@ -2032,6 +2073,12 @@ pub fn App() -> Element {
             .trees()
             .map(|(head, _)| head.files)
             .unwrap_or_default();
+        // And as above: an index already built is the index for what is open,
+        // and coming back to a space is not a reason to read forty thousand
+        // files again. `St::clear_ide` drops it when the commit moves.
+        if matches!(*st.index.peek(), Index::Ready { .. }) {
+            return;
+        }
         spawn_forever(super::ide::build_index(st, files));
     });
 
@@ -2047,7 +2094,22 @@ pub fn App() -> Element {
 
     // The third: where each open file is scrolled to, which the page keeps on
     // our behalf — a wheel notch is not worth a render. See `super::tabs`.
-    use_effect(tabs::watch);
+    // Told which space it is keeping them for, since the page outlives every
+    // one of them.
+    use_effect(move || {
+        tabs::watch();
+        tabs::use_space(*st.space.peek());
+    });
+
+    // What the switcher calls the space on screen, kept in step with what it
+    // has open and where the reader is in it — and the whole list written down
+    // as either moves, so a reload comes back to the same dozen reviews rather
+    // than to one.
+    use_effect(move || {
+        let card = Card::of(&st.workspace.read(), st.open.read().as_deref());
+        spaces::describe(&st, card);
+        spaces::save(&st);
+    });
 
     // Pull the conversation as soon as a pull request opens — three requests,
     // next to the tree and every changed file, and the pane is the first thing

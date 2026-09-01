@@ -21,6 +21,7 @@ use crate::backend::github::{FetchJob, Snapshot};
 use crate::backend::{blobs, clone};
 
 use super::app::{PrFileState, St};
+use super::spaces::Claim;
 
 /// How many files to keep decoded in memory. Enough that going back and forth
 /// across a review costs nothing; few enough that a browsed repository cannot
@@ -87,6 +88,7 @@ fn ensure_file(st: St, job: FetchJob) {
     }
     let mut cache = st.pr_files;
     let token = st.api_token();
+    let claim = Claim::new(st);
     cache.write().insert(job.path.clone(), PrFileState::Loading);
 
     // Root scope: a read has to outlive the tree row or viewer that triggered
@@ -94,7 +96,12 @@ fn ensure_file(st: St, job: FetchJob) {
     spawn_forever(async move {
         let path = job.path.clone();
         let state = settle(clone::read_pair(&token, &job).await);
-        remember(&st, &path, state);
+        // It has to outlive the row, not the space: this cache is keyed by
+        // path, and `src/main.rs` of the review somebody has moved on to is a
+        // different file with the same name.
+        if claim.kept() {
+            remember(&st, &path, state);
+        }
     });
 }
 
@@ -163,7 +170,11 @@ async fn warm(st: St, changed: Vec<FetchJob>, token: String) {
         // Collect first, *then* write per result. Writing the signal inside the
         // joined futures would hold a borrow across an await, and the viewer
         // reading the cache mid-fetch would panic.
-        for (path, result) in futures_util::future::join_all(started).await {
+        let done = futures_util::future::join_all(started).await;
+        if st.generation() != mine {
+            return;
+        }
+        for (path, result) in done {
             remember(&st, &path, settle(result));
         }
     }

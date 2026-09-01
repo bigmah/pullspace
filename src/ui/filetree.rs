@@ -279,6 +279,10 @@ pub fn FileTreePane() -> Element {
                 // and the guides that explain both would be drawing structure
                 // that is not there.
                 class: if filtering { "tree flat" } else { "tree" },
+                // How far down the explorer somebody had scrolled — see
+                // `super::tabs`, which keeps it per space rather than in a
+                // signal written at every notch of the wheel.
+                "data-keep": "tree",
                 for rs in listing.read().rows.iter() {
                     TreeRow {
                         key: "{rs.row.path.display()}",

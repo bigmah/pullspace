@@ -114,7 +114,7 @@ pub fn Bottom() -> Element {
                     "✕"
                 }
             }
-            div { class: "panel-body", {body} }
+            div { class: "panel-body", "data-keep": "panel", {body} }
         }
     }
 }

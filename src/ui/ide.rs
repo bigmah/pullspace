@@ -30,6 +30,7 @@ use crate::backend::symbols::{self, Symbol};
 
 use super::app::St;
 use super::compat;
+use super::spaces;
 
 /// How long to wait for the clone before indexing anyway. It is a backstop for
 /// a clone that never reports rather than a deadline — the usual path is the
@@ -538,6 +539,13 @@ const KEYS: &str = r#"
     else if (mod && key === ',') what = 'prefs';
     else if (key === 'f12') what = e.shiftKey ? 'refs' : 'def';
     else if (key === 'escape') what = 'escape';
+    // The spaces go first, since every one of them is one of the keys below
+    // with Shift held: Option and an arrow moves inside a space, Option, Shift
+    // and an arrow moves between them.
+    else if (e.altKey && e.shiftKey && key === 'arrowleft') what = 'prevspace';
+    else if (e.altKey && e.shiftKey && key === 'arrowright') what = 'nextspace';
+    else if (e.altKey && e.shiftKey && (key === 't' || e.code === 'KeyT')) what = 'newspace';
+    else if (e.altKey && e.shiftKey && (key === 'w' || e.code === 'KeyW')) what = 'closespace';
     else if ((e.altKey && key === 'arrowleft') || (mod && key === '[')) what = 'back';
     else if ((e.altKey && key === 'arrowright') || (mod && key === ']')) what = 'forward';
     else if (e.altKey && key === 'arrowdown') what = 'nextfile';
@@ -550,7 +558,9 @@ const KEYS: &str = r#"
     // could mean is one more press away.
     if (what === 'escape' && typing) { el.blur(); e.preventDefault(); return; }
     // And an arrow in one is about the caret, not about the review — nor is
-    // a letter in one about the file behind it.
+    // a letter in one about the file behind it. The spaces are not on this
+    // list: stepping to another review is worth doing from inside the search
+    // box, and Option+Shift is not a chord anybody types text with.
     if (typing && (what === 'nextfile' || what === 'prevfile' || what === 'closetab')) return;
     e.preventDefault();
     dioxus.send(what);
@@ -590,6 +600,12 @@ pub async fn keys(st: St) {
             // Put down the file being read. What is beside it in the strip
             // takes its place.
             ("closetab", _) => st.close_open_tab(),
+            // And the four that are about the space rather than about what is
+            // inside it — see `super::spaces`.
+            ("nextspace", _) => spaces::step(&st, true),
+            ("prevspace", _) => spaces::step(&st, false),
+            ("newspace", _) => spaces::open_new(&st),
+            ("closespace", _) => spaces::close(&st, *st.space.peek()),
             _ => {}
         }
     }

@@ -13,6 +13,7 @@ use crate::backend::github::RepoRef;
 
 use super::app::St;
 use super::github::{PickerBody, PickerFoot, browse_repo, form_open};
+use super::spaces::SpaceSwitch;
 
 /// What pullspace is, in the three claims that pick it out: the shape of the
 /// review, the conversation beside it, and the absence of a server.
@@ -47,8 +48,12 @@ pub fn Landing() -> Element {
 
     rsx! {
         div { class: "landing",
-            // The one control of the top bar that is about the app rather than
-            // about something being open, which nothing is.
+            // The two controls of the top bar that are about the app rather
+            // than about something being open, which nothing is. The switcher
+            // matters more here than anywhere: an empty space is one somebody
+            // has just opened, and the way back to the review they opened it
+            // beside has to be on the page they are looking at.
+            div { class: "landing-spaces", SpaceSwitch {} }
             button {
                 class: "iconbtn lg landing-prefs",
                 title: "Appearance — theme, accent, font  (⌘,)",

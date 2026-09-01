@@ -29,6 +29,7 @@ use crate::backend::route::{self, Link, Route, Target};
 
 use super::app::{Account, Fetch, Got, PrList, St};
 use super::compat;
+use super::spaces::Claim;
 use super::topbar::size_label;
 
 #[component]
@@ -1315,6 +1316,10 @@ fn do_sign_out(st: St) {
 /// link to a branch browses it, and a link to a commit opens that commit's
 /// diff.
 async fn open_target(st: St) {
+    // Claimed here rather than inside the fetches below: reading a link can
+    // itself cost a request, and this is the one path with a wait in front of
+    // the work that follows it. See `spaces::Claim`.
+    let claim = Claim::new(st);
     let raw = st.repo_input.peek().clone();
     // A github.com URL, read in github.com's own grammar: its `blob/main/…`
     // writes a branch where this app's own links write a path, so what came
@@ -1322,7 +1327,11 @@ async fn open_target(st: St) {
     // a URL comes through here — `owner/repo/tree/main` typed by hand is still
     // one of ours, and is read below.
     if let Some(link) = route::github_link(&raw) {
-        return open_route(st, read_link(st, link).await).await;
+        let route = read_link(st, link).await;
+        if !claim.kept() {
+            return;
+        }
+        return open_route(st, route).await;
     }
     // Before the repository: `owner/repo/commit/<sha>` names a repository as
     // well, and answering with that one would drop the half that was pasted.
@@ -1338,12 +1347,8 @@ async fn open_target(st: St) {
         return browse_branch(st, repo, branch, None).await;
     }
     let Some((repo, number)) = parse_target(&raw) else {
-        let mut fetch = st.fetch;
-        fetch.set(Fetch::Failed(
-            "That is not a repository — pick one from the list, or paste a GitHub link."
-                .to_string(),
-        ));
-        return;
+        return claim
+            .failed("That is not a repository — pick one from the list, or paste a GitHub link.");
     };
     if let Some(number) = number {
         return open_pr(st, repo, number).await;
@@ -1358,6 +1363,7 @@ async fn open_target(st: St) {
 /// [`App`](super::app::App) — so that the switcher in the top bar always has a
 /// list to switch through.
 pub(super) async fn load_repo_prs(st: St, repo: RepoRef) {
+    let claim = Claim::new(st);
     let token = st.api_token();
     let state = *st.pr_state.peek();
     let mut prs = st.prs;
@@ -1372,8 +1378,9 @@ pub(super) async fn load_repo_prs(st: St, repo: RepoRef) {
         Err(e) => Got::Failed(format!("{e:#}")),
     };
     // A repository opened, or the toggle flipped, while this was in flight: the
-    // answer is to a question nobody is asking any more.
-    let wanted = prs.peek().as_ref().is_some_and(|l| l.covers(&repo, state));
+    // answer is to a question nobody is asking any more. And the space may have
+    // changed under it too, which no question about this list can see.
+    let wanted = claim.kept() && prs.peek().as_ref().is_some_and(|l| l.covers(&repo, state));
     if wanted {
         prs.set(Some(PrList { repo, state, got }));
     }
@@ -1431,8 +1438,7 @@ pub(super) async fn read_link(st: St, link: Link) -> Route {
     if head == rest || github::is_sha(head) {
         return route::ref_route(repo, &rest, head, line);
     }
-    let mut fetch = st.fetch;
-    fetch.set(Fetch::Working(format!("Looking for {head}…")));
+    Claim::new(st).working(format!("Looking for {head}…"));
     let names: Vec<String> = github::matching_branches(&st.api_token(), &repo, head)
         .await
         .unwrap_or_default()
@@ -1450,16 +1456,16 @@ pub(super) async fn read_link(st: St, link: Link) -> Route {
 /// commits pushed since — the branch tip moves, and everything downstream of it
 /// is keyed by commit.
 pub(super) async fn browse_repo(st: St, repo: RepoRef) {
+    let claim = Claim::new(st);
     let token = st.api_token();
-    let mut fetch = st.fetch;
 
-    fetch.set(Fetch::Working("Reading the repository…".to_string()));
+    claim.working("Reading the repository…");
     let head = match github::repo_head(&token, &repo).await {
         Ok(h) => h,
-        Err(e) => return fetch.set(Fetch::Failed(format!("{e:#}"))),
+        Err(e) => return claim.failed(e),
     };
 
-    open_tree(st, repo, head.branch, head.sha, true).await;
+    open_tree(st, claim, repo, head.branch, head.sha, true).await;
 }
 
 /// Open a repository at one of its branches: the code at that branch's tip.
@@ -1469,40 +1475,49 @@ pub(super) async fn browse_repo(st: St, repo: RepoRef) {
 /// branch arrives as. `⟳` comes through here with no sha for exactly that
 /// reason: what the branch points at now is the thing being asked for.
 pub(super) async fn browse_branch(st: St, repo: RepoRef, branch: String, sha: Option<String>) {
+    let claim = Claim::new(st);
     let token = st.api_token();
-    let mut fetch = st.fetch;
 
     let sha = match sha {
         Some(sha) => sha,
         None => {
-            fetch.set(Fetch::Working(format!("Reading {branch}…")));
+            claim.working(format!("Reading {branch}…"));
             match github::branch_head(&token, &repo, &branch).await {
                 Ok(sha) => sha,
-                Err(e) => return fetch.set(Fetch::Failed(format!("{e:#}"))),
+                Err(e) => return claim.failed(e),
             }
         }
     };
 
-    open_tree(st, repo, branch, sha, false).await;
+    open_tree(st, claim, repo, branch, sha, false).await;
 }
 
 /// The half a browse and a branch have in common: the file list at one commit,
 /// and the repository put on screen at it.
-async fn open_tree(st: St, repo: RepoRef, branch: String, sha: String, default: bool) {
+async fn open_tree(
+    st: St,
+    claim: Claim,
+    repo: RepoRef,
+    branch: String,
+    sha: String,
+    default: bool,
+) {
     let token = st.api_token();
-    let mut fetch = st.fetch;
 
-    fetch.set(Fetch::Working("Reading the file tree…".to_string()));
+    claim.working("Reading the file tree…");
     // A pull request with no readable tree still has its changed files to show.
     // A repository has nothing at all, so this is where it stops — with the
     // list still on screen, rather than on an explorer that looks empty.
     let Some(tree) = tree_at(&token, &repo, &sha).await else {
-        return fetch.set(Fetch::Failed(format!(
+        return claim.failed(format!(
             "Could not read the file list for {repo} at {branch}."
-        )));
+        ));
     };
 
-    fetch.set(Fetch::Idle);
+    claim.done();
+    if !claim.kept() {
+        return;
+    }
     st.enter_repo(RepoView {
         repo,
         branch,
@@ -1524,17 +1539,17 @@ async fn open_tree(st: St, repo: RepoRef, branch: String, sha: String, default: 
 /// which goes on showing that pull request's discussion, or that branch's
 /// history, while one commit of it is being read.
 pub(super) async fn open_commit(st: St, repo: RepoRef, sha: String, from: CommitFrom) {
+    let claim = Claim::new(st);
     let token = st.api_token();
-    let mut fetch = st.fetch;
 
-    fetch.set(Fetch::Working("Loading commit…".to_string()));
+    claim.working("Loading commit…");
     let mut view = match github::load_commit(&token, &repo, &sha).await {
         Ok(v) => v,
-        Err(e) => return fetch.set(Fetch::Failed(format!("{e:#}"))),
+        Err(e) => return claim.failed(e),
     };
     view.from = from;
 
-    fetch.set(Fetch::Working("Reading the file tree…".to_string()));
+    claim.working("Reading the file tree…");
     // As for a pull request: a tree that will not load costs the explorer its
     // unchanged files, which is a smaller loss than refusing to open the diff.
     if let Some(tree) = tree_at(&token, &repo, &view.commit.sha).await {
@@ -1548,7 +1563,10 @@ pub(super) async fn open_commit(st: St, repo: RepoRef, sha: String, from: Commit
         view.base_tree = base;
     }
 
-    fetch.set(Fetch::Idle);
+    claim.done();
+    if !claim.kept() {
+        return;
+    }
     st.enter_commit(view);
 }
 
@@ -1564,16 +1582,16 @@ pub(super) async fn open_commit(st: St, repo: RepoRef, sha: String, from: Commit
 /// GitHub sends the first hundred in the same answer, so the pane that lists
 /// them opens without a request of its own.
 pub(super) async fn open_compare(st: St, repo: RepoRef, base: String, head: String) {
+    let claim = Claim::new(st);
     let token = st.api_token();
-    let mut fetch = st.fetch;
 
-    fetch.set(Fetch::Working(format!("Comparing {base} with {head}…")));
+    claim.working(format!("Comparing {base} with {head}…"));
     let mut view = match github::load_compare(&token, &repo, &base, &head).await {
         Ok(v) => v,
-        Err(e) => return fetch.set(Fetch::Failed(format!("{e:#}"))),
+        Err(e) => return claim.failed(e),
     };
 
-    fetch.set(Fetch::Working("Reading the file tree…".to_string()));
+    claim.working("Reading the file tree…");
     // As for a pull request: a tree that will not load costs the explorer its
     // unchanged files, which is a smaller loss than refusing to open the diff.
     if let Some(tree) = tree_at(&token, &repo, &view.head_sha).await {
@@ -1586,7 +1604,10 @@ pub(super) async fn open_compare(st: St, repo: RepoRef, base: String, head: Stri
         view.base_tree = base_tree;
     }
 
-    fetch.set(Fetch::Idle);
+    claim.done();
+    if !claim.kept() {
+        return;
+    }
     st.enter_compare(view);
 }
 
@@ -1611,16 +1632,16 @@ async fn tree_at(token: &str, repo: &RepoRef, sha: &str) -> Option<github::Snaps
 /// exactly this work again, since a push moves the head commit and everything
 /// downstream of it is keyed by that commit.
 pub(super) async fn open_pr(st: St, repo: RepoRef, number: u64) {
+    let claim = Claim::new(st);
     let token = st.api_token();
-    let mut fetch = st.fetch;
 
-    fetch.set(Fetch::Working("Loading pull request…".to_string()));
+    claim.working("Loading pull request…");
     let mut detail = match github::load_pr(&token, &repo, number).await {
         Ok(d) => d,
-        Err(e) => return fetch.set(Fetch::Failed(format!("{e:#}"))),
+        Err(e) => return claim.failed(e),
     };
 
-    fetch.set(Fetch::Working("Reading the file tree…".to_string()));
+    claim.working("Reading the file tree…");
     // A tree that will not load costs the explorer its unchanged files, which
     // is a smaller loss than refusing to open the review at all.
     if let Some(tree) = tree_at(&token, &repo, &detail.head_sha).await {
@@ -1634,7 +1655,10 @@ pub(super) async fn open_pr(st: St, repo: RepoRef, number: u64) {
         detail.base_tree = base;
     }
 
-    fetch.set(Fetch::Idle);
+    claim.done();
+    if !claim.kept() {
+        return;
+    }
     st.enter_pr(detail);
 }
 

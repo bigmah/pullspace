@@ -11,9 +11,18 @@
 //! in the page rather than in Rust: where a file is scrolled to changes with
 //! every notch of the wheel, and a signal written sixty times a second is sixty
 //! renders of everything that reads it. The offsets live in a JS object
-//! instead, filed under the path the scroll container says it is showing — so
-//! an offset cannot be recorded against the wrong file, however a render and a
-//! scroll event happen to interleave.
+//! instead, filed under the key the scroll container says it is — so an offset
+//! cannot be recorded against the wrong pane, however a render and a scroll
+//! event happen to interleave.
+//!
+//! Every pane that scrolls carries `data-keep`, not only the code: the
+//! explorer, the conversation, the results panel and the reader are all places
+//! somebody can be halfway down. Files are keyed `f` and their path; the rest
+//! are keyed by name.
+//!
+//! And each of those keys is filed under the space it belongs to — see
+//! [`super::spaces`]. Two spaces open on the same repository are two different
+//! places in the same file, and the map has to be able to hold both.
 
 use std::path::{Path, PathBuf};
 
@@ -35,6 +44,11 @@ const TOPS_JS: &str = r#"
   // A reload of this page's script should not leave the last listener behind.
   if (window.__pullspace_tops) window.__pullspace_tops();
   var at = {};
+  // Which space these offsets are being recorded for and asked about. Every
+  // entry is filed under it, so switching spaces is a change of question
+  // rather than a wholesale move of the answers.
+  var space = '1';
+  var key = function (k) { return space + '\n' + k; };
   // A scroll the app itself asked for is not a fact about where anybody was
   // reading. It arrives a frame or so after the assignment that caused it, and
   // while a file is still on its way here it is a clamped 0 — which would
@@ -42,19 +56,39 @@ const TOPS_JS: &str = r#"
   var hush = 0;
   var on = function (e) {
     var el = e.target;
-    if (!el || !el.classList || !el.classList.contains('codewrap')) return;
+    if (!el || !el.getAttribute) return;
+    var k = el.getAttribute('data-keep');
+    if (!k) return;
     if (Date.now() < hush) return;
-    var path = el.getAttribute('data-path');
-    if (path) at[path] = el.scrollTop;
+    at[key(k)] = el.scrollTop;
   };
   document.addEventListener('scroll', on, true);
-  window.__pullspace_at = function (path) { return at[path]; };
+  window.__pullspace_at = function (k) { return at[key(k)]; };
   window.__pullspace_put = function (el, top) {
     hush = Date.now() + 200;
     el.scrollTop = top;
   };
-  window.__pullspace_drop = function (path) {
-    if (path === null) { at = {}; } else { delete at[path]; }
+  window.__pullspace_drop = function (k) {
+    if (k !== null) { delete at[key(k)]; return; }
+    window.__pullspace_shut(space);
+  };
+  // A whole space, closed.
+  window.__pullspace_shut = function (id) {
+    var head = String(id) + '\n';
+    for (var name in at) { if (name.indexOf(head) === 0) delete at[name]; }
+  };
+  window.__pullspace_space = function (id) { space = String(id); };
+  // Put every pane of this space back where it was left. Not the file — that
+  // one has a restore of its own, which waits for the content to arrive
+  // before it tries; everything here is drawn from state already in hand.
+  window.__pullspace_restore = function () {
+    var all = document.querySelectorAll('[data-keep]');
+    for (var i = 0; i < all.length; i++) {
+      var k = all[i].getAttribute('data-keep');
+      if (!k || k.charAt(0) === 'f') continue;
+      var want = at[key(k)];
+      if (want) window.__pullspace_put(all[i], want);
+    }
   };
   window.__pullspace_tops = function () {
     document.removeEventListener('scroll', on, true);
@@ -74,18 +108,55 @@ fn quoted(s: &str) -> String {
     serde_json::to_string(s).unwrap_or_else(|_| String::from("\"\""))
 }
 
+/// What one file's offset is filed under. The `f` keeps a path called `tree`
+/// out of the pane called `tree`.
+pub fn file_key(rel: &Path) -> String {
+    format!("f{}", rel.display())
+}
+
 /// Forget where one file was scrolled to — its tab has been closed, and the
 /// next time it opens it opens fresh.
 pub fn forget(rel: &Path) {
     document::eval(&format!(
         "if (window.__pullspace_drop) window.__pullspace_drop({});",
-        quoted(&rel.display().to_string())
+        quoted(&file_key(rel))
     ));
 }
 
-/// Forget all of them, which is what closing a pull request does.
+/// Forget all of them, which is what closing a pull request does — the
+/// explorer and the panes beside it included, since what they were showing has
+/// gone too.
 pub fn forget_all() {
     document::eval("if (window.__pullspace_drop) window.__pullspace_drop(null);");
+}
+
+/// Answer with this space's offsets from now on, and put the panes that are
+/// already drawn back where that space left them.
+///
+/// Two frames, because the first is the one dioxus patches the DOM in: a
+/// restore run before that is a restore of the space being left. The two later
+/// passes are for a pane still being built — an offset set against content
+/// that has not arrived is clamped to the bottom of what has, so a pane that
+/// grows afterwards has to be told again.
+pub fn use_space(id: u32) {
+    document::eval(&format!(
+        "(function(){{
+  if (!window.__pullspace_space) return;
+  window.__pullspace_space({id});
+  var go = function () {{ window.__pullspace_restore(); }};
+  requestAnimationFrame(function () {{ requestAnimationFrame(go); }});
+  setTimeout(go, 120);
+  setTimeout(go, 400);
+}})();"
+    ));
+}
+
+/// Forget everything one space held. Its panes are gone and are not coming
+/// back.
+pub fn shut(id: u32) {
+    document::eval(&format!(
+        "if (window.__pullspace_shut) window.__pullspace_shut({id});"
+    ));
 }
 
 /// Put a file back where it was left — or at the top of it, the first time.
@@ -97,12 +168,13 @@ pub fn forget_all() {
 /// the reader scrolls it themselves — a restore that fought the wheel would be
 /// worse than one that never happened.
 pub fn restore_js(rel: &Path) -> String {
+    let key = quoted(&file_key(rel));
     let path = quoted(&rel.display().to_string());
     format!(
         r#"(function(){{
   if (!window.__pullspace_put) return;
   var path = {path};
-  var want = window.__pullspace_at(path);
+  var want = window.__pullspace_at({key});
   if (want === undefined) want = 0;
   var n = 0, last = -1;
   function go() {{

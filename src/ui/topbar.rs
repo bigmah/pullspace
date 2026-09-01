@@ -8,6 +8,7 @@ use super::github::{
     PrListBody, PrStates, browse_branch, browse_repo, open_commit, open_compare, open_pr,
 };
 use super::ide;
+use super::spaces::{Kind, SpaceSwitch};
 
 /// What the bar says is open, and what it offers to do about it.
 ///
@@ -44,33 +45,21 @@ pub fn TopBar() -> Element {
     // workspace — two tree snapshots and every changed file — is not something
     // to clone here: this bar re-renders on every clone progress tick.
     let workspace = st.workspace.read();
-    // What is on screen, said in the same place whatever it is.
-    let (ws_label, ws_cls, ws_why) = match &*workspace {
-        Workspace::Empty => (
-            "nothing open",
-            "wschip local",
-            "View a repository or a pull request from the GitHub panel",
-        ),
-        Workspace::Pr(_) => (
-            "pull request",
-            "wschip pr",
-            "A pull request fetched from GitHub — the files as it changes them",
-        ),
-        Workspace::Repo(_) => (
-            "browsing",
-            "wschip repo",
-            "A GitHub repository being read — no pull request, so nothing is marked as changed",
-        ),
-        Workspace::Commit(_) => (
-            "commit",
-            "wschip cmp",
-            "One commit, diffed against the commit before it",
-        ),
-        Workspace::Compare(_) => (
-            "comparing",
-            "wschip cmp",
-            "Two refs held up against each other — what the one on the right adds to the one on the left",
-        ),
+    // What is on screen, said in the same place whatever it is. The word and
+    // the colour come from `spaces::Kind`, so the chip on this bar and the one
+    // on a row of the space switcher say the same thing about the same thing.
+    let kind = Kind::of(&workspace);
+    let (ws_label, ws_cls) = (kind.word(), kind.css());
+    let ws_why = match &*workspace {
+        Workspace::Empty => "View a repository or a pull request from the GitHub panel",
+        Workspace::Pr(_) => "A pull request fetched from GitHub — the files as it changes them",
+        Workspace::Repo(_) => {
+            "A GitHub repository being read — no pull request, so nothing is marked as changed"
+        }
+        Workspace::Commit(_) => "One commit, diffed against the commit before it",
+        Workspace::Compare(_) => {
+            "Two refs held up against each other — what the one on the right adds to the one on the left"
+        }
     };
 
     // What is open, said the same way whichever of the three it is: a name, the
@@ -311,7 +300,7 @@ pub fn TopBar() -> Element {
 
     rsx! {
         div { class: "{bar_cls}",
-            span { class: "brand", "pullspace" }
+            SpaceSwitch {}
             span { class: "{ws_cls}", title: "{ws_why}", "{ws_label}" }
             if let Some(crumb) = crumb {
                 PrSwitch {

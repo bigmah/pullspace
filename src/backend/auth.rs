@@ -47,9 +47,20 @@ pub fn sign_out() {
 
 /// Open a page in a new tab. Best effort: the UI shows the URL either way.
 pub fn open_browser(url: &str) {
-    if let Some(win) = web_sys::window() {
-        let _ = win.open_with_url_and_target(url, "_blank");
-    }
+    let _ = open_tab(url);
+}
+
+/// The same, for the one caller that has to know whether it worked.
+///
+/// Breaking a space out means letting go of it here, and letting go of a review
+/// because a popup blocker swallowed the window it was going to is not a
+/// mistake to make silently. A window that came back is the only proof there
+/// is; `false` means nothing opened and nothing should be given up.
+pub fn open_tab(url: &str) -> bool {
+    let Some(win) = web_sys::window() else {
+        return false;
+    };
+    matches!(win.open_with_url_and_target(url, "_blank"), Ok(Some(_)))
 }
 
 #[cfg(test)]

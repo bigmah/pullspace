@@ -407,6 +407,8 @@ pub fn Viewer() -> Element {
     };
 
     let rel_str = rel.display().to_string();
+    // The same path again, as the key its scroll offset is filed under.
+    let keep = tabs::file_key(&rel);
     let badge = status.map(|s| (s.badge(), s.css()));
     let diff_stats = diff.read().as_ref().map(stats);
     // Which contracted stretches of this file have been opened up. Read here,
@@ -573,6 +575,7 @@ pub fn Viewer() -> Element {
                 // rather than passed to the script, so that a scroll event is
                 // always filed under whatever is actually on screen.
                 "data-path": "{rel_str}",
+                "data-keep": "{keep}",
                 // A browser already knows where a word starts and ends, and a
                 // double-click is how it is asked. Wrapping every token of
                 // every line in its own clickable span to find out the same

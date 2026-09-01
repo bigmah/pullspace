@@ -21,6 +21,7 @@ use crate::backend::clone;
 use crate::backend::images::{MAX_IMAGE_BYTES, data_uri, media_type};
 
 use super::app::{ImgState, St};
+use super::spaces::Claim;
 
 /// How many bytes of encoded pictures to keep. A README's worth of screenshots
 /// several times over, and far short of what a browser tab should be spending
@@ -101,6 +102,7 @@ pub fn ensure_image(st: St, rel: &Path) {
 
     let mut images = st.images;
     let token = st.api_token();
+    let claim = Claim::new(st);
     images.write().insert(rel.to_path_buf(), ImgState::Loading);
 
     // Root scope: a read has to outlive the document that asked for it, or
@@ -116,7 +118,11 @@ pub fn ensure_image(st: St, rel: &Path) {
             Ok(bytes) => ImgState::Ready(Rc::from(data_uri(mime, &bytes).as_str())),
             Err(e) => ImgState::Failed(format!("{e:#}")),
         };
-        settle(&st, &path, state);
+        // As in `prcache`: a picture that arrives after the reader has moved
+        // to another space belongs to a repository that is no longer open.
+        if claim.kept() {
+            settle(&st, &path, state);
+        }
     });
 }
 

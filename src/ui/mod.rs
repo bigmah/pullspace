@@ -14,6 +14,7 @@ mod panes;
 mod prcache;
 mod prefs;
 mod reader;
+mod spaces;
 mod tabs;
 mod topbar;
 mod viewer;

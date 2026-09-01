@@ -572,7 +572,7 @@ impl Prefs {
              --guide:{guide};--tint:{tint};--tint-soft:{tint_soft};--on-accent:{on_accent};\
              --added:{added};--modified:{modified};--deleted:{deleted};--violet:{violet};\
              --add-bg:{add_bg};--add-emph:{add_emph};--del-bg:{del_bg};--del-emph:{del_emph};\
-             --accent:#{r:02x}{g:02x}{b:02x};\
+             --accent:#{r:02x}{g:02x}{b:02x};--accent-rgb:{r},{g},{b};\
              --accent-soft:rgba({r},{g},{b},0.16);--accent-line:rgba({r},{g},{b},0.45);\
              --mono:{mono};--code-px:{px}px;--code-lh:{lh};--tab:{tab};\
              }}",

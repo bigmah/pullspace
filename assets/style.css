@@ -18,6 +18,11 @@
      clear legibility rather than merely suggest text. */
   --fg-faint: #848a9c;
   --accent: #5c9cf5;
+  /* The same colour again as three numbers, for the handful of rules that want
+     an alpha of their own — a glow is a dozen shades of one colour, and naming
+     a dozen custom properties for it would be a dozen things to keep in step
+     with `backend::prefs`. */
+  --accent-rgb: 92, 156, 245;
   --accent-soft: rgba(92, 156, 245, 0.16);
   --accent-line: rgba(92, 156, 245, 0.45);
   --added: #4fbf7a;
@@ -167,25 +172,125 @@ button { font-family: inherit; user-select: none; }
 /* ---------- spaces: the switcher behind the app's own name ---------- */
 
 /* The name is also the way to everything else this tab has open, so it is a
-   button. Quiet until pointed at, like the crumb beside it — what it mostly
-   does is say where you are. */
+   button — and the one element that is the same in every space, which makes it
+   the one that can say "you have moved" without saying which way. It is lit
+   from behind, sweeps once when it is pointed at, and flares once when a
+   switch lands. */
 .spswitch { position: relative; display: flex; flex: none; }
 
 .brandbtn {
+  position: relative;
+  /* Above `.menuback`, which dims the app while the menu is up. The name is
+     the thing the menu hangs off; it does not go dim with everything else. */
+  z-index: 42;
   display: inline-flex;
   align-items: center;
   gap: 6px;
   height: var(--ctl);
-  padding: 0 7px;
+  padding: 0 8px;
   background: transparent;
   border: 1px solid transparent;
   border-radius: var(--r);
   cursor: pointer;
-  transition: background-color var(--quick) var(--ease), border-color var(--quick) var(--ease);
+  isolation: isolate;
+  transition: background-color var(--quick) var(--ease), border-color var(--quick) var(--ease),
+    transform var(--quick) var(--ease);
+}
+
+/* The glow. A soft accent bloom sitting behind the letters and spilling past
+   the button's own box — always there and barely there, so the corner reads as
+   lit rather than as decorated. `filter: blur` rather than a wide box-shadow
+   because a shadow cannot be an ellipse. */
+.brandbtn::before {
+  content: "";
+  position: absolute;
+  inset: -60% -18%;
+  z-index: -1;
+  border-radius: 50%;
+  background: radial-gradient(
+    50% 50% at 50% 50%,
+    rgba(var(--accent-rgb), 0.42) 0%,
+    rgba(var(--accent-rgb), 0.12) 45%,
+    transparent 72%
+  );
+  filter: blur(7px);
+  opacity: 0.7;
+  transition: opacity 220ms var(--ease), transform 220ms var(--ease);
+  pointer-events: none;
+}
+
+.brandbtn:hover::before,
+.spswitch.on .brandbtn::before { opacity: 1; transform: scale(1.12); }
+
+/* The ring a landed switch throws off: one pulse out of the button's own
+   outline. It has no animation until `.lit` is put on, which the switcher does
+   by hand — see `SpaceSwitch`. */
+.brandbtn::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: var(--r);
+  border: 1px solid rgba(var(--accent-rgb), 0.9);
+  opacity: 0;
+  pointer-events: none;
+}
+
+.brandbtn.lit::after { animation: brandring 620ms var(--ease); }
+
+@keyframes brandring {
+  from { opacity: 0.85; transform: scale(1); }
+  to { opacity: 0; transform: scale(1.5); }
 }
 
 .brandbtn:hover { background: var(--bg-3); border-color: var(--line); }
-.brandname { font: inherit; color: inherit; }
+.brandbtn:active { transform: scale(0.97); }
+.spswitch.on .brandbtn {
+  background: var(--accent-soft);
+  border-color: var(--accent-line);
+}
+
+/* The wordmark itself, set in the accent it is lit by and given a little depth
+   — the top of the letters a shade brighter than the foot of them, the way
+   anything with a light over it is. The third stop is the sweep, parked off the
+   left-hand end until something asks for it. */
+.brandname {
+  font: inherit;
+  background-image: linear-gradient(
+      100deg,
+      transparent 38%,
+      rgba(255, 255, 255, 0.92) 50%,
+      transparent 62%
+    ),
+    linear-gradient(180deg, var(--fg-bright) -40%, var(--accent) 62%);
+  background-size: 260% 100%, 100% 100%;
+  background-position: -160% 0, 0 0;
+  background-repeat: no-repeat;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  /* Safari draws clipped text with no colour at all unless this is said too. */
+  -webkit-text-fill-color: transparent;
+  transition: filter 220ms var(--ease);
+}
+
+/* The letters themselves bloom when the thing is being used — `drop-shadow`
+   follows the alpha of what was painted, which for text clipped out of a
+   gradient is the glyphs, so this is a glow in the shape of the word.
+   Deliberately not on at rest: a permanent halo around 14px of bold mono
+   reads as out of focus rather than as lit, and the wash behind the button is
+   what carries the resting state. */
+.brandbtn:hover .brandname,
+.spswitch.on .brandname {
+  filter: drop-shadow(0 0 7px rgba(var(--accent-rgb), 0.55));
+}
+
+.brandbtn:hover .brandname,
+.brandbtn.lit .brandname { animation: sheen 820ms var(--ease); }
+
+@keyframes sheen {
+  from { background-position: -160% 0, 0 0; }
+  to { background-position: 260% 0, 0 0; }
+}
 
 /* How many spaces are open, on the name they are all inside. Only ever drawn
    past one: a badge saying "1" is a badge saying nothing. */
@@ -198,14 +303,42 @@ button { font-family: inherit; user-select: none; }
   border-radius: 999px;
   color: var(--accent);
   background: var(--accent-soft);
-  box-shadow: inset 0 0 0 1px var(--accent-line);
+  box-shadow:
+    inset 0 0 0 1px var(--accent-line),
+    0 0 10px rgba(var(--accent-rgb), 0.35);
 }
 
-/* Wider than the pull request menu, because a row here carries two lines and
-   a file name under them rather than one line of title. */
+/* It is the count that has changed, most of the times this fires. */
+.brandbtn.lit .spcount { animation: countpop 420ms var(--ease); }
+
+@keyframes countpop {
+  0% { transform: scale(1); }
+  40% { transform: scale(1.28); }
+  100% { transform: scale(1); }
+}
+
+.spchev {
+  transition: transform 180ms var(--ease), color var(--quick) var(--ease);
+}
+
+.brandbtn:hover .spchev { color: var(--fg-dim); }
+.spswitch.on .spchev { transform: rotate(180deg); color: var(--accent); }
+
+/* The page, for as long as the menu is up: pushed back a little so the list in
+   front of it is the only thing in focus. The blur is a nicety and degrades to
+   the dim on an engine without it. */
+.spswitch .menuback {
+  background: rgba(0, 0, 0, 0.22);
+  -webkit-backdrop-filter: blur(2px);
+  backdrop-filter: blur(2px);
+  animation: fadein 140ms var(--ease);
+}
+
+/* Wider than the pull request menu, because a row here carries two lines and a
+   file name under them rather than one line of title. */
 .spmenu {
   position: absolute;
-  top: calc(100% + 6px);
+  top: calc(100% + 8px);
   left: 0;
   z-index: 41;
   width: 420px;
@@ -213,40 +346,113 @@ button { font-family: inherit; user-select: none; }
   max-height: min(560px, 70vh);
   display: flex;
   flex-direction: column;
-  background: var(--bg-1);
+  background: linear-gradient(180deg, var(--bg-2) 0%, var(--bg-1) 42%);
   border: 1px solid var(--border);
   border-radius: var(--r-lg);
-  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.5);
+  box-shadow:
+    0 22px 60px rgba(0, 0, 0, 0.55),
+    0 0 0 1px rgba(var(--accent-rgb), 0.1),
+    0 -1px 26px rgba(var(--accent-rgb), 0.16);
   overflow: hidden;
-  animation: risein 120ms var(--ease);
+  transform-origin: 22px top;
+  animation: spdrop 200ms cubic-bezier(0.2, 1.06, 0.36, 1);
+}
+
+/* Down and out, with a little more than it needs at the end of it — a menu
+   that arrives at exactly its own size reads as a picture being swapped in,
+   and one that overshoots by a percent reads as a thing that moved. */
+@keyframes spdrop {
+  from { opacity: 0; transform: translateY(-10px) scale(0.94); }
+  60% { opacity: 1; transform: translateY(0) scale(1.012); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+/* A hairline of accent along the very top, so the menu reads as hanging off
+   the lit name rather than as floating near it. */
+.spmenu .prmenuhdr {
+  position: relative;
+  background: linear-gradient(180deg, rgba(var(--accent-rgb), 0.07), transparent);
+}
+
+.spmenu .prmenuhdr::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 12px;
+  right: 12px;
+  height: 1px;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    rgba(var(--accent-rgb), 0.7),
+    transparent
+  );
 }
 
 .spmenubody { overflow-y: auto; padding: 6px; min-height: 0; }
 
-/* What the whole feature is for, said once at the foot of the list rather than
-   in a tooltip nobody hovers for. */
-.spmenufoot {
-  padding: 9px 12px;
-  border-top: 1px solid var(--border);
-  color: var(--fg-faint);
-  font-size: 11px;
-  line-height: 1.5;
-  flex: none;
-}
-
+/* One after another rather than all at once. 22ms apart is under the threshold
+   where it reads as a queue and over the one where it reads as nothing — and
+   it stops at the eighth, because a tab with twenty spaces in it should not
+   spend half a second drawing them. */
 .sprow {
+  position: relative;
   display: flex;
   align-items: center;
   gap: 2px;
   padding: 0 4px 0 0;
   border-radius: var(--r);
-  transition: background-color var(--quick) var(--ease);
+  isolation: isolate;
+  animation: sprowin 260ms var(--ease) both;
+  animation-delay: calc(min(var(--at), 8) * 22ms);
+  transition: background-color var(--quick) var(--ease), transform 140ms var(--ease);
 }
 
-.sprow:hover { background: var(--bg-2); }
+/* A hair of air between them. Three lines of text each, and abutting rows read
+   as one paragraph rather than as a list. */
+.sprow + .sprow { margin-top: 2px; }
+
+@keyframes sprowin {
+  from { opacity: 0; transform: translateY(-5px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+/* The hover, swept in from the left rather than switched on: the row is a
+   thing you are moving along, and the light follows the pointer onto it. */
+.sprow::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  border-radius: var(--r);
+  background: linear-gradient(90deg, var(--bg-3), var(--bg-2) 55%, transparent);
+  opacity: 0;
+  transform: translateX(-8px);
+  transition: opacity 160ms var(--ease), transform 160ms var(--ease);
+}
+
+.sprow:not(.on):hover::before { opacity: 1; transform: translateX(0); }
+
 /* The one you are in, marked the way the repository row in the pull request
-   menu is: a rule down its edge, not a colour that makes it look selected. */
-.sprow.on { box-shadow: inset 2px 0 0 var(--accent); }
+   menu is — a rule down its edge — but lit, since this is the row that says
+   where you are standing. */
+.sprow.on {
+  background: linear-gradient(90deg, rgba(var(--accent-rgb), 0.14), transparent 68%);
+  box-shadow: inset 2px 0 0 var(--accent), -1px 0 12px -4px rgba(var(--accent-rgb), 0.85);
+}
+
+.sprow.on .prnum { color: var(--fg-bright); }
+
+/* The row you are on needs no hover hint — it is already the marked one — so
+   pointing at it brightens what marks it rather than laying a second
+   highlight over the top. */
+.sprow.on:hover {
+  background: linear-gradient(90deg, rgba(var(--accent-rgb), 0.2), transparent 72%);
+}
+
+/* A row gives under the press. Barely — it is a list, not a keypad — but a
+   click on a thing that does not move is a click you are not sure landed. */
+.sprow:active { transform: scale(0.994); }
 
 .sprowmain {
   flex: 1;
@@ -263,7 +469,7 @@ button { font-family: inherit; user-select: none; }
 .spaway {
   font-size: 10px;
   color: var(--fg-faint);
-  border: 1px solid var(--line);
+  border: 1px dashed var(--line);
   border-radius: 3px;
   padding: 0 4px;
   flex: none;
@@ -290,6 +496,8 @@ button { font-family: inherit; user-select: none; }
   white-space: nowrap;
 }
 
+.sprownote::before { content: "▸ "; color: rgba(var(--accent-rgb), 0.7); }
+
 /* The two buttons on a row stay out of the way until the row is pointed at —
    a list of a dozen spaces should read as a list, not as two dozen controls. */
 .sprow .iconbtn.sm,
@@ -298,13 +506,96 @@ button { font-family: inherit; user-select: none; }
   /* Never invisible and still live: a control you cannot see is not one to be
      able to click, and one of these closes a review. */
   pointer-events: none;
-  transition: opacity var(--quick) var(--ease);
+  transform: translateX(4px);
+  transition: opacity var(--quick) var(--ease), transform var(--quick) var(--ease);
 }
 
 .sprow:hover .iconbtn.sm,
 .sprow:hover .tabx,
 .sprow .iconbtn.sm:focus-visible,
-.sprow .tabx:focus-visible { opacity: 1; pointer-events: auto; }
+.sprow .tabx:focus-visible {
+  opacity: 1;
+  pointer-events: auto;
+  transform: translateX(0);
+}
+
+.sprow .iconbtn.sm:hover:enabled { color: var(--accent); }
+.sprow .tabx:hover { color: var(--deleted); }
+
+/* What the whole feature is for, said once at the foot of the list rather than
+   in a tooltip nobody hovers for — with the two keys that do it beside it. */
+.spmenufoot {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 10px 9px 12px;
+  border-top: 1px solid var(--border);
+  background: linear-gradient(180deg, transparent, rgba(var(--accent-rgb), 0.05));
+  color: var(--fg-faint);
+  font-size: 11px;
+  line-height: 1.45;
+  flex: none;
+}
+
+.spfoottext { min-width: 0; }
+.spkeys { display: inline-flex; gap: 4px; flex: none; }
+
+.spkey {
+  font-family: var(--mono);
+  font-size: 10px;
+  line-height: 1;
+  padding: 3px 5px;
+  border-radius: var(--r-sm);
+  color: var(--fg-dim);
+  background: var(--bg-3);
+  box-shadow: inset 0 0 0 1px var(--line), 0 1px 0 var(--border);
+}
+
+/* `+ New space`, given somewhere to go on hover. */
+.spmenu .textlink {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  transition: transform var(--quick) var(--ease), filter var(--quick) var(--ease);
+}
+
+.spmenu .textlink:hover {
+  text-decoration: none;
+  transform: translateY(-1px);
+  filter: drop-shadow(0 0 6px rgba(var(--accent-rgb), 0.55));
+}
+
+/* The `+` turns a quarter, which is the only thing a plus can do on hover that
+   still reads as the same plus. */
+.spplus {
+  display: inline-block;
+  font-size: 13px;
+  line-height: 1;
+  transition: transform 220ms var(--ease);
+}
+
+.spmenu .textlink:hover .spplus { transform: rotate(90deg); }
+
+/* Everything above that moves is decoration on something that also works
+   still. Somebody who has asked their machine to stop moving things gets the
+   glow and none of the motion. */
+@media (prefers-reduced-motion: reduce) {
+  .brandbtn.lit::after,
+  .brandbtn:hover .brandname,
+  .brandbtn.lit .brandname,
+  .brandbtn.lit .spcount,
+  .spmenu,
+  .spswitch .menuback,
+  .sprow {
+    animation: none;
+  }
+
+  .sprow { opacity: 1; }
+  .spplus { transition: none; }
+  /* The chevron keeps turning: which way it points is what the control says
+     about itself, not decoration. It just stops taking time over it. */
+  .spchev { transition: none; }
+}
 
 /* What you are looking at, in the same place whatever it is: the working tree,
    a pull request, a repository, a comparison. Four things that draw the same

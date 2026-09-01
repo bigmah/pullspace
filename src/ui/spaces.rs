@@ -689,6 +689,36 @@ pub fn SpaceSwitch() -> Element {
         open.set(false);
     });
 
+    // And a switch that has landed is worth seeing land. The name flares once
+    // — the one thing on screen that is the same in every space, so it is the
+    // thing that can say "you have moved" without saying which way.
+    //
+    // Restarting a CSS animation means taking the class off, forcing a reflow
+    // and putting it back; there is no way to say it in CSS alone. The class
+    // goes on an element whose own `class` is static, so that a render in
+    // between cannot wipe it — which is why the menu's open state is carried
+    // on the wrapper below rather than on the button.
+    //
+    // And it comes off again once it has burnt out. Left on, `.lit .brandname
+    // { animation: … }` goes on matching — so the identical rule under
+    // `:hover` is no longer a *change* of animation, and the sweep never runs
+    // again. A flare that costs every hover after it is a poor trade.
+    use_effect(move || {
+        let _ = st.space.read();
+        document::eval(
+            "var e = document.querySelector('.brandbtn');\
+             if (e) {\
+               e.classList.remove('lit');\
+               void e.offsetWidth;\
+               e.classList.add('lit');\
+               clearTimeout(window.__pullspace_flare);\
+               window.__pullspace_flare = setTimeout(function () {\
+                 e.classList.remove('lit');\
+               }, 900);\
+             }",
+        );
+    });
+
     let showing = *open.read();
     let here = *st.space.read();
     let count = st.spaces.read().len();
@@ -707,9 +737,11 @@ pub fn SpaceSwitch() -> Element {
             .collect(),
     };
 
+    let wrap = if showing { "spswitch on" } else { "spswitch" };
+
     rsx! {
         div {
-            class: "spswitch",
+            class: "{wrap}",
             // Escape, wherever the focus is inside here — which after the click
             // that opened the menu is the name itself, above the menu rather
             // than in it.
@@ -723,14 +755,14 @@ pub fn SpaceSwitch() -> Element {
                 class: "brand brandbtn",
                 title: "{count} space{many} open  (⌥⇧← ⌥⇧→ to step between them, ⌥⇧T for a new one)",
                 onclick: move |_| {
-                    let showing = *open.peek();
-                    open.set(!showing);
+                    let shown = *open.peek();
+                    open.set(!shown);
                 },
                 span { class: "brandname", "pullspace" }
                 if count > 1 {
                     span { class: "spcount", "{count}" }
                 }
-                span { class: "prchev", "▾" }
+                span { class: "prchev spchev", "▾" }
             }
             if showing {
                 div {
@@ -745,16 +777,29 @@ pub fn SpaceSwitch() -> Element {
                             class: "textlink",
                             title: "Open an empty space  (⌥⇧T)",
                             onclick: move |_| open_new(&st),
-                            "+ New space"
+                            span { class: "spplus", "+" }
+                            "New space"
                         }
                     }
                     div { class: "spmenubody",
-                        for (id , card , live) in rows {
-                            SpaceRow { key: "{id}", id, card: card.clone(), live, on: id == here }
+                        for (i , (id , card , live)) in rows.into_iter().enumerate() {
+                            SpaceRow {
+                                key: "{id}",
+                                id,
+                                at: i,
+                                card: card.clone(),
+                                live,
+                                on: id == here,
+                            }
                         }
                     }
                     div { class: "spmenufoot",
-                        "Everything stays as you left it — the files you have open, where you are in them, and what the explorer has unfolded."
+                        span { class: "spfoottext", "Everything stays exactly as you left it." }
+                        span { class: "spacer" }
+                        span { class: "spkeys",
+                            span { class: "spkey", "⌥⇧←" }
+                            span { class: "spkey", "⌥⇧→" }
+                        }
                     }
                 }
             }
@@ -768,8 +813,11 @@ fn plural(n: usize) -> &'static str {
 }
 
 /// One space in the menu: what it has open, and the two things to do with it.
+///
+/// `at` is only ever drawn with: the rows arrive one after another rather than
+/// all at once, and where a row is in the list is how long it waits.
 #[component]
-fn SpaceRow(id: u32, card: Card, live: bool, on: bool) -> Element {
+fn SpaceRow(id: u32, at: usize, card: Card, live: bool, on: bool) -> Element {
     let st = use_context::<St>();
     let cls = if on { "sprow on" } else { "sprow" };
     let chip = card.kind.css();
@@ -783,7 +831,7 @@ fn SpaceRow(id: u32, card: Card, live: bool, on: bool) -> Element {
     };
 
     rsx! {
-        div { class: "{cls}", title: "{why}",
+        div { class: "{cls}", title: "{why}", style: "--at:{at}",
             div {
                 class: "sprowmain",
                 onclick: move |_| go_to(&st, id),

@@ -7,13 +7,16 @@ use dioxus::prelude::*;
 use std::collections::HashMap;
 
 use crate::backend::difftool::{
-    Block, Expansion, FileDiff, Line, LineKind, STEP, blocks, diff_file, stats, to_rows,
+    Block, Expansion, FileDiff, Line, LineKind, Mark, STEP, blocks, change_lines, diff_file,
+    overview, stats, to_rows,
 };
 use crate::backend::highlight::{Span, highlight};
 use crate::backend::images::{self, media_type};
 use crate::backend::markdown;
+use crate::backend::prefs::Prefs;
 use crate::backend::route;
-use crate::backend::search::split_word;
+use crate::backend::search::{self, Matcher, split_word};
+use crate::backend::symbols::{Symbol, enclosing};
 use crate::backend::tree::ChangeKind;
 use crate::backend::{FileContent, clip};
 
@@ -79,6 +82,15 @@ fn pic_of(from: &Path, url: &str) -> Pic {
 enum SourceLines {
     Colored(Vec<Vec<Span>>),
     Plain(Vec<String>),
+}
+
+impl SourceLines {
+    fn len(&self) -> usize {
+        match self {
+            SourceLines::Colored(l) => l.len(),
+            SourceLines::Plain(l) => l.len(),
+        }
+    }
 }
 
 /// What the viewer has to show right now. Every file arrives over the network
@@ -195,6 +207,9 @@ pub fn Viewer() -> Element {
     });
 
     let diff = use_memo(move || {
+        // Read on its own rather than out of `prefs`, so that a font-size
+        // nudge does not re-run the comparison of every open file.
+        let ignore_ws = st.prefs.read().ignore_ws;
         let guard = data.read();
         let Pane::Ready { rel, old, new } = &*guard else {
             return None;
@@ -204,7 +219,61 @@ pub fn Viewer() -> Element {
         // same name exists in the base.
         let fresh = matches!(status, ChangeKind::Added);
         let old_text = if fresh { "" } else { old.text()? };
-        Some(diff_file(old_text, new.text()?))
+        Some(diff_file(old_text, new.text()?, ignore_ws))
+    });
+
+    // The pattern in the find bar, compiled once rather than per line.
+    //
+    // A signal written by an effect rather than a memo: a compiled regex has
+    // no equality worth the name, and a memo would have to compare two of them
+    // to decide whether anything downstream should redraw.
+    let mut matcher: Signal<Option<Rc<Matcher>>> = use_signal(|| None);
+    use_effect(move || {
+        let up = *st.find_open.read();
+        let text = st.find_text.read().clone();
+        let opts = *st.find_opts.read();
+        let next = match up && !text.trim().is_empty() {
+            true => search::compile(&text, opts).ok().map(Rc::new),
+            false => None,
+        };
+        matcher.set(next);
+    });
+
+    // Which lines that pattern is on, for the count in the bar and for the
+    // keys that step between them. Against the file as it stands, whichever
+    // view is drawing it — the anchors every jump lands on are the new side's
+    // numbering, so that is the only numbering a hit can be reported in.
+    use_effect(move || {
+        let held = matcher.read();
+        let lines = match (held.as_deref(), &*data.read()) {
+            (Some(m), Pane::Ready { old, new, .. }) => match (new.as_ref(), old.as_ref()) {
+                (FileContent::Text(t), _) => m.lines(t),
+                (FileContent::Absent, FileContent::Text(t)) => m.lines(t),
+                _ => Vec::new(),
+            },
+            _ => Vec::new(),
+        };
+        let mut found = st.find_lines;
+        if *found.peek() != lines {
+            // A different set of hits: the one being stood on is not the same
+            // one it was, and pretending otherwise steps from nowhere.
+            let mut at = st.find_at;
+            if at.peek().is_some() {
+                at.set(None);
+            }
+            found.set(lines);
+        }
+    });
+
+    // Where the changes are, for F7. Derived here because this is the only
+    // place holding the comparison, and read by the keyboard, which is not a
+    // component and has no context at all.
+    use_effect(move || {
+        let lines = diff.read().as_ref().map(change_lines).unwrap_or_default();
+        let mut steps = st.change_lines;
+        if *steps.peek() != lines {
+            steps.set(lines);
+        }
     });
 
     // A memo of its own rather than `st.prefs.read().theme` inside
@@ -416,29 +485,39 @@ pub fn Viewer() -> Element {
     // itself is memoised on the file's contents and does not run again.
     let open_gaps = st.open_gaps();
 
-    // The identifier picked out of the code, if one has been. Every line that
-    // holds it gets it marked — which is why this is threaded all the way down
-    // rather than done in CSS: only the lines that match pay for it.
-    let mark = st.selected.read().clone();
-    let mark = mark.as_deref();
+    // What gets picked out of the code: the identifier double-clicked, and
+    // whatever the find bar is matching. Threaded all the way down rather than
+    // done in CSS, because only the lines that match should pay for it.
+    let word = st.selected.read().clone();
+    let held_matcher = matcher.read();
+    // Which hit Enter is standing on, as a line of the file.
+    let find_now = st
+        .find_at
+        .read()
+        .and_then(|i| st.find_lines.read().get(i).copied());
+    let marks = Marks {
+        word: word.as_deref(),
+        find: held_matcher.as_deref(),
+        at: find_now,
+    };
     // The line a link points at, if one does. Every view that has line numbers
     // lights it up, and clicking a number is what puts it there.
     let at = *st.at_line.read();
 
     let body = match mode {
         ViewMode::Source => match source_lines.read().as_ref() {
-            Some(SourceLines::Colored(lines)) => render_colored(lines, mark, at),
-            Some(SourceLines::Plain(lines)) => render_plain(lines, mark, at),
+            Some(SourceLines::Colored(lines)) => render_colored(lines, &marks, at),
+            Some(SourceLines::Plain(lines)) => render_plain(lines, &marks, at),
             None => rsx! { div { class: "notice", "Binary file — no preview." } },
         },
         ViewMode::Inline => match diff.read().as_ref() {
             Some(d) if d.is_empty() => rsx! { div { class: "notice", "No differences." } },
-            Some(d) => render_inline(d, &open_gaps, mark, at),
+            Some(d) => render_inline(d, &open_gaps, &marks, at),
             None => rsx! { div { class: "notice", "Binary file — cannot diff." } },
         },
         ViewMode::Split => match diff.read().as_ref() {
             Some(d) if d.is_empty() => rsx! { div { class: "notice", "No differences." } },
-            Some(d) => render_split(d, &open_gaps, mark, at),
+            Some(d) => render_split(d, &open_gaps, &marks, at),
             None => rsx! { div { class: "notice", "Binary file — cannot diff." } },
         },
         ViewMode::Preview if prose => match doc.read().as_ref() {
@@ -479,6 +558,36 @@ pub fn Viewer() -> Element {
         "This file has no changes to diff"
     } else {
         "Waiting for the file"
+    };
+
+    let find_up = *st.find_open.read();
+    let ignore_ws = st.prefs.read().ignore_ws;
+    // Not over a rendered page: there are no lines in one to be inside of, and
+    // nothing to draw a change against.
+    let sticky_on = settled && !matches!(mode, ViewMode::Preview);
+    let wrap = st.prefs.read().wrap;
+    let code_cls = if wrap { "codewrap wrap" } else { "codewrap" };
+    // The strip beside the scrollbar. In a diff it is where the changes are;
+    // reading a whole file it is where the find bar's hits are, which is the
+    // only thing there is to map. (Not both at once: a hit is a line of the
+    // file and a band is a row of the laid-out diff, and the two only agree
+    // where nothing is folded.)
+    let bands: Vec<Band> = match mode {
+        ViewMode::Inline | ViewMode::Split => diff
+            .read()
+            .as_ref()
+            .map(|d| {
+                overview(d, &open_gaps, mode == ViewMode::Split)
+                    .into_iter()
+                    .map(Band::change)
+                    .collect()
+            })
+            .unwrap_or_default(),
+        ViewMode::Source => {
+            let total = source_lines.read().as_ref().map_or(0, SourceLines::len);
+            hit_bands(&st.find_lines.read(), total)
+        }
+        ViewMode::Preview => Vec::new(),
     };
 
     let (can_back, can_fwd) = (st.can_go_back(), st.can_go_forward());
@@ -548,6 +657,24 @@ pub fn Viewer() -> Element {
                         "Reset"
                     }
                 }
+                // Beside the diff it changes rather than buried in a menu:
+                // this one alters what the reader is being shown, and a diff
+                // that is quietly hiding lines is worse than a noisy one.
+                if diffable {
+                    button {
+                        class: if ignore_ws { "sopt on" } else { "sopt" },
+                        title: if ignore_ws {
+                            "Not showing blocks that only changed indentation — click to show them"
+                        } else {
+                            "Ignore blocks that only changed indentation"
+                        },
+                        onclick: move |_| {
+                            let now = *st.prefs.peek();
+                            st.set_prefs(Prefs { ignore_ws: !now.ignore_ws, ..now });
+                        },
+                        "ws"
+                    }
+                }
                 // One control, not four loose buttons: these are alternatives,
                 // and a segmented group is what says so.
                 div { class: "modegroup",
@@ -568,21 +695,324 @@ pub fn Viewer() -> Element {
             if let Some(name) = selected {
                 SymBar { name }
             }
-            div {
-                class: "codewrap",
-                // Which file is in it, for the page's own record of where each
-                // one is scrolled to — see `super::tabs`. On the element
-                // rather than passed to the script, so that a scroll event is
-                // always filed under whatever is actually on screen.
-                "data-path": "{rel_str}",
-                "data-keep": "{keep}",
-                // A browser already knows where a word starts and ends, and a
-                // double-click is how it is asked. Wrapping every token of
-                // every line in its own clickable span to find out the same
-                // thing costs more than everything else the viewer does.
-                ondoubleclick: move |_| ide::select_word(st),
-                {pending.unwrap_or(body)}
+            // The scroller, and the three things that stand over it: the find
+            // bar, the header saying what the top of the pane is inside, and
+            // the strip beside the scrollbar saying where the changes are.
+            div { class: "codearea",
+                if find_up {
+                    FindBar {}
+                }
+                if sticky_on {
+                    StickyBar {}
+                }
+                if !bands.is_empty() {
+                    Ruler { bands }
+                }
+                div {
+                    class: "{code_cls}",
+                    // Which file is in it, for the page's own record of where
+                    // each one is scrolled to — see `super::tabs`. On the
+                    // element rather than passed to the script, so that a
+                    // scroll event is always filed under whatever is actually
+                    // on screen.
+                    "data-path": "{rel_str}",
+                    "data-keep": "{keep}",
+                    // A browser already knows where a word starts and ends,
+                    // and a double-click is how it is asked. Wrapping every
+                    // token of every line in its own clickable span to find
+                    // out the same thing costs more than everything else the
+                    // viewer does.
+                    ondoubleclick: move |_| ide::select_word(st),
+                    {pending.unwrap_or(body)}
+                }
             }
+        }
+    }
+}
+
+// ------------------------------------------------- the strip by the scrollbar
+
+/// One band on it: where something is in the whole laid-out view, as a
+/// fraction of it.
+#[derive(Clone, PartialEq)]
+struct Band {
+    at: f32,
+    len: f32,
+    cls: &'static str,
+}
+
+impl Band {
+    fn change(m: Mark) -> Band {
+        Band {
+            at: m.at,
+            len: m.len,
+            cls: match m.kind {
+                LineKind::Add => "add",
+                LineKind::Del => "del",
+                LineKind::Ctx => "ctx",
+            },
+        }
+    }
+}
+
+/// Where the find bar's hits are in a file being read whole.
+fn hit_bands(lines: &[usize], total: usize) -> Vec<Band> {
+    if total == 0 {
+        return Vec::new();
+    }
+    lines
+        .iter()
+        .map(|&l| Band {
+            at: (l.saturating_sub(1)) as f32 / total as f32,
+            len: 1.0 / total as f32,
+            cls: "hit",
+        })
+        .collect()
+}
+
+/// A map of the file, a few pixels wide, beside the scrollbar that scrolls it.
+///
+/// The useful half of a minimap and none of the rest: what a reader wants off
+/// the side of a long diff is *where the changes are*, not four hundred lines
+/// of unreadable grey. It is inert — the scrollbar next to it is the control.
+#[component]
+fn Ruler(bands: Vec<Band>) -> Element {
+    rsx! {
+        div { class: "ruler", "aria-hidden": "true",
+            for (i, b) in bands.iter().enumerate() {
+                div {
+                    key: "{i}",
+                    class: "rband {b.cls}",
+                    style: "top:{pct(b.at)}%;height:{pct(b.len)}%",
+                }
+            }
+        }
+    }
+}
+
+/// A fraction as a percentage, at a precision worth writing down.
+fn pct(f: f32) -> String {
+    format!("{:.3}", (f * 100.0).clamp(0.0, 100.0))
+}
+
+// ---------------------------------------------- the header over the code
+
+/// How many levels of the chain are pinned. Three is an `impl` inside a `mod`
+/// with a method in it, which is as deep as anything anybody reads gets before
+/// the header is taller than the code under it.
+const STICKY_DEPTH: usize = 3;
+
+/// What the top of the pane is inside, pinned above it.
+///
+/// Halfway down a four-hundred-line file — or, worse, landed in the middle of
+/// one by a link to a line — the question is always "what am I looking at",
+/// and the answer has scrolled off the top. The `@@` header of a hunk already
+/// pins itself; this is the same idea taken up a level, to the definitions the
+/// hunk is written inside.
+#[component]
+fn StickyBar() -> Element {
+    let st = use_context::<St>();
+    let syms = use_context::<Memo<Rc<Vec<Symbol>>>>();
+    let Some(top) = *st.top_line.read() else {
+        return rsx! {};
+    };
+    let held = syms.read();
+    let chain = enclosing(&held, top);
+    if chain.is_empty() {
+        return rsx! {};
+    }
+    rsx! {
+        div { class: "stickybar",
+            for (depth, sym) in chain.iter().take(STICKY_DEPTH).enumerate() {
+                {
+                    let line = sym.line;
+                    let indent = 10 + depth * 12;
+                    rsx! {
+                        button {
+                            key: "{depth}",
+                            class: "stickyrow",
+                            style: "padding-left:{indent}px",
+                            title: "Go to line {line}",
+                            onclick: move |_| st.jump_line(line),
+                            span { class: "stickykind", "{sym.kind}" }
+                            span { class: "stickytext", "{sym.preview}" }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ------------------------------------------------------- find, in this file
+
+/// The bar over the code: where is this, in the file I am reading.
+///
+/// The box in the top bar searches the whole repository, which is the other
+/// question and the one this app could already answer. The browser's own ⌘F
+/// cannot stand in for this one: half of a contracted diff is not in the page
+/// to be found, and what it did find it would scroll to without this app ever
+/// knowing where the reader had gone.
+#[component]
+fn FindBar() -> Element {
+    let st = use_context::<St>();
+    let mut text = st.find_text;
+    let mut opts = st.find_opts;
+    let typed = text.read().clone();
+    let count = st.find_lines.read().len();
+    let at = *st.find_at.read();
+    let label = match (typed.trim().is_empty(), count, at) {
+        (true, ..) => String::new(),
+        (_, 0, _) => "No results".to_string(),
+        (_, n, Some(i)) => format!("{} of {}", i + 1, n),
+        (_, n, None) => format!("{n} found"),
+    };
+    let bad = !typed.trim().is_empty() && count == 0;
+    let cls = if bad { "findinbox bad" } else { "findinbox" };
+    let now = *opts.read();
+    rsx! {
+        div { class: "findbar",
+            input {
+                class: "{cls}",
+                r#type: "text",
+                placeholder: "Find in this file",
+                spellcheck: "false",
+                autocomplete: "off",
+                value: "{typed}",
+                onmounted: move |e| async move {
+                    let _ = e.set_focus(true).await;
+                },
+                oninput: move |e| {
+                    text.set(e.value());
+                    // A new pattern is a new set of hits, and nothing is being
+                    // stood on until Enter says so.
+                    let mut at = st.find_at;
+                    if at.peek().is_some() {
+                        at.set(None);
+                    }
+                },
+                onkeydown: move |e| match e.key() {
+                    Key::Enter => {
+                        e.prevent_default();
+                        st.step_find(!e.modifiers().shift());
+                    }
+                    // The box has the focus, so the window's own Escape only
+                    // blurs it — see `ide::KEYS`. Closing is this.
+                    Key::Escape => {
+                        e.prevent_default();
+                        st.toggle_find(false);
+                    }
+                    _ => {}
+                },
+            }
+            span { class: "findcount", "{label}" }
+            for (glyph, why, field) in ide::TOGGLES {
+                {
+                    let mut probe = now;
+                    let cls = if *field(&mut probe) { "sopt on" } else { "sopt" };
+                    rsx! {
+                        button {
+                            key: "{glyph}",
+                            class: "{cls}",
+                            title: "{why}",
+                            onclick: move |_| {
+                                let mut next = *opts.peek();
+                                let slot = field(&mut next);
+                                *slot = !*slot;
+                                opts.set(next);
+                            },
+                            "{glyph}"
+                        }
+                    }
+                }
+            }
+            button {
+                class: "iconbtn sm",
+                title: "Previous match  (⇧⏎, ⇧F3)",
+                disabled: count == 0,
+                onclick: move |_| st.step_find(false),
+                "‹"
+            }
+            button {
+                class: "iconbtn sm",
+                title: "Next match  (⏎, F3)",
+                disabled: count == 0,
+                onclick: move |_| st.step_find(true),
+                "›"
+            }
+            button {
+                class: "iconbtn sm",
+                title: "Close  (Esc)",
+                onclick: move |_| st.toggle_find(false),
+                "✕"
+            }
+        }
+    }
+}
+
+// ------------------------------------------- what the top of the pane is on
+
+/// Report the line at the top of the code pane, so the header above it can say
+/// what that line is inside.
+///
+/// One listener, in the page, on the capture phase — scroll events do not
+/// bubble, so this is the only way to hear one from whichever element happens
+/// to be scrolling. It answers at most once a frame and only when the answer
+/// has actually changed, which on a long smooth scroll is a few dozen times
+/// rather than a few thousand.
+///
+/// `elementFromPoint` rather than a walk over the rows: the page already knows
+/// what is at a coordinate, and asking it is one call where measuring five
+/// thousand rows is five thousand.
+const TOP_JS: &str = r#"
+(function () {
+  if (window.__pullspace_top) window.__pullspace_top();
+  var last = null;
+  var frame = 0;
+  var read = function () {
+    frame = 0;
+    var wrap = document.querySelector('.codewrap');
+    if (!wrap) { if (last !== 0) { last = 0; dioxus.send(0); } return; }
+    var box = wrap.getBoundingClientRect();
+    // Past whatever is already pinned over the top of it, so the answer is a
+    // line of code and not the header describing one.
+    var bar = document.querySelector('.stickybar');
+    var skip = bar ? bar.getBoundingClientRect().height : 0;
+    var no = 0;
+    // A hunk's `@@` header pins itself too and carries no line, so a couple of
+    // steps down are tried before giving up on the question.
+    for (var i = 0; i < 4 && !no; i++) {
+      var el = document.elementFromPoint(box.left + 24, box.top + skip + 6 + i * 14);
+      var row = el && el.closest ? el.closest('[data-line]:not([data-line=""])') : null;
+      var got = row ? parseInt(row.getAttribute('data-line'), 10) : 0;
+      if (got > 0) no = got;
+    }
+    if (no === last) return;
+    last = no;
+    dioxus.send(no);
+  };
+  var onscroll = function () {
+    if (frame) return;
+    frame = requestAnimationFrame(read);
+  };
+  document.addEventListener('scroll', onscroll, true);
+  // And once now, for a file that arrives already scrolled to where it was
+  // left rather than to the top of itself.
+  setTimeout(read, 120);
+  window.__pullspace_top = function () {
+    document.removeEventListener('scroll', onscroll, true);
+  };
+})();
+"#;
+
+/// Listen for it, for as long as the app is up.
+pub async fn tops(st: St) {
+    let mut eval = document::eval(TOP_JS);
+    while let Ok(no) = eval.recv::<usize>().await {
+        let mut top = st.top_line;
+        let next = (no > 0).then_some(no);
+        if *top.peek() != next {
+            top.set(next);
         }
     }
 }
@@ -812,16 +1242,83 @@ fn Welcome() -> Element {
     }
 }
 
-/// One run of text, with every whole-word occurrence of the selected
-/// identifier picked out of it.
+/// What gets picked out of the code as it is drawn.
 ///
-/// The `contains` short-circuit is the whole design: with nothing selected, or
-/// on the overwhelming majority of lines that do not mention it, this is the
-/// single span it always was. Only the handful of lines that actually match
-/// pay for being split up.
-fn marked(text: &str, color: Option<&str>, mark: Option<&str>) -> Element {
+/// Two questions at once, and they are different questions: `word` is the
+/// identifier somebody double-clicked, marked wherever it appears; `find` is
+/// the pattern in the bar over the file, which is being stepped through. Both
+/// can be on, and where they land on the same text the find wins — it is the
+/// one with a cursor in it.
+#[derive(Clone, Copy, Default)]
+struct Marks<'a> {
+    word: Option<&'a str>,
+    find: Option<&'a Matcher>,
+    /// The line the find is standing on, so that one match out of two hundred
+    /// can be told apart from the rest.
+    at: Option<usize>,
+}
+
+impl Marks<'_> {
+    /// Where the find matches on one line, worked out over the whole of it.
+    ///
+    /// The whole line and not each coloured span of it, because a search for
+    /// `fn main` lies across two spans and matching them one at a time would
+    /// quietly find nothing. It costs joining the line back up, which is why
+    /// it only happens while the bar is up.
+    fn ranges<'a>(&self, parts: impl Iterator<Item = &'a str>) -> Vec<(usize, usize)> {
+        let Some(find) = self.find else {
+            return Vec::new();
+        };
+        let parts: Vec<&str> = parts.collect();
+        match parts.as_slice() {
+            [] => Vec::new(),
+            // A line the highlighter did not cut up — which is most lines of a
+            // diff — is matched where it stands, without being copied to be
+            // put back together.
+            [one] => find.ranges(one),
+            many => find.ranges(&many.concat()),
+        }
+    }
+}
+
+/// One line's worth of the above: the ranges settled, and whether this is the
+/// line the find is standing on.
+#[derive(Clone, Copy)]
+struct Line1<'a> {
+    word: Option<&'a str>,
+    ranges: &'a [(usize, usize)],
+    now: bool,
+}
+
+/// One run of text, with everything that has been asked for picked out of it.
+///
+/// `at` is where this run starts in its line, because the find's ranges are
+/// offsets into the whole line — see [`Marks::ranges`].
+///
+/// The short-circuits are the whole design: with nothing selected and no find
+/// up, or on the overwhelming majority of lines that match neither, this is
+/// the single span it always was. Only the handful of lines that actually
+/// match pay for being split up.
+fn marked(text: &str, at: usize, color: Option<&str>, m: Line1<'_>) -> Element {
     let style = color.map(|c| format!("color:{c}")).unwrap_or_default();
-    let Some(name) = mark.filter(|n| text.contains(*n)) else {
+    if m.ranges.is_empty() {
+        return occurrences(text, &style, m.word);
+    }
+    let hit_cls = if m.now { "fhit now" } else { "fhit" };
+    rsx! {
+        for (i, (piece, hit)) in search::cut(text, at, m.ranges).into_iter().enumerate() {
+            if hit {
+                span { key: "{i}", class: "{hit_cls}", style: "{style}", "{piece}" }
+            } else {
+                span { key: "{i}", {occurrences(piece, &style, m.word)} }
+            }
+        }
+    }
+}
+
+/// The other half: whole-word occurrences of the selected identifier.
+fn occurrences(text: &str, style: &str, word: Option<&str>) -> Element {
+    let Some(name) = word.filter(|n| text.contains(*n)) else {
         return rsx! { span { style: "{style}", "{text}" } };
     };
     let parts = split_word(text, name);
@@ -846,15 +1343,30 @@ fn row_class(no: usize, at: Option<usize>) -> &'static str {
     if at == Some(no) { "cl linked" } else { "cl" }
 }
 
-fn render_colored(lines: &[Vec<Span>], mark: Option<&str>, at: Option<usize>) -> Element {
+fn render_colored(lines: &[Vec<Span>], m: &Marks<'_>, at: Option<usize>) -> Element {
     rsx! {
         div { class: "code",
             for (i, spans) in lines.iter().enumerate() {
-                div { class: row_class(i + 1, at), id: "L{i + 1}",
-                    span { class: "ln lnk", "{i + 1}" }
-                    span { class: "lc",
-                        for sp in spans {
-                            {marked(&sp.text, Some(&sp.color), mark)}
+                {
+                    let no = i + 1;
+                    let ranges = m.ranges(spans.iter().map(|s| s.text.as_str()));
+                    let one = Line1 { word: m.word, ranges: &ranges, now: m.at == Some(no) };
+                    // Where each span starts in the line, so the find's
+                    // ranges — which are offsets into the whole of it — land
+                    // in the right place.
+                    let mut off = 0;
+                    rsx! {
+                        div { class: row_class(no, at), id: "L{no}", "data-line": "{no}",
+                            span { class: "ln lnk", "{no}" }
+                            span { class: "lc",
+                                for sp in spans {
+                                    {
+                                        let starts = off;
+                                        off += sp.text.len();
+                                        marked(&sp.text, starts, Some(&sp.color), one)
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -898,13 +1410,20 @@ fn render_preview(html: &str) -> Element {
     }
 }
 
-fn render_plain(lines: &[String], mark: Option<&str>, at: Option<usize>) -> Element {
+fn render_plain(lines: &[String], m: &Marks<'_>, at: Option<usize>) -> Element {
     rsx! {
         div { class: "code",
             for (i, text) in lines.iter().enumerate() {
-                div { class: row_class(i + 1, at), id: "L{i + 1}",
-                    span { class: "ln lnk", "{i + 1}" }
-                    span { class: "lc", {marked(text, None, mark)} }
+                {
+                    let no = i + 1;
+                    let ranges = m.ranges(std::iter::once(text.as_str()));
+                    let one = Line1 { word: m.word, ranges: &ranges, now: m.at == Some(no) };
+                    rsx! {
+                        div { class: row_class(no, at), id: "L{no}", "data-line": "{no}",
+                            span { class: "ln lnk", "{no}" }
+                            span { class: "lc", {marked(text, 0, None, one)} }
+                        }
+                    }
                 }
             }
         }
@@ -928,19 +1447,30 @@ fn num(no: Option<usize>) -> String {
 /// changed, and `occ` is what the reader picked out. They are different
 /// questions about the same line and both are worth being able to see, so they
 /// nest rather than compete.
-fn segs_rsx(l: &Line, mark: Option<&str>) -> Element {
+fn segs_rsx(l: &Line, m: &Marks<'_>) -> Element {
+    let ranges = m.ranges(l.segs.iter().map(|s| s.text.as_str()));
+    let one = Line1 {
+        word: m.word,
+        ranges: &ranges,
+        now: l.new_no.is_some() && l.new_no == m.at,
+    };
+    let mut off = 0;
     rsx! {
-        for seg in l.segs.iter() {
-            if seg.emph {
-                span { class: "emph", {marked(&seg.text, None, mark)} }
-            } else {
-                {marked(&seg.text, None, mark)}
+        for (i, seg) in l.segs.iter().enumerate() {
+            {
+                let starts = off;
+                off += seg.text.len();
+                if seg.emph {
+                    rsx! { span { key: "{i}", class: "emph", {marked(&seg.text, starts, None, one)} } }
+                } else {
+                    marked(&seg.text, starts, None, one)
+                }
             }
         }
     }
 }
 
-fn inline_line(l: &Line, mark: Option<&str>, at: Option<usize>) -> Element {
+fn inline_line(l: &Line, m: &Marks<'_>, at: Option<usize>) -> Element {
     let (cls, sign) = match l.kind {
         LineKind::Ctx => ("cl", " "),
         LineKind::Add => ("cl dl-add", "+"),
@@ -955,13 +1485,17 @@ fn inline_line(l: &Line, mark: Option<&str>, at: Option<usize>) -> Element {
     // Only the head commit's numbering is linkable: a line that has been
     // removed is not somewhere anyone can be sent to.
     let new_cls = if l.new_no.is_some() { "ln lnk" } else { "ln" };
+    // The head commit's numbering is what the pinned header and the scroll
+    // report are worked out from; a removed line is not a line of the file the
+    // reader is standing in.
+    let line_attr = l.new_no.map(|n| n.to_string()).unwrap_or_default();
     rsx! {
-        div { class: "{cls}",
+        div { class: "{cls}", "data-line": "{line_attr}",
             {anchor(l.new_no)}
             span { class: "ln", "{old}" }
             span { class: "{new_cls}", "{new}" }
             span { class: "dsign", "{sign}" }
-            span { class: "lc", {segs_rsx(l, mark)} }
+            span { class: "lc", {segs_rsx(l, m)} }
         }
     }
 }
@@ -1052,19 +1586,19 @@ fn plural(n: usize) -> &'static str {
 fn render_inline(
     diff: &FileDiff,
     open: &HashMap<usize, Expansion>,
-    mark: Option<&str>,
+    m: &Marks<'_>,
     at: Option<usize>,
 ) -> Element {
     rsx! {
         div { class: "code inline",
             for block in blocks(diff, open) {
-                {inline_block(diff, block, mark, at)}
+                {inline_block(diff, block, m, at)}
             }
         }
     }
 }
 
-fn inline_block(diff: &FileDiff, block: Block, mark: Option<&str>, at: Option<usize>) -> Element {
+fn inline_block(diff: &FileDiff, block: Block, m: &Marks<'_>, at: Option<usize>) -> Element {
     match block {
         Block::Gap {
             index,
@@ -1079,14 +1613,14 @@ fn inline_block(diff: &FileDiff, block: Block, mark: Option<&str>, at: Option<us
                     {hunk_header(&h)}
                 }
                 for l in diff.lines[from..to].iter() {
-                    {inline_line(l, mark, at)}
+                    {inline_line(l, m, at)}
                 }
             }
         },
     }
 }
 
-fn split_cell(l: Option<&Line>, right: bool, mark: Option<&str>, at: Option<usize>) -> Element {
+fn split_cell(l: Option<&Line>, right: bool, m: &Marks<'_>, at: Option<usize>) -> Element {
     match l {
         None => rsx! { div { class: "scell s-empty" } },
         Some(l) => {
@@ -1109,7 +1643,7 @@ fn split_cell(l: Option<&Line>, right: bool, mark: Option<&str>, at: Option<usiz
                 div { class: "{cls}",
                     {anchor(anchor_no)}
                     span { class: "{ln_cls}", "{no}" }
-                    span { class: "lc", {segs_rsx(l, mark)} }
+                    span { class: "lc", {segs_rsx(l, m)} }
                 }
             }
         }
@@ -1119,19 +1653,19 @@ fn split_cell(l: Option<&Line>, right: bool, mark: Option<&str>, at: Option<usiz
 fn render_split(
     diff: &FileDiff,
     open: &HashMap<usize, Expansion>,
-    mark: Option<&str>,
+    m: &Marks<'_>,
     at: Option<usize>,
 ) -> Element {
     rsx! {
         div { class: "code split",
             for block in blocks(diff, open) {
-                {split_block(diff, block, mark, at)}
+                {split_block(diff, block, m, at)}
             }
         }
     }
 }
 
-fn split_block(diff: &FileDiff, block: Block, mark: Option<&str>, at: Option<usize>) -> Element {
+fn split_block(diff: &FileDiff, block: Block, m: &Marks<'_>, at: Option<usize>) -> Element {
     match block {
         Block::Gap {
             index,
@@ -1146,9 +1680,15 @@ fn split_block(diff: &FileDiff, block: Block, mark: Option<&str>, at: Option<usi
                     {hunk_header(&h)}
                 }
                 for row in to_rows(&diff.lines[from..to]) {
-                    div { class: "srow",
-                        {split_cell(row.left, false, mark, at)}
-                        {split_cell(row.right, true, mark, at)}
+                    // The row and not the cells: the left one is the base
+                    // side and has no line of the file being read, so a probe
+                    // landing in it would find an empty answer and stop
+                    // looking. See `TOP_JS`.
+                    div {
+                        class: "srow",
+                        "data-line": "{row.right.and_then(|l| l.new_no).map(|n| n.to_string()).unwrap_or_default()}",
+                        {split_cell(row.left, false, m, at)}
+                        {split_cell(row.right, true, m, at)}
                     }
                 }
             }

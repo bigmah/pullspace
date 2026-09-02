@@ -12,6 +12,7 @@ mod markdown;
 mod nav;
 mod opening;
 mod page;
+mod palette;
 mod panes;
 mod prcache;
 mod prefs;

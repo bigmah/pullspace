@@ -32,6 +32,15 @@ pub struct Symbol {
     pub line: usize,
     /// The defining line, trimmed — enough to tell two `new`s apart in a list.
     pub preview: String,
+    /// How far the defining line was indented, in characters.
+    ///
+    /// Which is the only thing here that knows anything about *nesting*. These
+    /// patterns are one regex per line and have no idea what contains what, but
+    /// every language anybody writes is indented by the people writing it, and
+    /// a definition further in than the one above it is inside it. That is
+    /// enough for the chain the sticky header and the outline both draw, and it
+    /// costs one number per symbol.
+    pub indent: u16,
 }
 
 struct LangSpec {
@@ -70,6 +79,14 @@ fn langs() -> &'static Vec<LangSpec> {
                     ("mod", re(r"^\s*(?:pub(?:\([^)]*\))?\s+)?mod\s+([A-Za-z_][A-Za-z0-9_]*)")),
                     ("const", re(r"^\s*(?:pub(?:\([^)]*\))?\s+)?(?:const|static)\s+([A-Za-z_][A-Za-z0-9_]*)\s*:")),
                     ("macro", re(r"^\s*macro_rules!\s+([A-Za-z_][A-Za-z0-9_]*)")),
+                    // An `impl` is not a definition of anything — which is why
+                    // `find_definitions` steps over it — but it is what a
+                    // method is *inside*, and the chain over the code is
+                    // useless in Rust without it. The `for` form comes first
+                    // so that `impl Show for Thing` is filed under the thing
+                    // and not under the trait.
+                    ("impl", re(r"^\s*impl\b.*\bfor\s+([A-Za-z_][A-Za-z0-9_]*)")),
+                    ("impl", re(r"^\s*impl(?:\s*<[^<>]*>)?\s+([A-Za-z_][A-Za-z0-9_]*)")),
                 ],
             ),
             LangSpec::new(
@@ -178,6 +195,7 @@ pub fn scan_file(path: &Path, text: &str, out: &mut Vec<Symbol>) {
                 path: Rc::clone(&path),
                 line: i + 1,
                 preview: line.trim().to_string(),
+                indent: (line.len() - line.trim_start().len()).min(u16::MAX as usize) as u16,
             });
         }
     }
@@ -185,15 +203,55 @@ pub fn scan_file(path: &Path, text: &str, out: &mut Vec<Symbol>) {
 
 /// Every definition of `name`, nearest first.
 ///
+/// `impl` blocks are not among them. They carry the name of the type they are
+/// written against, so they would answer Go to Definition with "here is
+/// somewhere this is used", which is the other button.
+///
 /// "Nearest" is the file being read, if the caller says which: a `render` in
 /// the file you are looking at is nearly always the `render` you meant, and
 /// putting it first is what makes Go to Definition land in one jump instead of
 /// opening a list of eleven.
 pub fn find_definitions(index: &[Symbol], name: &str, near: Option<&Path>) -> Vec<Symbol> {
-    let mut found: Vec<Symbol> = index.iter().filter(|s| s.name == name).cloned().collect();
+    let mut found: Vec<Symbol> = index
+        .iter()
+        .filter(|s| s.name == name && s.kind != "impl")
+        .cloned()
+        .collect();
     let here = |s: &Symbol| near.is_some_and(|p| p == s.path.as_ref());
     found.sort_by(|a, b| (!here(a), &a.path, a.line).cmp(&(!here(b), &b.path, b.line)));
     found
+}
+
+/// The chain of definitions `line` is sitting inside, outermost first.
+///
+/// `syms` must be one file's symbols in line order — what [`scan_file`] hands
+/// back. The chain is read off the indentation: start at the last definition
+/// at or above the line, and keep whatever comes before it that is indented
+/// less, which is the thing that must contain it.
+///
+/// It is a guess and it is right nearly always, because indentation is how
+/// code says what is inside what. Where it is wrong is the tail of a block —
+/// past the end of a function and before the next definition, this still names
+/// the function that ended, since nothing here tracks a closing brace. That
+/// costs a stale line at the top of the pane and never a wrong jump: the line
+/// numbers it carries are the real ones.
+pub fn enclosing(syms: &[Symbol], line: usize) -> Vec<&Symbol> {
+    let Some(at) = syms.iter().rposition(|s| s.line <= line) else {
+        return Vec::new();
+    };
+    let mut chain = vec![&syms[at]];
+    let mut depth = syms[at].indent;
+    for s in syms[..at].iter().rev() {
+        if depth == 0 {
+            break;
+        }
+        if s.indent < depth {
+            depth = s.indent;
+            chain.push(s);
+        }
+    }
+    chain.reverse();
+    chain
 }
 
 /// Sort an index into the order the panels want to show it in.
@@ -303,6 +361,7 @@ mod tests {
                 path: Path::new("a/z.rs").into(),
                 line: 9,
                 preview: String::new(),
+                indent: 0,
             },
             Symbol {
                 name: "new".into(),
@@ -310,6 +369,7 @@ mod tests {
                 path: Path::new("b/y.rs").into(),
                 line: 3,
                 preview: String::new(),
+                indent: 0,
             },
             Symbol {
                 name: "other".into(),
@@ -317,6 +377,7 @@ mod tests {
                 path: Path::new("b/y.rs").into(),
                 line: 1,
                 preview: String::new(),
+                indent: 0,
             },
         ];
         let found = find_definitions(&index, "new", Some(Path::new("b/y.rs")));
@@ -327,5 +388,81 @@ mod tests {
         let found = find_definitions(&index, "new", None);
         assert_eq!(&*found[0].path, Path::new("a/z.rs"));
         assert!(find_definitions(&index, "missing", None).is_empty());
+    }
+
+    fn scanned(text: &str) -> Vec<Symbol> {
+        let mut out = Vec::new();
+        scan_file(Path::new("f.rs"), text, &mut out);
+        out
+    }
+
+    #[test]
+    fn indentation_is_recorded_with_the_definition() {
+        let out = scanned("fn top() {}\n    fn inner() {}\n");
+        assert_eq!(out[0].indent, 0);
+        assert_eq!(out[1].indent, 4);
+    }
+
+    #[test]
+    fn the_chain_is_what_contains_the_line_outermost_first() {
+        let text = "\
+impl Thing {
+    fn one(&self) {
+        let x = 1;
+    }
+    fn two(&self) {}
+}
+";
+        let syms = scanned(text);
+        let names: Vec<&str> = enclosing(&syms, 3)
+            .iter()
+            .map(|s| s.name.as_str())
+            .collect();
+        assert_eq!(names, vec!["Thing", "one"]);
+    }
+
+    #[test]
+    fn a_line_before_anything_is_defined_is_inside_nothing() {
+        let syms = scanned("use std::fmt;\n\nfn later() {}\n");
+        assert!(enclosing(&syms, 1).is_empty());
+    }
+
+    #[test]
+    fn a_sibling_replaces_its_sibling_rather_than_nesting_under_it() {
+        let text = "\
+fn one() {
+    let a = 1;
+}
+fn two() {
+    let b = 2;
+}
+";
+        let syms = scanned(text);
+        let names: Vec<&str> = enclosing(&syms, 5)
+            .iter()
+            .map(|s| s.name.as_str())
+            .collect();
+        assert_eq!(names, vec!["two"]);
+    }
+
+    #[test]
+    fn an_impl_is_a_container_and_not_a_definition() {
+        let out = scanned("impl Show for Thing {\n    fn go() {}\n}\n");
+        assert_eq!(out[0].kind, "impl");
+        assert_eq!(out[0].name, "Thing", "the type, not the trait");
+        // Go to Definition on `Thing` must not land here.
+        assert!(find_definitions(&out, "Thing", None).is_empty());
+    }
+
+    #[test]
+    fn an_inherent_impl_is_named_after_its_type() {
+        let out = scanned("impl<T: Copy> Holder {\n    fn go() {}\n}\n");
+        assert_eq!((out[0].kind, out[0].name.as_str()), ("impl", "Holder"));
+    }
+
+    #[test]
+    fn a_top_level_definition_is_the_whole_chain() {
+        let syms = scanned("fn only() {\n    let x = 1;\n}\n");
+        assert_eq!(enclosing(&syms, 2).len(), 1);
     }
 }

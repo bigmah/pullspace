@@ -28,9 +28,12 @@ use crate::backend::scan::{self, Flow, Walked};
 use crate::backend::search::{self, Hit, MAX_HITS, Matcher, Options};
 use crate::backend::symbols::{self, Symbol};
 
+use crate::backend::prefs::Prefs;
+
 use super::app::St;
 use super::compat;
 use super::full;
+use super::palette::{self, Pick};
 use super::spaces;
 
 /// How long to wait for the clone before indexing anyway. It is a backstop for
@@ -180,6 +183,12 @@ fn show(st: &St, what: Panel) {
 
 /// Close the panel. What `✕` and Escape both call — and, like everything else
 /// here, it takes the panel away from any walk still filling it.
+/// Say that there is nothing picked out to look up — which is a better answer
+/// than a key, or a command, that silently does nothing.
+pub fn show_not_indexed(st: &St) {
+    show(st, Panel::NotIndexed(String::new()));
+}
+
 pub fn close(st: St) {
     show(&st, Panel::Hidden);
 }
@@ -514,6 +523,16 @@ pub fn focus_search() {
     document::eval("var e=document.querySelector('.searchbox'); if(e){e.focus();e.select();}");
 }
 
+/// Put the cursor in the find bar, with whatever is in it selected.
+///
+/// Only ever finds anything when the bar is already up: on the way up it is
+/// the box's own `onmounted` that takes the focus, since there is nothing here
+/// to focus yet. So this is what makes a second ⌘F mean "find something else"
+/// rather than nothing at all.
+pub fn focus_find() {
+    document::eval("var e=document.querySelector('.findinbox'); if(e){e.focus();e.select();}");
+}
+
 /// Put the cursor in the explorer's filter box.
 pub fn focus_filter() {
     document::eval("var e=document.querySelector('.findbox'); if(e){e.focus();e.select();}");
@@ -539,10 +558,22 @@ const KEYS: &str = r#"
     // browser but Safari on a Mac calls this, ⌃⌘F is what a Mac calls it, and
     // the second arrives here as ⌘F with one more modifier held down.
     if (key === 'f11' || (e.ctrlKey && e.metaKey && key === 'f')) what = 'full';
+    // Shift before its bare form every time: with Shift held the key is still
+    // the same letter, so the wider match would swallow the narrower one.
+    else if (mod && e.shiftKey && key === 'f') what = 'search';
     else if (mod && key === 'f') what = 'find';
-    else if (mod && key === 'p') what = 'filter';
+    else if (mod && e.shiftKey && key === 'p') what = 'commands';
+    else if (mod && key === 'p') what = 'gotofile';
+    else if (mod && e.shiftKey && (key === 'o' || e.code === 'KeyO')) what = 'gotosym';
+    else if (mod && e.shiftKey && (key === 'e' || e.code === 'KeyE')) what = 'filter';
+    // Control and not Command, on every platform — which on Windows is the
+    // same key as `mod` and is what the editor this is shaped like uses there
+    // too.
+    else if (e.ctrlKey && !e.metaKey && (key === 'g' || e.code === 'KeyG')) what = 'gotoline';
     else if (mod && key === ',') what = 'prefs';
     else if (key === 'f12') what = e.shiftKey ? 'refs' : 'def';
+    else if (key === 'f7') what = e.shiftKey ? 'prevchange' : 'nextchange';
+    else if (key === 'f3') what = e.shiftKey ? 'prevfind' : 'nextfind';
     else if (key === 'escape') what = 'escape';
     // The spaces go first, since every one of them is one of the keys below
     // with Shift held: Option and an arrow moves inside a space, Option, Shift
@@ -558,15 +589,22 @@ const KEYS: &str = r#"
     // Not the browser's own close, which no page is allowed to take. By code
     // as well as by key: Option+W on a Mac arrives as '\u2211'.
     else if (e.altKey && (key === 'w' || e.code === 'KeyW')) what = 'closetab';
+    // And its opposite. ⌘⇧T is what an editor calls this and what a browser
+    // will not hand over, so it moves one modifier out of the way like the
+    // rest of them — beside ⌥W, which is the key it undoes.
+    else if (e.altKey && (key === 't' || e.code === 'KeyT')) what = 'reopen';
+    else if (e.altKey && (key === 'z' || e.code === 'KeyZ')) what = 'wrap';
     if (!what) return;
     // Escape out of a text box is about the text box. Everything else it
     // could mean is one more press away.
     if (what === 'escape' && typing) { el.blur(); e.preventDefault(); return; }
     // And an arrow in one is about the caret, not about the review — nor is
-    // a letter in one about the file behind it. The spaces are not on this
-    // list: stepping to another review is worth doing from inside the search
-    // box, and Option+Shift is not a chord anybody types text with.
-    if (typing && (what === 'nextfile' || what === 'prevfile' || what === 'closetab')) return;
+    // a letter in one about the file behind it, and three of these are
+    // letters: on a Mac ⌥W, ⌥T and ⌥Z type '∑', '†' and 'Ω'. The spaces are
+    // not on this list: stepping to another review is worth doing from inside
+    // the search box, and Option+Shift is not a chord anybody types text with.
+    if (typing && (what === 'nextfile' || what === 'prevfile' || what === 'closetab'
+                   || what === 'reopen' || what === 'wrap')) return;
     e.preventDefault();
     dioxus.send(what);
   };
@@ -584,8 +622,32 @@ pub async fn keys(st: St) {
         let selected = st.selected.peek().clone();
         match (what.as_str(), selected) {
             ("full", _) => full::toggle(),
-            ("find", _) => focus_search(),
+            // The two finds. In this file, and in every file — which is the
+            // arrangement every editor has and the one this app did not: ⌘F
+            // used to be the box in the top bar, and there was no way at all
+            // to ask a question about the file on screen.
+            ("find", _) => {
+                st.toggle_find(true);
+                focus_find();
+            }
+            ("search", _) => focus_search(),
             ("filter", _) => focus_filter(),
+            ("gotofile", _) => palette::open_with(&st, Pick::File),
+            ("commands", _) => palette::open_with(&st, Pick::Command),
+            ("gotosym", _) => palette::open_with(&st, Pick::Symbol),
+            ("gotoline", _) => palette::open_with(&st, Pick::Line),
+            ("nextchange", _) => st.step_change(true),
+            ("prevchange", _) => st.step_change(false),
+            ("nextfind", _) => st.step_find(true),
+            ("prevfind", _) => st.step_find(false),
+            ("reopen", _) => st.reopen_tab(),
+            ("wrap", _) => {
+                let now = *st.prefs.peek();
+                st.set_prefs(Prefs {
+                    wrap: !now.wrap,
+                    ..now
+                });
+            }
             ("prefs", _) => {
                 let mut open = st.prefs_open;
                 let showing = *open.peek();
@@ -595,7 +657,7 @@ pub async fn keys(st: St) {
             ("refs", Some(name)) => find_refs(st, &name),
             // Nothing picked out to look up. Saying so beats a key that
             // silently does nothing.
-            ("def" | "refs", None) => show(&st, Panel::NotIndexed(String::new())),
+            ("def" | "refs", None) => show_not_indexed(&st),
             ("escape", _) => escape(st),
             ("back", _) => st.go_back(),
             ("forward", _) => st.go_forward(),
@@ -611,7 +673,15 @@ pub async fn keys(st: St) {
             ("nextspace", _) => spaces::step(&st, true),
             ("prevspace", _) => spaces::step(&st, false),
             ("newspace", _) => spaces::open_new(&st),
-            ("closespace", _) => spaces::close(&st, *st.space.peek()),
+            ("closespace", _) => {
+                // Bound first, and not passed straight in as
+                // `close(&st, *st.space.peek())`: the guard that `peek`
+                // returns is a temporary of the whole statement, so written
+                // that way it is still holding the signal while `close` runs
+                // — and `close` moves to another space, which writes it.
+                let here = *st.space.peek();
+                spaces::close(&st, here);
+            }
             _ => {}
         }
     }
@@ -625,6 +695,15 @@ pub async fn keys(st: St) {
 /// key — so taking the panel down would cost the reader nothing but a second
 /// press, while claiming the key here would be claiming one that never arrives.
 fn escape(st: St) {
+    // Outermost first, which is the order they were opened in read backwards.
+    // Only ever reached with the focus outside a text box — Escape inside one
+    // is about that box and never arrives here, see `KEYS`.
+    if *st.picker.peek() {
+        return palette::shut(&st);
+    }
+    if *st.find_open.peek() {
+        return st.toggle_find(false);
+    }
     if st.panel.peek().showing() {
         return close(st);
     }

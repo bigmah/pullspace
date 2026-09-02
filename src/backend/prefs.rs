@@ -143,6 +143,17 @@ pub struct Prefs {
     /// default, which is what every file in this app has been drawn with until
     /// somebody says otherwise.
     pub tab: u8,
+    /// Whether a line too long for the pane folds onto the next one rather
+    /// than running off the side of it.
+    ///
+    /// Off, because code is written in lines and a diff read side by side has
+    /// two columns to keep level with each other. On, because a 380px tree and
+    /// a 380px conversation leave the code less width than anybody wrote it
+    /// in. Which of those is true depends on the file, so it is a switch.
+    pub wrap: bool,
+    /// Whether a line that only moved sideways still counts as a change. See
+    /// [`crate::backend::difftool::diff_with`].
+    pub ignore_ws: bool,
 }
 
 impl Default for Prefs {
@@ -154,6 +165,8 @@ impl Default for Prefs {
             code_px: 12,
             spacing: Spacing::default(),
             tab: 8,
+            wrap: false,
+            ignore_ws: false,
         }
     }
 }
@@ -650,6 +663,8 @@ mod tests {
             code_px: 14,
             spacing: Spacing::Loose,
             tab: 4,
+            wrap: true,
+            ignore_ws: true,
         };
         let raw = serde_json::to_string(&mine).unwrap();
         let back: Prefs = serde_json::from_str(&raw).unwrap();

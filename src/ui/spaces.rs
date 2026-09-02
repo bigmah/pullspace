@@ -148,6 +148,13 @@ held! {
 
     // --- the IDE ---
     selected: Option<String> = None,
+    find_open: bool = false,
+    find_text: String = String::new(),
+    find_opts: Options = Options::default(),
+    find_at: Option<usize> = None,
+    find_lines: Vec<usize> = Vec::new(),
+    change_lines: Vec<usize> = Vec::new(),
+    closed: Vec<Spot> = Vec::new(),
     panel: Panel = Panel::Hidden,
     index: Index = Index::Off,
     search_text: String = String::new(),

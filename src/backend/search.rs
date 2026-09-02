@@ -220,6 +220,87 @@ fn is_word_byte(b: Option<u8>) -> bool {
     b.is_some_and(|b| b.is_ascii_alphanumeric() || b == b'_' || b >= 0x80)
 }
 
+/// How many matches on one line are worth marking. A minified file is one line
+/// with four thousand hits on it, and marking every one of them is a redraw
+/// nobody asked for.
+const MAX_LINE_MARKS: usize = 200;
+
+impl Matcher {
+    /// Where this pattern matches within one line, as byte ranges.
+    ///
+    /// The whole line, not a preview of it — this is what the viewer paints
+    /// with, and it is painting the line the reader is looking at.
+    pub fn ranges(&self, line: &str) -> Vec<(usize, usize)> {
+        // Nearly every line of nearly every file matches nothing, and
+        // `is_match` stops at the first hit where `find_iter` sets up an
+        // iterator either way.
+        if !self.re.is_match(line) {
+            return Vec::new();
+        }
+        self.re
+            .find_iter(line)
+            .take(MAX_LINE_MARKS)
+            .filter(|m| m.start() < m.end())
+            .map(|m| (m.start(), m.end()))
+            .collect()
+    }
+
+    /// Every line of `text` this pattern matches, 1-based — what Enter and
+    /// Shift-Enter step through, and what the count in the bar counts.
+    pub fn lines(&self, text: &str) -> Vec<usize> {
+        text.lines()
+            .enumerate()
+            .filter(|(_, l)| self.re.is_match(l))
+            .map(|(i, _)| i + 1)
+            .take(MAX_HITS)
+            .collect()
+    }
+}
+
+/// Cut one piece of a line at every edge of `ranges`, as (run, matched) pairs.
+///
+/// The ranges are offsets into the *whole* line and the piece is one span of
+/// it starting at `at`, because that is the shape the problem actually has: a
+/// syntax highlighter has already cut the line into coloured spans, and a
+/// search for `fn main` matches across two of them. Painting each span on its
+/// own would silently lose every match that straddles a colour.
+///
+/// The pieces returned cover `piece` exactly and in order, so a caller can
+/// draw them and be sure it has drawn the line.
+pub fn cut<'a>(piece: &'a str, at: usize, ranges: &[(usize, usize)]) -> Vec<(&'a str, bool)> {
+    let end = at + piece.len();
+    let mut out: Vec<(&'a str, bool)> = Vec::new();
+    let mut cursor = 0;
+    for &(s, e) in ranges {
+        // Clip the range to this piece. Ranges are in order and do not
+        // overlap, so one that ends before the piece starts is behind us and
+        // one that starts after it ends means there is nothing left to find.
+        if e <= at {
+            continue;
+        }
+        if s >= end {
+            break;
+        }
+        let (s, e) = (s.max(at) - at, e.min(end) - at);
+        // A range whose edge falls inside a multi-byte character would panic
+        // on the slice. It cannot happen from a regex over this same line, but
+        // the offsets arrive here from a caller and the cost of being sure is
+        // two comparisons.
+        if !piece.is_char_boundary(s) || !piece.is_char_boundary(e) || s >= e {
+            continue;
+        }
+        if s > cursor {
+            out.push((&piece[cursor..s], false));
+        }
+        out.push((&piece[s..e], true));
+        cursor = e;
+    }
+    if cursor < piece.len() {
+        out.push((&piece[cursor..], false));
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -232,6 +313,70 @@ mod tests {
     }
 
     const SAMPLE: &str = "let total = 1;\n    let Total = 2;\nfn subtotal() {}\n";
+
+    #[test]
+    fn ranges_are_every_match_on_the_line() {
+        let m = compile("to", Options::default()).expect("compiles");
+        assert_eq!(m.ranges("total to"), vec![(0, 2), (6, 8)]);
+        assert!(m.ranges("nothing here").is_empty());
+    }
+
+    #[test]
+    fn lines_are_one_per_matching_line_however_often_it_matches() {
+        let m = compile("total", Options::default()).expect("compiles");
+        assert_eq!(m.lines(SAMPLE), vec![1, 2, 3]);
+        assert_eq!(m.lines("total total total\nnothing\n"), vec![1]);
+    }
+
+    #[test]
+    fn cutting_a_whole_line_marks_the_matches_and_keeps_the_rest() {
+        let line = "let total = 1;";
+        let cuts = cut(line, 0, &[(4, 9)]);
+        assert_eq!(
+            cuts,
+            vec![("let ", false), ("total", true), (" = 1;", false)]
+        );
+    }
+
+    #[test]
+    fn a_match_across_two_spans_is_marked_in_both() {
+        // "fn main" as the highlighter would hand it over: a keyword span and
+        // a name span, with the match lying across the join.
+        let (kw, name) = ("fn ", "main");
+        let ranges = [(0usize, 7usize)];
+        assert_eq!(cut(kw, 0, &ranges), vec![("fn ", true)]);
+        assert_eq!(cut(name, 3, &ranges), vec![("main", true)]);
+    }
+
+    #[test]
+    fn a_span_the_match_does_not_reach_comes_back_whole_and_unmarked() {
+        assert_eq!(cut("tail", 20, &[(0, 4)]), vec![("tail", false)]);
+    }
+
+    #[test]
+    fn cutting_covers_the_piece_exactly() {
+        let piece = "abcdefghij";
+        for ranges in [
+            vec![],
+            vec![(0usize, 1usize)],
+            vec![(9, 10)],
+            vec![(2, 4), (6, 8)],
+            vec![(0, 10)],
+        ] {
+            let joined: String = cut(piece, 0, &ranges).iter().map(|(t, _)| *t).collect();
+            assert_eq!(joined, piece, "with {ranges:?}");
+        }
+    }
+
+    #[test]
+    fn a_range_landing_mid_character_is_dropped_rather_than_panicking() {
+        let piece = "café";
+        // 3..4 is inside the 'é', which is two bytes from index 3.
+        let cuts = cut(piece, 0, &[(3, 4)]);
+        let joined: String = cuts.iter().map(|(t, _)| *t).collect();
+        assert_eq!(joined, piece);
+        assert!(!cuts.iter().any(|(_, hit)| *hit));
+    }
 
     #[test]
     fn plain_search_ignores_case_and_finds_substrings() {

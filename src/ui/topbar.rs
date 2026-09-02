@@ -536,7 +536,7 @@ fn SearchBox() -> Element {
     } else {
         "searchbox"
     };
-    let why = error.unwrap_or_else(|| "Search every file of this repository  (⌘F)".to_string());
+    let why = error.unwrap_or_else(|| "Search every file of this repository  (⌘⇧F)".to_string());
     let index_label = st.index.read().label();
 
     rsx! {

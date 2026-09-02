@@ -624,7 +624,11 @@ button { font-family: inherit; user-select: none; }
   flex: none;
 }
 
-.side-hdr .iconbtn { margin-left: auto; }
+/* Three of them now — Δ, collapse and reveal. `margin-left: auto` on each
+   would space them out across the bar rather than gathering them at its end,
+   so only the first takes the gap. */
+.side-hdr .iconbtn { margin-left: 0; }
+.side-hdr .iconbtn.filter { margin-left: auto; }
 
 /* ---------- explorer filter ---------- */
 
@@ -3565,3 +3569,331 @@ button { font-family: inherit; user-select: none; }
 /* Back and Forward spend most of their lives with nowhere to go, so they need
    a state that says so — the same 30% every other dead control in here wears. */
 .iconbtn:disabled { opacity: 0.3; cursor: default; }
+
+/* ---------- the picker ---------- */
+
+/* One overlay for five questions — files, commands, definitions here,
+   definitions anywhere, a line number — told apart by the character in front
+   of what has been typed. See `ui::palette`. Above the panels, because it is
+   the way to the things they are for. */
+.pickmask {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.45);
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding-top: 10vh;
+  z-index: 60;
+  animation: fadein 90ms var(--ease);
+}
+
+.pickbox {
+  width: 620px;
+  max-width: 92vw;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-1);
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.5);
+  overflow: hidden;
+  animation: risein 110ms var(--ease);
+}
+
+.pickinput {
+  flex: none;
+  height: 38px;
+  padding: 0 12px;
+  background: var(--bg-2);
+  border: none;
+  border-bottom: 1px solid var(--border);
+  color: var(--fg);
+  font-family: inherit;
+  font-size: 13px;
+}
+
+.pickinput::placeholder { color: var(--fg-faint); }
+
+.picklist {
+  overflow-y: auto;
+  max-height: 46vh;
+  overscroll-behavior: contain;
+  padding: 4px;
+}
+
+.pickrow {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  width: 100%;
+  padding: 5px 8px;
+  border: none;
+  border-radius: var(--r-sm);
+  background: none;
+  color: var(--fg);
+  text-align: left;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+/* The pointer and the arrow keys drive the same highlight, so there is only
+   ever one row that Enter would take — a hover ring beside a keyboard ring is
+   two answers to one question. */
+.pickrow.on { background: var(--bg-3); }
+
+.picklabel { flex: none; white-space: nowrap; }
+
+/* Why this row is in the list. Weight rather than colour: the label is already
+   the brightest thing in the row, and a second colour on top of it reads as a
+   third kind of thing. */
+.pickhit { color: var(--accent); font-weight: 600; }
+
+.picktag {
+  flex: none;
+  min-width: 46px;
+  color: var(--fg-faint);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+/* Which one it is, when the name alone does not say — the directories in front
+   of a file, the path and line of a definition, the key that runs a command.
+   Right-aligned and dimmed: it is read only when the name was not enough. */
+.pickdetail {
+  margin-left: auto;
+  padding-left: 12px;
+  color: var(--fg-faint);
+  font-size: 11px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  direction: rtl;
+  text-align: right;
+}
+
+.pickempty { padding: 10px; color: var(--fg-faint); }
+
+/* ---------- the code area ---------- */
+
+/* The scroller, and the three things that stand over it. Positioned, so they
+   can. */
+.codearea {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  /* The lane the ruler stands in. Padding rather than overlaying, so the
+     scroller's own scrollbar sits beside the strip instead of under it —
+     which on a platform whose scrollbars are always visible is the
+     difference between a map and a smear. */
+  padding-right: 10px;
+}
+
+/* Long lines folded rather than run off the side. Off by default — code is
+   written in lines, and a split diff has two columns to keep level — and worth
+   having on a pane sharing its width with a tree and a conversation. */
+.codewrap.wrap .cl,
+.codewrap.wrap .lc,
+.codewrap.wrap .scell { white-space: pre-wrap; overflow-wrap: anywhere; }
+.codewrap.wrap .code { min-width: 0; }
+
+/* ---------- find, in this file ---------- */
+
+.findbar {
+  position: absolute;
+  top: 6px;
+  right: 18px;
+  z-index: 6;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 6px;
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  border-radius: var(--r);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.35);
+  animation: risein 110ms var(--ease);
+}
+
+.findinbox {
+  width: 190px;
+  height: 24px;
+  padding: 0 8px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  color: var(--fg);
+  font-family: inherit;
+  font-size: 12px;
+}
+
+.findinbox::placeholder { color: var(--fg-faint); }
+.findinbox.bad { border-color: var(--deleted); }
+
+.findcount {
+  min-width: 62px;
+  color: var(--fg-faint);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+/* Every match on screen, and the one being stood on. The second has to be
+   findable at a glance in a file with two hundred of the first, so it is the
+   accent's fill rather than a stronger tint of the same wash. */
+.fhit { background: rgba(226, 179, 76, 0.28); border-radius: 2px; }
+.fhit.now {
+  background: var(--accent);
+  color: var(--on-accent) !important;
+  border-radius: 2px;
+}
+
+/* ---------- what the top of the pane is inside ---------- */
+
+.stickybar {
+  position: absolute;
+  top: 0;
+  left: 0;
+  /* Clear of the ruler's lane, which an absolutely positioned child is not
+     given by the padding above. */
+  right: 10px;
+  z-index: 5;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-1);
+  border-bottom: 1px solid var(--border);
+  box-shadow: 0 4px 10px rgba(0, 0, 0, 0.22);
+}
+
+.stickyrow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 19px;
+  padding-right: 10px;
+  border: none;
+  background: none;
+  color: var(--fg-dim);
+  font-family: var(--mono);
+  font-size: var(--code-px);
+  text-align: left;
+  cursor: pointer;
+  overflow: hidden;
+}
+
+.stickyrow:hover { background: var(--tint); color: var(--fg); }
+
+.stickykind {
+  flex: none;
+  color: var(--fg-faint);
+  font-family: var(--sans);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.stickytext { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* ---------- the strip beside the scrollbar ---------- */
+
+/* Where the changes are in the whole file, at a glance — the useful half of a
+   minimap without the four hundred lines of unreadable grey. Inert: the
+   scrollbar it sits next to is the control. */
+.ruler {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 10px;
+  pointer-events: none;
+  z-index: 4;
+  background: var(--tint-soft);
+}
+
+.rband {
+  position: absolute;
+  left: 2px;
+  right: 2px;
+  /* A one-line change is a fraction of a percent of a long file and would
+     round away to nothing. */
+  min-height: 2px;
+  border-radius: 1px;
+}
+
+.rband.add { background: var(--added); }
+.rband.del { background: var(--deleted); }
+.rband.ctx { background: var(--line); }
+.rband.hit { background: var(--modified); }
+
+/* ---------- the outline ---------- */
+
+.outline {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  border-top: 1px solid var(--border-soft);
+}
+
+.outline.open { max-height: 42%; }
+
+.outline-hdr {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+  height: var(--hdr);
+  padding: 0 8px;
+  border: none;
+  background: none;
+  text-align: left;
+  cursor: pointer;
+}
+
+.outline-hdr:hover { background: var(--tint); }
+
+.outline-caret { color: var(--fg-faint); width: 10px; }
+
+.outline-list { overflow-y: auto; overscroll-behavior: contain; padding-bottom: 4px; }
+
+.outline-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  width: 100%;
+  padding: 2px 8px 2px 0;
+  border: none;
+  background: none;
+  color: var(--fg-dim);
+  text-align: left;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.outline-row:hover { background: var(--tint); color: var(--fg); }
+
+/* The definition the top of the code pane is sitting inside — so the list says
+   where you are as well as what is there. */
+.outline-row.on { background: var(--accent-soft); color: var(--fg-bright); }
+
+.outline-kind {
+  flex: none;
+  min-width: 40px;
+  color: var(--fg-faint);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.outline-name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+.outline-line {
+  margin-left: auto;
+  padding-left: 8px;
+  color: var(--fg-faint);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}

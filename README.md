@@ -93,6 +93,75 @@ failing test is one click from the code that failed it.
 A panel across the bottom of the code holds the answer to "where else is this?"
 — search hits, references, definitions — and closes again once it has been read.
 
+## Getting around
+
+`⌘P` is the way to a file: type three letters of its name and it is the row
+under the cursor. It matches the whole path, so `uiapp` finds `src/ui/app.rs`,
+and it ranks what it finds rather than merely listing it — a letter at the start
+of a word beats one in the middle, letters kept together beat the same letters
+scattered, and a hit in the file's own name beats one in the directories above
+it. With nothing typed it is the files you already have open, most recent first,
+then the files the change touches: the answer to "which file" is usually one of
+those, and nobody should have to type to get it. `main.rs:120` opens that line.
+
+Four more questions come out of the same box, told apart by the character in
+front of what you type — which is github.dev's arrangement, and worth copying
+exactly, because the prefixes are already in the fingers of anybody who has used
+the editor this app is shaped like:
+
+| | | |
+|---|---|---|
+| `⌘P` | | go to a file |
+| `⌘⇧P` | `>` | run a command |
+| `⌘⇧O` | `@` | go to a definition in this file |
+| | `#` | go to a definition anywhere in the repository |
+| `⌃G` | `:` | go to a line |
+
+**The command list is the other half of the point.** Every shortcut this app has
+was written down here in this README and nowhere anybody was looking; now each
+one is next to the thing it does, in a list you can search for a word. The way
+to find out that Option and an arrow steps through the changed files is to open
+`⌘⇧P` and type "changed".
+
+`⌘F` **finds in the file you are reading** — with a count, `⏎` and `⇧⏎` to step
+between the hits, and the same `Aa ab .*` toggles the repository search has. The
+browser's own `⌘F` cannot do this job: half of a contracted diff is not in the
+page to be found, and what it did find it would scroll to without this app ever
+knowing where you had gone. Searching every file is `⌘⇧F`, which is the box in
+the top bar and where `⌘F` used to go.
+
+`F7` and `⇧F7` step **change by change** through the open file, the way `⌥↓` and
+`⌥↑` step file by file through the review — round the end rather than stopping
+at it, because the last change is next to the first one in every way that
+matters.
+
+Above the code, a header says **what the top of the pane is inside**: the
+`impl`, the `class`, the function. Landed in the middle of a four-hundred-line
+file by a link to a line, that is the question, and the answer had scrolled off
+the top. Down the right-hand edge, beside the scrollbar, a strip says **where
+the changes are** in the whole file — the useful half of a minimap and none of
+the rest of it.
+
+The explorer has `⊟` to shut every folder and `◎` to go to the row for the file
+you are reading, and under it **OUTLINE** — everything the open file defines, in
+the order it defines it, with the one you are currently inside marked as you
+scroll.
+
+`ws` beside the diff controls **stops counting a line that only moved
+sideways**: a block that was reindented is a screenful of red and green saying
+nothing, with the one real change somewhere underneath it. It folds a
+removals-then-additions block back into unchanged lines only when the two sides
+line up one for one and every pair says the same thing — five lines reindented
+and a sixth genuinely edited is left alone, because a diff that has quietly
+dropped context is worse than a noisy one. The button is lit while it is on, and
+the `+`/`−` counts beside it are the folded ones, so a filtered diff never
+passes for a whole one.
+
+`⌥Z` folds long lines rather than running them off the side, which is worth
+having when a 380px tree and a 380px conversation have taken the width the code
+was written in. `⌥T` picks up the last file you put down, where you left it —
+`⌥W`'s opposite, one modifier out of the browser's way like the rest of them.
+
 `⛶` in the corner of the top bar, or `F11`, gives the app **the whole
 screen**. Nothing about the app changes: the top bar, the explorer, the code and
 the conversation are all still there and all still the same shape. What goes is
@@ -363,11 +432,13 @@ src/
     blobs.rs        the local copy: blobs by content hash, manifests, sweeping
     clone.rs        pulling a whole commit down, and reading files back out
     scan.rs         reading a commit back out of the store, and the text cache
-    search.rs       patterns, and the lines that match them
+    search.rs       patterns, the lines that match them, and painting a line
+    fuzzy.rs        a few letters against a few thousand paths, ranked
     symbols.rs      where things are defined, by regex per language
     layout.rs       pane sizes, kept between visits
     tree.rs         file-tree model built from a path list + change statuses
-    difftool.rs     hunk/line/segment diff model (similar), split-row pairing
+    difftool.rs     hunk/line/segment diff model (similar), split-row pairing,
+                    where the changes are for the ruler and for F7
     highlight.rs    syntect syntax highlighting (pure-Rust fancy-regex build)
     markdown.rs     markdown parsed to blocks and styled runs (no HTML)
     images.rs       pictures as data: URLs; the `src`s a page asks for
@@ -378,11 +449,12 @@ src/
     prcache.rs      what is decoded in memory, and what warms it
     imgcache.rs     pictures read on demand, and what is kept of them
     topbar.rs       what is on screen, warm-up progress, account, refresh
-    filetree.rs     recursive tree with status badges
-    viewer.rs       source view, inline & split diff views
+    filetree.rs     recursive tree with status badges, and the outline
+    viewer.rs       source view, inline & split diff views, find, the ruler
     tabs.rs         the files held open, and where each pane is scrolled to
     spaces.rs       several pullspaces in one tab: the state swap, the switcher
     ide.rs          search, definitions, references, and the keyboard
+    palette.rs      one picker: files, commands, definitions, a line
     nav.rs          the address bar read back: links, Back and Forward
     bottom.rs       the panel under the code: hits, definitions, a peek at one
     markdown.rs     markdown drawn as elements; link targets, pictures

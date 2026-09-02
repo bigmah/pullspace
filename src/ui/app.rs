@@ -19,6 +19,7 @@ use crate::backend::markdown;
 use crate::backend::prefs::{self, Prefs};
 use crate::backend::route::{self, Place, Route, Target};
 use crate::backend::search::Options;
+use crate::backend::symbols::{self, Symbol};
 use crate::backend::tree::{
     ChangeKind, FileNode, build_tree_from_paths, changed_paths, filter_changed,
 };
@@ -32,6 +33,7 @@ use super::ide::{Index, Panel};
 use super::landing::Landing;
 use super::opening::Opening;
 use super::page::Tab;
+use super::palette::Picker;
 use super::panes::{self, Drag, DragMask, Edge};
 use super::prefs::PrefsPanel;
 use super::spaces::{self, Card, Held, Space};
@@ -601,6 +603,9 @@ pub struct OpenTab {
 /// still wide enough to carry a name.
 const TABS: usize = 12;
 
+/// How many closed files are remembered for the key that picks one back up.
+const REOPEN: usize = 10;
+
 /// Both sides of one file, fetched on demand.
 ///
 /// The sides are `Rc` because every write to the cache re-runs the viewer's
@@ -734,6 +739,40 @@ pub struct St {
     pub scan_seq: Signal<u32>,
     /// The search box, and its three toggles. Nothing to do with `tree_filter`,
     /// which narrows the explorer by path — this one reads inside files.
+    /// The find bar over the open file: whether it is up, what is in it, and
+    /// which of its hits is the current one.
+    ///
+    /// Its own text and its own toggles, kept apart from the search box in the
+    /// top bar. They are two different questions — "where is this in this
+    /// file" and "where is this in this repository" — and typing one into the
+    /// other is how an editor loses somebody's place.
+    pub find_open: Signal<bool>,
+    pub find_text: Signal<String>,
+    pub find_opts: Signal<Options>,
+    /// Which hit Enter is standing on, as an index into the lines matched.
+    pub find_at: Signal<Option<usize>>,
+    /// The lines of the open file the find bar is matching, in order. Derived
+    /// by the viewer, for the same reason as `change_lines`: the keyboard has
+    /// no file to look in.
+    pub find_lines: Signal<Vec<usize>>,
+    /// Where each run of changes in the open file begins, as lines of the new
+    /// side — what F7 steps through. Derived by the viewer, which is the only
+    /// thing here holding the diff.
+    pub change_lines: Signal<Vec<usize>>,
+    /// The files put down, most recent last, for the key that picks one back
+    /// up. Closing a tab by mistake should not cost the file.
+    pub closed: Signal<Vec<Spot>>,
+    /// The first line still on screen in the code pane, as the page reports it
+    /// — what the header pinned above the code is worked out from.
+    pub top_line: Signal<Option<usize>>,
+    /// The picker: whether it is up, what has been typed into it, and which
+    /// row the arrow keys are on. One overlay for files, commands, symbols and
+    /// line numbers — see [`super::palette`].
+    pub picker: Signal<bool>,
+    pub picker_text: Signal<String>,
+    pub picker_at: Signal<usize>,
+    /// Whether the explorer is showing what the open file defines.
+    pub outline_open: Signal<bool>,
     pub search_text: Signal<String>,
     pub search_opts: Signal<Options>,
     /// What was wrong with the pattern, when it is a regular expression and it
@@ -940,6 +979,13 @@ impl St {
         let mut tabs = self.tabs;
         tabs.set(Vec::new());
         tabs::forget_all();
+        // Including the ones put down: reopening a file from the review before
+        // last is not something the key should be able to do.
+        let mut closed = self.closed;
+        closed.set(Vec::new());
+        self.toggle_find(false);
+        let mut find_text = self.find_text;
+        find_text.set(String::new());
     }
 
     /// Put down the results of reading the last thing.
@@ -1435,6 +1481,17 @@ impl St {
         self.changed_files.read().iter().position(|p| p == here)
     }
 
+    /// The files in the strip, most recently looked at first.
+    ///
+    /// What the picker opens on: with nothing typed, the answer to "which
+    /// file" is nearly always one of the few already in hand.
+    pub fn recent_paths(&self) -> Vec<PathBuf> {
+        let held = self.tabs.read();
+        let mut order: Vec<&OpenTab> = held.iter().collect();
+        order.sort_by_key(|t| std::cmp::Reverse(t.used));
+        order.iter().map(|t| t.at.path.clone()).collect()
+    }
+
     /// The next or previous changed file, in the order the explorer draws them.
     ///
     /// From somewhere that is not one of them — an unchanged file opened to
@@ -1452,6 +1509,119 @@ impl St {
         let Some(next) = target.cloned() else { return };
         drop(files);
         self.open_file(next);
+    }
+
+    // ------------------------------------------- stepping through one file
+
+    /// Put the reader on a line of the file already open, without disturbing
+    /// anything else about the view.
+    ///
+    /// Not [`open_at`](Self::open_at), which is for arriving from somewhere
+    /// else and lands in the source view: the reader is already here, and
+    /// dropping them out of a split diff to show them a line of it would be
+    /// answering a question they did not ask.
+    pub fn jump_line(&self, line: usize) {
+        if self.open.peek().is_none() {
+            return;
+        }
+        let mut at = self.at_line;
+        at.set(Some(line));
+        // The viewer listens for the write rather than for what this holds —
+        // see `St::scroll_to` — so asking twice for the same line scrolls
+        // back to it, which is what pressing the key again means.
+        let mut ps = self.scroll_to;
+        ps.set(Some(line));
+    }
+
+    /// The next or previous run of changes in the open file.
+    ///
+    /// Round the end rather than stopping at it. A diff is read more than once
+    /// and the last change is next to the first one in every way that matters.
+    pub fn step_change(&self, forward: bool) {
+        let lines = self.change_lines.peek();
+        let here = *self.at_line.peek();
+        let found = match (here, forward) {
+            (Some(at), true) => lines.iter().find(|&&l| l > at).copied(),
+            (Some(at), false) => lines.iter().rev().find(|&&l| l < at).copied(),
+            (None, true) => lines.first().copied(),
+            (None, false) => lines.last().copied(),
+        };
+        let target = found.or_else(|| {
+            if forward {
+                lines.first().copied()
+            } else {
+                lines.last().copied()
+            }
+        });
+        drop(lines);
+        if let Some(line) = target {
+            self.jump_line(line);
+        }
+    }
+
+    /// The next or previous line matching the find bar, and round the end the
+    /// same way.
+    pub fn step_find(&self, forward: bool) {
+        let lines = self.find_lines.peek();
+        let n = lines.len();
+        if n == 0 {
+            return;
+        }
+        let next = match *self.find_at.peek() {
+            Some(i) if forward => (i + 1) % n,
+            Some(i) => (i + n - 1) % n,
+            // Nothing stood on yet. Start from where the reader is in the file
+            // rather than from the top of it — a find is nearly always a
+            // question about the part already on screen.
+            None => {
+                let here = self.at_line.peek().unwrap_or(0);
+                if forward {
+                    lines.iter().position(|&l| l > here).unwrap_or(0)
+                } else {
+                    lines.iter().rposition(|&l| l < here).unwrap_or(n - 1)
+                }
+            }
+        };
+        let line = lines[next];
+        drop(lines);
+        let mut at = self.find_at;
+        at.set(Some(next));
+        self.jump_line(line);
+    }
+
+    /// Put the find bar up, or take it down and forget what was in it.
+    pub fn toggle_find(&self, showing: bool) {
+        let mut open = self.find_open;
+        open.set(showing);
+        if !showing {
+            let mut at = self.find_at;
+            at.set(None);
+        }
+    }
+
+    /// Pick the last file put down back up, where it was left.
+    pub fn reopen_tab(&self) {
+        let mut closed = self.closed;
+        let Some(spot) = closed.write().pop() else {
+            return;
+        };
+        self.stow();
+        self.go(spot);
+    }
+
+    /// Shut every directory in the explorer.
+    ///
+    /// Every one but the root, which is the tree itself: closing that would
+    /// leave a panel with one row in it and no way back that is not this same
+    /// button.
+    pub fn collapse_tree(&self) {
+        let mut expanded = self.expanded;
+        let mut held = expanded.write();
+        for (path, open) in held.iter_mut() {
+            if !path.as_os_str().is_empty() {
+                *open = false;
+            }
+        }
     }
 
     // -------------------------------------------- opening a diff back up
@@ -1789,6 +1959,11 @@ impl St {
     /// else it could leave. Closing one that is not the one being read moves
     /// nothing at all.
     pub fn close_tab(&self, rel: &Path) {
+        // Where the reader is standing, before the tab holding it is taken
+        // away: a tab's place is only written on the way out of it, and
+        // closing is a way out. Without this a file put down at line 400 is
+        // one that reopens at line 1.
+        self.stow();
         let mut tabs = self.tabs;
         let Some(at) = tabs.peek().iter().position(|t| t.at.path == rel) else {
             return;
@@ -1796,7 +1971,20 @@ impl St {
         let leaving = self.open.peek().as_deref() == Some(rel);
         let next = {
             let mut held = tabs.write();
-            held.remove(at);
+            let gone = held.remove(at);
+            // Where it was left, so picking it back up is picking up the file
+            // and not the top of it.
+            let mut closed = self.closed;
+            {
+                let mut stack = closed.write();
+                stack.retain(|s| s.path != gone.at.path);
+                stack.push(gone.at);
+                // Long enough to undo a run of closes, short enough not to be
+                // a second copy of the strip.
+                if stack.len() > REOPEN {
+                    stack.remove(0);
+                }
+            }
             // Whatever has slid into its place, or the end of the strip.
             held.get(at).or_else(|| held.last()).map(|t| t.at.clone())
         };
@@ -1854,6 +2042,11 @@ fn marks_key(ws: &Workspace) -> Option<String> {
         Workspace::Compare(view) => Some(viewed::compare_key(&view.repo, &view.base, &view.head)),
         _ => None,
     }
+}
+
+/// One tree entry's path, as the string the picker matches against.
+fn display(p: &Path) -> String {
+    p.display().to_string()
 }
 
 /// Hold a piece of state in the root scope rather than in `App`.
@@ -1918,6 +2111,21 @@ pub fn App() -> Element {
             panel: root(h.panel),
             index: root(h.index),
             scan_seq: root(0),
+            find_open: root(h.find_open),
+            find_text: root(h.find_text),
+            find_opts: root(h.find_opts),
+            find_at: root(h.find_at),
+            find_lines: root(h.find_lines),
+            change_lines: root(h.change_lines),
+            closed: root(h.closed),
+            // Not per space: it is a fact about the pane the reader is looking
+            // at this instant, and the pane is scrolled back to where it was
+            // on the way into a space anyway.
+            top_line: root(None),
+            picker: root(false),
+            picker_text: root(String::new()),
+            picker_at: root(0),
+            outline_open: root(false),
             search_text: root(h.search_text),
             search_opts: root(h.search_opts),
             search_error: root(h.search_error),
@@ -2013,6 +2221,53 @@ pub fn App() -> Element {
         }
     });
     use_context_provider(|| tree);
+
+    // Every path in what is open, as the strings the picker matches against.
+    //
+    // Only while the picker is up. It is a few thousand short allocations on a
+    // real repository, which is nothing once — and would be nothing worth
+    // doing at all on every click that opens a file.
+    let all_paths: Memo<Rc<Vec<String>>> = use_memo(move || {
+        if !*st.picker.read() {
+            return Rc::new(Vec::new());
+        }
+        st.refresh_tick.read();
+        let held = st.workspace.read();
+        let paths = match &*held {
+            Workspace::Empty => Vec::new(),
+            Workspace::Pr(pr) => pr.tree.paths().map(display).collect(),
+            Workspace::Repo(view) => view.tree.paths().map(display).collect(),
+            Workspace::Commit(view) => view.tree.paths().map(display).collect(),
+            Workspace::Compare(view) => view.tree.paths().map(display).collect(),
+        };
+        Rc::new(paths)
+    });
+    use_context_provider(|| all_paths);
+
+    // What the open file defines, in the order it defines it. Three things ask
+    // — the header pinned over the code, the explorer's outline, and the
+    // picker — and all three want the same answer, so it is worked out once.
+    let file_syms: Memo<Rc<Vec<Symbol>>> = use_memo(move || {
+        st.refresh_tick.read();
+        let Some(rel) = st.open.read().clone() else {
+            return Rc::new(Vec::new());
+        };
+        let files = st.pr_files.read();
+        let Some(PrFileState::Ready { base, head }) = files.get(&rel) else {
+            return Rc::new(Vec::new());
+        };
+        // The new side, or — for a file the change deletes — the old one,
+        // which is the version the viewer is showing.
+        let text = match (head.as_ref(), base.as_ref()) {
+            (FileContent::Text(t), _) => t,
+            (FileContent::Absent, FileContent::Text(t)) => t,
+            _ => return Rc::new(Vec::new()),
+        };
+        let mut out = Vec::new();
+        symbols::scan_file(&rel, text, &mut out);
+        Rc::new(out)
+    });
+    use_context_provider(|| file_syms);
 
     // The changed files in the order they are drawn, for next/previous file to
     // walk. Derived here rather than where it is used because both users are a
@@ -2142,6 +2397,10 @@ pub fn App() -> Element {
     // And the other thing listened for on the document: a click on a line
     // number, which is how a line gets picked out to link to.
     use_future(move || super::viewer::lines(st));
+
+    // And which line is at the top of the code pane, for the header pinned
+    // over it.
+    use_future(move || super::viewer::tops(st));
 
     // The third: where each open file is scrolled to, which the page keeps on
     // our behalf — a wheel notch is not worth a render. See `super::tabs`.
@@ -2335,6 +2594,11 @@ pub fn App() -> Element {
             }
             if *st.prefs_open.read() {
                 PrefsPanel {}
+            }
+            // Above everything, including the panels: it is the way to the
+            // things they are for.
+            if *st.picker.read() {
+                Picker {}
             }
             DragMask {}
         }

@@ -3,6 +3,7 @@ pub mod blobs;
 pub mod clip;
 pub mod clone;
 pub mod difftool;
+pub mod fuzzy;
 pub mod github;
 pub mod highlight;
 pub mod http;

@@ -3,6 +3,7 @@ use std::rc::Rc;
 
 use dioxus::prelude::*;
 
+use crate::backend::symbols::{Symbol, enclosing};
 use crate::backend::tree::{FileNode, Row, RowKind, matching_rows, seed_expansion, visible_rows};
 
 use super::app::St;
@@ -54,6 +55,121 @@ const REVEAL_JS: &str = r#"
         if (row) row.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
     });
 "#;
+
+/// What the open file defines, under the tree of what the repository holds.
+///
+/// The same list the picker shows for `@`, kept open beside the code for
+/// reading rather than for jumping — which is the difference between the two,
+/// and why both are worth having. The definition the top of the pane is
+/// sitting inside is marked, so the list says where you are as well as what is
+/// there.
+#[component]
+fn Outline() -> Element {
+    let st = use_context::<St>();
+    let syms = use_context::<Memo<Rc<Vec<Symbol>>>>();
+    let mut open = st.outline_open;
+    let held = syms.read();
+    if held.is_empty() {
+        return rsx! {};
+    }
+    let showing = *open.read();
+    // Which row to mark: the innermost definition the top of the pane is in.
+    //
+    // Through a memo, and that is the whole point of it: the line at the top
+    // of the pane changes on every line crossed by a scroll, and the outline
+    // is a list of several hundred rows. Reading it here directly would redraw
+    // all of them sixty times a second to move one highlight; read in a memo,
+    // the list is only redrawn when the answer actually changes, which is once
+    // per definition scrolled past.
+    let here = use_memo(move || {
+        let top = (*st.top_line.read())?;
+        let held = syms.read();
+        enclosing(&held, top).last().map(|s| s.line)
+    });
+    let here = *here.read();
+    let count = held.len();
+    rsx! {
+        div { class: if showing { "outline open" } else { "outline" },
+            button {
+                class: "outline-hdr",
+                title: "What this file defines",
+                onclick: move |_| {
+                    let now = *open.peek();
+                    open.set(!now);
+                },
+                span { class: "outline-caret", if showing { "⌄" } else { "›" } }
+                span { class: "side-title", "OUTLINE" }
+                span { class: "side-count", "{count}" }
+            }
+            if showing {
+                div { class: "outline-list",
+                    for sym in held.iter() {
+                        {
+                            let line = sym.line;
+                            let cls = if here == Some(line) {
+                                "outline-row on"
+                            } else {
+                                "outline-row"
+                            };
+                            let indent = 8 + (sym.indent as usize).min(16) * 4;
+                            rsx! {
+                                button {
+                                    key: "{line}-{sym.name}",
+                                    class: cls,
+                                    style: "padding-left:{indent}px",
+                                    title: "{sym.preview}",
+                                    onclick: move |_| st.jump_line(line),
+                                    span { class: "outline-kind", "{sym.kind}" }
+                                    span { class: "outline-name", "{sym.name}" }
+                                    span { class: "outline-line", "{line}" }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Open the explorer down to the file being read, and scroll its row into
+/// view.
+///
+/// A file can be opened from somewhere other than the tree — a search hit, a
+/// link in a README, a jump to a definition, the picker — and land on a row
+/// three folders deep and miles off screen. This is what the explorer does
+/// about it on its own, and what the command of the same name asks for
+/// directly.
+pub fn reveal(st: &St) {
+    let Some(path) = st.open.peek().clone() else {
+        return;
+    };
+    let mut expanded = st.expanded;
+    let mut shut: Vec<PathBuf> = Vec::new();
+    {
+        let known = expanded.peek();
+        let mut dir = path.parent();
+        while let Some(d) = dir {
+            if known.get(d).copied() != Some(true) {
+                shut.push(d.to_path_buf());
+            }
+            dir = d.parent();
+        }
+    }
+    if !shut.is_empty() {
+        let mut w = expanded.write();
+        for dir in shut {
+            w.insert(dir, true);
+        }
+    }
+    // In the root scope, not this one. The explorer's own effect could own
+    // this task safely, but the command in the picker cannot: choosing it
+    // closes the picker, and a task owned by a component that has just
+    // unmounted is a task that is dropped before it runs.
+    spawn_forever(async move {
+        let _ = document::eval(REVEAL_JS).await;
+    });
+}
 
 /// One row as drawn: the tree's own row, plus the two facts about it that
 /// come from signals — settled here, in the listing memo, rather than read
@@ -116,28 +232,12 @@ pub fn FileTreePane() -> Element {
     // result or a link is where the tree says it is rather than shut inside
     // three folders.
     use_effect(move || {
-        let open = st.open.read().clone();
-        let Some(path) = open else { return };
-        let mut reveal: Vec<PathBuf> = Vec::new();
-        {
-            let known = expanded.peek();
-            let mut dir = path.parent();
-            while let Some(d) = dir {
-                if known.get(d).copied() != Some(true) {
-                    reveal.push(d.to_path_buf());
-                }
-                dir = d.parent();
-            }
+        // Read reactively, so this runs again when the file changes; `reveal`
+        // itself only peeks, being also called from a click.
+        if st.open.read().is_none() {
+            return;
         }
-        if !reveal.is_empty() {
-            let mut w = expanded.write();
-            for dir in reveal {
-                w.insert(dir, true);
-            }
-        }
-        spawn(async move {
-            let _ = document::eval(REVEAL_JS).await;
-        });
+        reveal(&st);
     });
 
     let listing = use_memo(move || {
@@ -249,6 +349,21 @@ pub fn FileTreePane() -> Element {
                     },
                     "Δ"
                 }
+                // Two ways out of a tree that has got away from you: shut all
+                // of it, or go to the one row that matters.
+                button {
+                    class: "iconbtn sm",
+                    title: "Collapse every folder",
+                    onclick: move |_| st.collapse_tree(),
+                    "⊟"
+                }
+                button {
+                    class: "iconbtn sm",
+                    title: "Show the open file in the tree",
+                    disabled: st.open.read().is_none(),
+                    onclick: move |_| reveal(&st),
+                    "◎"
+                }
             }
             div { class: "tree-find",
                 input {
@@ -298,6 +413,7 @@ pub fn FileTreePane() -> Element {
                     div { class: "tree-more", "+{listing.read().hidden} more — keep typing" }
                 }
             }
+            Outline {}
         }
         // The divider belongs to the pane it moves, so nothing above has to
         // know which panes happen to be on screen.

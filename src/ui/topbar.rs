@@ -4,6 +4,7 @@ use crate::backend::auth::open_browser;
 use crate::backend::github::{CommitFrom, RepoRef};
 
 use super::app::{Account, Fetch, St, Workspace};
+use super::full;
 use super::github::{
     PrListBody, PrStates, browse_branch, browse_repo, open_commit, open_compare, open_pr,
 };
@@ -363,6 +364,15 @@ pub fn TopBar() -> Element {
                 title: "Appearance — theme, accent, font  (⌘,)",
                 onclick: move |_| prefs_open.set(true),
                 span { class: "glyph", "◐" }
+            }
+            // The bar's own way out of the bar. Nothing marks it as on,
+            // because pressing it is the last thing that happens before it
+            // stops being drawn — see `super::full`.
+            button {
+                class: "iconbtn lg",
+                title: "Fullscreen — the file, the whole screen  (F11)",
+                onclick: move |_| full::toggle(st),
+                span { class: "glyph", "\u{26f6}" }
             }
             RefreshButton {
                 pr_target,

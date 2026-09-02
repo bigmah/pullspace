@@ -13,6 +13,7 @@ pub mod opfs;
 pub mod prefs;
 pub mod route;
 pub mod scan;
+pub mod screen;
 pub mod search;
 pub mod store;
 pub mod symbols;

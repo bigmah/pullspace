@@ -50,6 +50,10 @@ web-sys = { version = "0.3", features = [
     # `navigator.clipboard`, which is how the link to a line gets somewhere it
     # can be pasted.
     "Clipboard",
+    # `document.documentElement`, which is the element handed to the browser
+    # when the app asks for the screen — see `backend::screen`.
+    "Document",
+    "Element",
     "Navigator",
     "StorageManager",
     "Blob",

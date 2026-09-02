@@ -30,6 +30,7 @@ use crate::backend::symbols::{self, Symbol};
 
 use super::app::St;
 use super::compat;
+use super::full;
 use super::spaces;
 
 /// How long to wait for the clone before indexing anyway. It is a backstop for
@@ -507,15 +508,31 @@ pub fn select_word(st: St) {
     });
 }
 
-/// Put the cursor in the search box, with whatever is in it selected — so the
-/// shortcut is "search for something else" and not "search again".
-pub fn focus_search() {
-    document::eval("var e=document.querySelector('.searchbox'); if(e){e.focus();e.select();}");
+/// Put the cursor in one of the two boxes, with whatever is in it selected.
+///
+/// It waits for the box, which is what the retry is for: both of these live in
+/// the frame, and both shortcuts come back out of fullscreen to reach them —
+/// so on the press that leaves, the element being asked for is one render away
+/// from existing. A handful of frames is generous for a render and still short
+/// enough to give up rather than sit there querying a box that is never coming.
+fn focus_on(selector: &str) {
+    document::eval(&format!(
+        "(function(){{var left=8;(function go(){{\
+           var e=document.querySelector('{selector}');\
+           if(e){{e.focus();e.select();return;}}\
+           if(left-->0) requestAnimationFrame(go);}})();}})();"
+    ));
 }
 
-/// Put the cursor in the explorer's filter box.
+/// The search box, so the shortcut is "search for something else" rather than
+/// "search again".
+pub fn focus_search() {
+    focus_on(".searchbox");
+}
+
+/// And the explorer's filter box.
 pub fn focus_filter() {
-    document::eval("var e=document.querySelector('.findbox'); if(e){e.focus();e.select();}");
+    focus_on(".findbox");
 }
 
 // ----------------------------------------------------------------- keyboard
@@ -534,7 +551,11 @@ const KEYS: &str = r#"
     var tag = el.tagName || '';
     var typing = tag === 'INPUT' || tag === 'TEXTAREA' || el.isContentEditable;
     var what = null;
-    if (mod && key === 'f') what = 'find';
+    // Fullscreen first, and both of its keys before find: F11 is what every
+    // browser but Safari on a Mac calls this, ⌃⌘F is what a Mac calls it, and
+    // the second arrives here as ⌘F with one more modifier held down.
+    if (key === 'f11' || (e.ctrlKey && e.metaKey && key === 'f')) what = 'full';
+    else if (mod && key === 'f') what = 'find';
     else if (mod && key === 'p') what = 'filter';
     else if (mod && key === ',') what = 'prefs';
     else if (key === 'f12') what = e.shiftKey ? 'refs' : 'def';
@@ -578,8 +599,19 @@ pub async fn keys(st: St) {
     while let Ok(what) = eval.recv::<String>().await {
         let selected = st.selected.peek().clone();
         match (what.as_str(), selected) {
-            ("find", _) => focus_search(),
-            ("filter", _) => focus_filter(),
+            ("full", _) => full::toggle(st),
+            // Both boxes are in the frame fullscreen puts away, so asking for
+            // one is asking for the frame back. Leaving first rather than
+            // refusing: the key means "let me type in there", and there is
+            // only one way to honour that.
+            ("find", _) => {
+                full::leave(st);
+                focus_search();
+            }
+            ("filter", _) => {
+                full::leave(st);
+                focus_filter();
+            }
             ("prefs", _) => {
                 let mut open = st.prefs_open;
                 let showing = *open.peek();
@@ -611,14 +643,23 @@ pub async fn keys(st: St) {
     }
 }
 
-/// Escape closes the panel if one is up, and otherwise puts down whatever
-/// identifier is selected — the reverse of the order they were opened in.
+/// Escape closes the panel if one is up, then puts down whatever identifier is
+/// selected, and last of all comes out of fullscreen — the reverse of the order
+/// they were opened in.
+///
+/// Fullscreen is usually gone before this is reached: a browser holding the
+/// screen leaves on Escape itself, without the page ever seeing the key, and
+/// `full::watch` hears about it. This is the way out of the other case — the
+/// browser refused the screen and only the app's own frame was put away.
 fn escape(st: St) {
     if st.panel.peek().showing() {
         return close(st);
     }
     let mut sel = st.selected;
-    sel.set(None);
+    if sel.peek().is_some() {
+        return sel.set(None);
+    }
+    full::leave(st);
 }
 
 /// One toggle: what the button says, what it says on hover, and the field it

@@ -93,6 +93,25 @@ failing test is one click from the code that failed it.
 A panel across the bottom of the code holds the answer to "where else is this?"
 — search hits, references, definitions — and closes again once it has been read.
 
+`⛶` in the corner of the top bar, or `F11`, gives the file **the whole
+screen**. Two things at once, because they are one intention: the browser is
+asked for the screen — its tabs and its address bar go — and the app puts its
+own frame away with them, the top bar, the explorer and the conversation
+together. What is left is the code, the strip of what else is open above it, and
+the thin header saying which file this is; `⛶ leave` at the end of that header,
+or `Esc`, gives it all back exactly as it was. On a Mac, where `F11` usually
+belongs to the desktop, `⌃⌘F` is the same key.
+
+The two halves are deliberately not tied together. A browser is entitled to
+refuse the screen and some of them always do — an iPhone has fullscreen for a
+video and for nothing else — so the frame goes away whether the request lands or
+not: a refusal costs the browser's chrome rather than the mode. What is granted
+can also be taken back without a word, since `Esc` and the browser's own control
+both leave fullscreen without the page hearing a click, so the app listens for
+that and puts the frame back when it happens. `⌘F` and `⌘P` come out of fullscreen
+on their own, because the two boxes they put the cursor in are in the frame it
+had just put away.
+
 ## Spaces
 
 A review is never one pull request. It is this one, the two it depends on, the
@@ -339,6 +358,7 @@ src/
     auth.rs         the token, and localStorage
     store.rs        localStorage — and sessionStorage, for the spaces
     route.rs        what is open: a PR, a commit, a branch or a comparison
+    screen.rs       the screen, asked for and given back
     prefs.rs        theme, accent, font and size, as a `:root` stylesheet
     clip.rs         the clipboard, for the link to a line
     viewed.rs       which files have been ticked off, by blob hash
@@ -374,6 +394,7 @@ src/
     prefs.rs        the appearance panel
     page.rs         the browser tab: its name, and the icon on it
     panes.rs        draggable dividers
+    full.rs         fullscreen: the frame put away, and the way back out
 
 extension/          a Chrome extension: the page you are on, opened here
     handoff.js      the `?url=` a click builds — pure, and tested under node
@@ -381,8 +402,9 @@ extension/          a Chrome extension: the page you are on, opened here
 ```
 
 One crate, one target, and no `#[cfg(target_arch)]` anywhere in it. Everything
-is pure except `http.rs`, `store.rs`, `opfs.rs`, `route.rs`, `clip.rs` and the
-`open_browser` in `auth.rs` — the six places that touch the browser at all.
+is pure except `http.rs`, `store.rs`, `opfs.rs`, `route.rs`, `clip.rs`,
+`screen.rs` and the `open_browser` in `auth.rs` — the seven places that touch
+the browser at all.
 Nothing in the test suite reaches any of them, which is what keeps `cargo test`
 running on the host.
 

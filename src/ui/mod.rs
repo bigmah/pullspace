@@ -3,6 +3,7 @@ mod bottom;
 mod compat;
 mod conversation;
 mod filetree;
+mod full;
 mod github;
 mod ide;
 mod imgcache;

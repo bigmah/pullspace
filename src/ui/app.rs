@@ -824,11 +824,14 @@ pub struct St {
     /// The area the two panes share, as last measured. `(0, 0)` until the
     /// first report from the resize observer.
     pub main_size: Signal<(f64, f64)>,
-    /// The frame put away and the screen asked for — see [`super::full`].
+    /// Whether the browser is holding the screen for this page — see
+    /// [`super::full`], which is the only thing that writes it.
     ///
-    /// Not a per-space thing, for the same reason the theme is not: the window
-    /// is the window, and stepping to the review beside this one is no reason
-    /// to hand the screen back.
+    /// A report rather than a setting: nothing in the app reads it but the
+    /// button that asks for it, because nothing in the app looks any different
+    /// in fullscreen. Not a per-space thing either, for the same reason the
+    /// theme is not: the window is the window, and stepping to the review
+    /// beside this one is no reason to hand the screen back.
     pub full: Signal<bool>,
     /// The divider in hand, while one is.
     pub drag: Signal<Option<Drag>>,
@@ -2257,16 +2260,6 @@ pub fn App() -> Element {
         spawn_forever(super::conversation::load_checks(st, repo, sha));
     });
 
-    // Fullscreen is for reading a file. With nothing open the landing page
-    // stands in for the whole IDE — the frame this mode puts away included —
-    // so there is no file left for it to be giving the screen to, and no
-    // header left to draw the way out of it at the end of.
-    use_effect(move || {
-        if !st.workspace.read().is_open() {
-            super::full::leave(st);
-        }
-    });
-
     // Unfolding the conversation claims 380px the explorer may currently be
     // standing on, and opening a pull request is what puts it there at all.
     // Either way the dividers' limits have moved, so the panes are brought
@@ -2295,28 +2288,17 @@ pub fn App() -> Element {
     // is not what a drag should cost.
     let look = use_memo(move || st.prefs.read().css());
 
-    // The frame put away, so that the file has the window. Every control it
-    // takes with it is about something other than the file being read — what
-    // is open, what else is open, and what anybody said about it — which is
-    // what makes them the ones a reader is asking to be rid of. See
-    // `super::full`, and `.app.full` in the stylesheet.
-    let full = *st.full.read();
-
     rsx! {
         style { dangerous_inner_html: CSS }
         style { dangerous_inner_html: "{look}" }
         Tab {}
-        div {
-            class: if full { "app full" } else { "app" },
-            style: "{panes}",
+        div { class: "app", style: "{panes}",
             // The IDE is for something being open. With nothing open it would
             // be three empty panes under a modal, so the landing page stands
             // in for the lot — including the top bar, whose every control is
             // about what is open.
             if st.workspace.read().is_open() {
-                if !full {
-                    TopBar {}
-                }
+                TopBar {}
                 div {
                     class: "main",
                     // What the dividers are allowed to give away — and, when
@@ -2332,16 +2314,12 @@ pub fn App() -> Element {
                             panes::refit(&st);
                         }
                     },
-                    if !full {
-                        FileTreePane {}
-                    }
+                    FileTreePane {}
                     div { class: "rightcol",
                         Viewer {}
                         Bottom {}
                     }
-                    if !full {
-                        ConvPane {}
-                    }
+                    ConvPane {}
                 }
                 if *st.gh_open.read() {
                     GhPanel {}

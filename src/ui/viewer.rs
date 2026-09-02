@@ -19,7 +19,6 @@ use crate::backend::{FileContent, clip};
 
 use super::app::{PrFileState, Reading, St, ViewMode, Workspace};
 use super::compat;
-use super::full::LeaveFull;
 use super::ide;
 use super::imgcache::{all_settled, drawable, ensure_image};
 use super::markdown::Target;
@@ -565,7 +564,6 @@ pub fn Viewer() -> Element {
                         )}
                     }
                 }
-                LeaveFull {}
             }
             if let Some(name) = selected {
                 SymBar { name }
@@ -809,10 +807,6 @@ fn Welcome() -> Element {
                         "Read the description"
                     }
                 }
-                // The empty pane is the one place in fullscreen with no
-                // header to put the way out at the end of — so it goes here
-                // instead, where it is the only thing to press.
-                LeaveFull {}
             }
         }
     }

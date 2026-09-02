@@ -1,20 +1,18 @@
-//! Fullscreen: the file, the whole screen, and nothing around it.
+//! Fullscreen: the app, with the browser's own furniture out of the way.
 //!
-//! One control doing two things, because they are one intention. The browser is
-//! asked for the screen — its tabs and its address bar go — and the app puts
-//! away its own frame with them: the top bar, the explorer, the conversation.
-//! What is left is the file, the strip of what else is open, and the thin
-//! header saying which file this is.
+//! Nothing about the app changes. The top bar, the explorer, the code and the
+//! conversation are all still there and all still the same shape — what goes is
+//! everything *around* them: the tab strip, the address bar, the bookmarks. A
+//! review is a thing to sit inside for an hour, and on a laptop that furniture
+//! is a fifth of the screen spent on somewhere you are not.
 //!
-//! The two halves are deliberately not tied together. The signal here is what
-//! the layout reads, and it is set whether or not the request lands, so a
-//! browser that will not give up the screen costs its own chrome rather than
-//! the mode — see [`crate::backend::screen`], which is entitled to be refused.
-//!
-//! What is granted can be taken back without a word. Escape leaves fullscreen,
-//! and so does the browser's own control for it, and the page sees neither as a
-//! key or as a click; [`watch`] is the ear for that. Without it the frame would
-//! stay put away with the window back to its ordinary size.
+//! The signal here is a record of what the browser is doing rather than
+//! something this app decides, which is why nothing writes it but [`watch`].
+//! The screen can be given back without the page hearing a click — Escape
+//! leaves fullscreen, and so does the browser's own control for it — and a
+//! request can be refused outright, so a button that lit up because it had been
+//! pressed would be telling you what it had asked for rather than what
+//! happened.
 
 use dioxus::prelude::*;
 
@@ -22,12 +20,12 @@ use crate::backend::screen;
 
 use super::app::St;
 
-/// The browser's own idea of who has the screen, said out loud whenever it
+/// The browser's own answer to who has the screen, said out loud whenever it
 /// changes.
 ///
-/// On the document rather than on the app's root element: the event fires at
-/// the element that went fullscreen, and both of the names below are needed for
-/// the same reason the two request methods are.
+/// On the document rather than on the element that went fullscreen: the event
+/// fires at that element, which is above where any handler in this tree could
+/// be attached. Both names for the same reason `backend::screen` needs both.
 const WATCH: &str = r#"
 (function () {
   // A reload of this page's script should not leave the last listener behind.
@@ -48,61 +46,22 @@ const WATCH: &str = r#"
 pub async fn watch(st: St) {
     let mut eval = document::eval(WATCH);
     while let Ok(holding) = eval.recv::<bool>().await {
-        // Only the leaving is news. Going in is this app's own doing, and the
-        // signal is already set by the time the browser is asked — while
-        // something else on the page can take the screen without it being
-        // anything to do with the frame: a video in a previewed HTML file, say.
         let mut full = st.full;
-        if !holding && *full.peek() {
-            full.set(false);
+        if *full.peek() != holding {
+            full.set(holding);
         }
     }
 }
 
-/// Go in, or come back out. What the button and the key both call.
-pub fn toggle(st: St) {
-    let mut full = st.full;
-    let want = !*full.peek();
-    full.set(want);
-    if want {
-        screen::enter();
-    } else {
-        screen::leave();
-    }
-}
-
-/// Come back out. Does nothing when it is already out, so Escape — and the two
-/// shortcuts that need the frame back to have anywhere to put the cursor — can
-/// call it without asking first.
-pub fn leave(st: St) {
-    let mut full = st.full;
-    if !*full.peek() {
-        return;
-    }
-    full.set(false);
-    screen::leave();
-}
-
-/// The way out, drawn at the end of whichever header the middle pane has.
+/// Ask for the screen, or hand it back. What the button and the key both call.
 ///
-/// It draws nothing at all when there is nothing to leave, which is what lets
-/// its three call sites be one line each rather than a condition apiece. Three,
-/// because in fullscreen there is no one header to put it in: a file has one, a
-/// description has another, and a commit with nothing picked out of it yet has
-/// neither.
-#[component]
-pub fn LeaveFull() -> Element {
-    let st = use_context::<St>();
-    if !*st.full.read() {
-        return rsx! {};
-    }
-    rsx! {
-        button {
-            class: "leavefull",
-            title: "Leave fullscreen — the top bar, the explorer and the conversation come back  (Esc)",
-            onclick: move |_| leave(st),
-            span { class: "glyph", "\u{26f6}" }
-            "leave"
-        }
+/// It asks the browser which way round it is rather than reading the signal:
+/// the signal is a report of the last thing the browser said, and this is a
+/// question about the answer to the last thing it was asked.
+pub fn toggle() {
+    if screen::holding() {
+        screen::leave();
+    } else {
+        screen::enter();
     }
 }

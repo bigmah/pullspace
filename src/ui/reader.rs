@@ -22,7 +22,6 @@ use crate::backend::auth::open_browser;
 use crate::backend::markdown::{self, Entry, Refs};
 
 use super::app::{Reading, St};
-use super::full::LeaveFull;
 
 /// A comment's links are written from the root of the repository — there is no
 /// file they are relative to, the way a README's are.
@@ -170,7 +169,6 @@ pub fn Reader(doc: Reading) -> Element {
                     onclick: move |_| st.stop_reading(),
                     "\u{00d7}"
                 }
-                LeaveFull {}
             }
             // How far down it the reader is. A fat description is a scrollbar
             // that barely moves, and this is the one honest answer to "how

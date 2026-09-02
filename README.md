@@ -93,24 +93,21 @@ failing test is one click from the code that failed it.
 A panel across the bottom of the code holds the answer to "where else is this?"
 — search hits, references, definitions — and closes again once it has been read.
 
-`⛶` in the corner of the top bar, or `F11`, gives the file **the whole
-screen**. Two things at once, because they are one intention: the browser is
-asked for the screen — its tabs and its address bar go — and the app puts its
-own frame away with them, the top bar, the explorer and the conversation
-together. What is left is the code, the strip of what else is open above it, and
-the thin header saying which file this is; `⛶ leave` at the end of that header,
-or `Esc`, gives it all back exactly as it was. On a Mac, where `F11` usually
-belongs to the desktop, `⌃⌘F` is the same key.
+`⛶` in the corner of the top bar, or `F11`, gives the app **the whole
+screen**. Nothing about the app changes: the top bar, the explorer, the code and
+the conversation are all still there and all still the same shape. What goes is
+everything *around* them — the browser's tab strip, its address bar, its
+bookmarks — which on a laptop is a fifth of the height spent on somewhere you
+are not. `Esc` gives it back, as it does in every other fullscreen anything, and
+so does `⛶` a second time; the button is lit while the screen is yours. On a
+Mac, where `F11` usually belongs to the desktop, `⌃⌘F` is the same key.
 
-The two halves are deliberately not tied together. A browser is entitled to
-refuse the screen and some of them always do — an iPhone has fullscreen for a
-video and for nothing else — so the frame goes away whether the request lands or
-not: a refusal costs the browser's chrome rather than the mode. What is granted
-can also be taken back without a word, since `Esc` and the browser's own control
-both leave fullscreen without the page hearing a click, so the app listens for
-that and puts the frame back when it happens. `⌘F` and `⌘P` come out of fullscreen
-on their own, because the two boxes they put the cursor in are in the frame it
-had just put away.
+The button says what the browser is doing rather than what it was asked for.
+Fullscreen can be left without this page hearing a click — `Esc` does it, and so
+does the browser's own control — and a request for it can be refused outright,
+since an iPhone has fullscreen for a video and for nothing else. So the app
+listens for `fullscreenchange` and the button reads what that leaves behind,
+which means it is never lit over a window that is not actually full.
 
 ## Spaces
 
@@ -394,7 +391,7 @@ src/
     prefs.rs        the appearance panel
     page.rs         the browser tab: its name, and the icon on it
     panes.rs        draggable dividers
-    full.rs         fullscreen: the frame put away, and the way back out
+    full.rs         fullscreen: the toggle, and what the browser says back
 
 extension/          a Chrome extension: the page you are on, opened here
     handoff.js      the `?url=` a click builds — pure, and tested under node

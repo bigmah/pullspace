@@ -3421,47 +3421,21 @@ button { font-family: inherit; user-select: none; }
 
 /* ---------- fullscreen ---------- */
 
-/* In fullscreen the top bar, the explorer and the conversation are not drawn
-   at all — see `App` — so there is nothing here putting them away. What is
-   left is the way back out, which sits at the end of whichever header the
-   middle pane has: a file's, a description's, or nothing at all in the empty
-   pane, where it stands on its own instead.
+/* Nothing here moves the app: fullscreen is the browser putting its own tabs
+   and address bar away, and what is underneath is the same three panes at the
+   same sizes with more room to be them in. These two are the seam.
 
-   Quiet by design. The one control still on screen should not be the
-   brightest thing on it, and the file is the point. */
-.leavefull {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  flex: none;
-  height: 20px;
-  padding: 0 8px;
-  background: transparent;
-  border: none;
-  border-radius: var(--r-sm);
-  color: var(--fg-faint);
-  cursor: pointer;
-  font-size: 11px;
-  transition: background-color var(--quick) var(--ease), color var(--quick) var(--ease);
-}
+   The backdrop is painted black by every browser's own stylesheet, which shows
+   at the edges while the window is still growing into the screen — a black
+   flash across a dark app, and a black frame around a light one. */
+:root:fullscreen { background: var(--bg); }
+::backdrop { background: var(--bg); }
 
-.leavefull:hover { color: var(--fg); background: var(--bg-3); }
-.leavefull .glyph { font-size: 13px; line-height: 1; }
-
-/* The empty pane has no header to sit at the end of, and a hairline of grey
-   text in the middle of an empty column is not something anybody would take
-   for a button. So there it is one — the same one the description offer
-   beside it is. */
-.welcome .leavefull {
-  margin-top: 16px;
-  height: var(--ctl);
-  padding: 0 14px;
-  border: 1px solid var(--line);
-  border-radius: var(--r);
-  background: var(--bg-2);
-  color: var(--fg-dim);
-  font-size: 12px;
-}
+/* And the bar's one icon button that is a toggle rather than an action, so it
+   can say which way it is set. Not `.iconbtn.sm.on`, which is a state you
+   cannot press — this one is pressed to undo it. */
+.iconbtn.lg.on { color: var(--accent); background: var(--bg-3); }
+.iconbtn.lg.on:hover:enabled { color: var(--accent); background: var(--bg-4); }
 
 /* ---------- scrollbars ---------- */
 

@@ -6,11 +6,11 @@
 //! second can stand in for the first where the first is not there — and so that
 //! the promise the first answers with has somewhere to land.
 //!
-//! Nothing here is load-bearing. A browser is entitled to refuse the screen and
-//! some of them always do: an iPhone has fullscreen for a video and for nothing
-//! else, and a page inside a frame needs a permission it may not have been
-//! given. A refusal costs the browser's own chrome rather than the mode — see
-//! [`crate::ui`], where the app's frame is put away whether this lands or not.
+//! A browser is entitled to refuse the screen and some of them always do: an
+//! iPhone has fullscreen for a video and for nothing else, and a page inside a
+//! frame needs a permission it may not have been given. So nothing is assumed
+//! about the outcome — [`holding`] is the only thing that says what actually
+//! happened, and it asks the browser every time.
 
 use wasm_bindgen::JsCast;
 use wasm_bindgen::JsValue;
@@ -37,15 +37,13 @@ pub fn enter() {
 /// Give it back.
 ///
 /// Asked for only when it was granted: `exitFullscreen` on a document that has
-/// no screen to give up is a rejected promise rather than a no-op, and coming
-/// out of the app's own mode without the browser's is the ordinary case
-/// wherever the request above was refused.
+/// no screen to give up is a rejected promise rather than a no-op.
 pub fn leave() {
     let Some(doc) = web_sys::window().and_then(|win| win.document()) else {
         return;
     };
     let doc = JsValue::from(doc);
-    if !holding(&doc) {
+    if !held(&doc) {
         return;
     }
     if !call(&doc, "exitFullscreen") {
@@ -54,7 +52,18 @@ pub fn leave() {
 }
 
 /// Whether the browser is holding the screen for this page.
-fn holding(doc: &JsValue) -> bool {
+///
+/// The one honest answer to "is it fullscreen": there is no other, since the
+/// screen can be given back by a key this page never sees, and a request for it
+/// can be refused outright.
+pub fn holding() -> bool {
+    match web_sys::window().and_then(|win| win.document()) {
+        Some(doc) => held(&JsValue::from(doc)),
+        None => false,
+    }
+}
+
+fn held(doc: &JsValue) -> bool {
     ["fullscreenElement", "webkitFullscreenElement"]
         .iter()
         .any(

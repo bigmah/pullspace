@@ -41,6 +41,7 @@ pub fn TopBar() -> Element {
     let st = use_context::<St>();
     let mut gh_open = st.gh_open;
     let mut prefs_open = st.prefs_open;
+    let full_on = *st.full.read();
 
     // One read of the workspace, and only the crumbs leave it. The whole
     // workspace — two tree snapshots and every changed file — is not something
@@ -365,13 +366,17 @@ pub fn TopBar() -> Element {
                 onclick: move |_| prefs_open.set(true),
                 span { class: "glyph", "◐" }
             }
-            // The bar's own way out of the bar. Nothing marks it as on,
-            // because pressing it is the last thing that happens before it
-            // stops being drawn — see `super::full`.
+            // Lit from what the browser says rather than from having been
+            // pressed: the screen can be handed back on a key this page never
+            // sees, and a request for it can be refused. See `super::full`.
             button {
-                class: "iconbtn lg",
-                title: "Fullscreen — the file, the whole screen  (F11)",
-                onclick: move |_| full::toggle(st),
+                class: if full_on { "iconbtn lg on" } else { "iconbtn lg" },
+                title: if full_on {
+                    "Leave fullscreen — the browser's tabs and address bar come back  (Esc)"
+                } else {
+                    "Fullscreen — the whole app, with the browser's tabs and address bar out of the way  (F11)"
+                },
+                onclick: move |_| full::toggle(),
                 span { class: "glyph", "\u{26f6}" }
             }
             RefreshButton {

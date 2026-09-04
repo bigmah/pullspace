@@ -19,6 +19,10 @@ use regex::{Regex, RegexBuilder};
 /// six hundredth result, and every one of them is a row to draw.
 pub const MAX_HITS: usize = 500;
 
+/// And how many file names, for the same reason: `.` as a regular expression
+/// matches every path in the repository, and the panel would draw all of them.
+pub const MAX_FILE_HITS: usize = 500;
+
 /// How much of a matching line to keep. Long enough to see the match in
 /// context, short enough that one minified line cannot fill the panel.
 const MAX_PREVIEW: usize = 240;
@@ -49,6 +53,22 @@ pub struct Hit {
     pub text: String,
     /// Byte ranges within `text` that matched, so the row can pick them out.
     /// Empty when the match fell off the end of the preview.
+    pub marks: Vec<(usize, usize)>,
+}
+
+/// One matching file name.
+///
+/// No line and no preview: the path *is* the result, which is the whole
+/// difference between this and a [`Hit`].
+#[derive(Clone, PartialEq, Debug)]
+pub struct FileHit {
+    /// Repo-relative.
+    pub path: PathBuf,
+    /// The path as written — what `marks` are offsets into, and what the row
+    /// draws. Kept rather than derived, so that a path the platform cannot
+    /// spell in UTF-8 cannot have its offsets drift from its text.
+    pub text: String,
+    /// Byte ranges within `text` that matched, so the row can pick them out.
     pub marks: Vec<(usize, usize)>,
 }
 
@@ -154,6 +174,32 @@ impl Matcher {
             text,
             marks,
         }
+    }
+
+    /// Match one file's path, rather than what is inside it.
+    ///
+    /// The whole path and not only the last part of it: `ui/pane` is as much a
+    /// way of naming a handful of files as `panes.rs` is, and a search box that
+    /// only ever saw file names would answer the first with nothing.
+    pub fn on_path(&self, path: &Path) -> Option<FileHit> {
+        let text = path.to_string_lossy();
+        // Cheap rejection first, exactly as the line scan does it: most paths
+        // in a repository match nothing.
+        if !self.re.is_match(&text) {
+            return None;
+        }
+        let marks = self
+            .re
+            .find_iter(&text)
+            .take(MAX_MARKS)
+            .filter(|m| m.start() < m.end())
+            .map(|m| (m.start(), m.end()))
+            .collect();
+        Some(FileHit {
+            path: path.to_path_buf(),
+            text: text.into_owned(),
+            marks,
+        })
     }
 }
 
@@ -505,5 +551,46 @@ mod tests {
             vec![(false, "nothing here")]
         );
         assert_eq!(split_word("", "total"), Vec::new());
+    }
+
+    fn path_hit(pattern: &str, opts: Options, path: &str) -> Option<FileHit> {
+        compile(pattern, opts)
+            .expect("pattern should compile")
+            .on_path(Path::new(path))
+    }
+
+    #[test]
+    fn a_path_matches_on_any_part_of_itself() {
+        let hit = path_hit("panes", Options::default(), "src/ui/panes.rs").expect("matches");
+        assert_eq!(hit.text, "src/ui/panes.rs");
+        assert_eq!(hit.marks, vec![(7, 12)]);
+        // A directory names the files under it, which is half of what anybody
+        // types into a box like this.
+        assert!(path_hit("src/ui", Options::default(), "src/ui/panes.rs").is_some());
+        assert!(path_hit("panes", Options::default(), "src/backend/tree.rs").is_none());
+    }
+
+    #[test]
+    fn the_three_toggles_mean_the_same_things_on_a_path() {
+        let cased = Options {
+            case: true,
+            ..Options::default()
+        };
+        assert!(path_hit("README", cased, "README.md").is_some());
+        assert!(path_hit("readme", cased, "README.md").is_none());
+        assert!(path_hit("readme", Options::default(), "README.md").is_some());
+
+        let re = Options {
+            regex: true,
+            ..Options::default()
+        };
+        assert!(path_hit(r"\.rs$", re, "src/main.rs").is_some());
+        assert!(path_hit(r"\.rs$", re, "src/main.rsx").is_none());
+    }
+
+    #[test]
+    fn a_path_marks_every_match_on_it() {
+        let hit = path_hit("ui", Options::default(), "src/ui/ui.rs").expect("matches");
+        assert_eq!(hit.marks, vec![(4, 6), (7, 9)]);
     }
 }

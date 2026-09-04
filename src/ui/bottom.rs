@@ -12,7 +12,7 @@ use dioxus::prelude::*;
 
 use crate::backend::highlight::Span;
 use crate::backend::scan;
-use crate::backend::search::Hit;
+use crate::backend::search::{FileHit, Hit};
 use crate::backend::symbols::Symbol;
 
 use super::app::St;
@@ -38,6 +38,7 @@ pub fn Bottom() -> Element {
             )
         }
         Panel::Results { title, hits, note } => (title.clone(), note.clone(), hit_list(st, hits)),
+        Panel::Files { title, hits } => (title.clone(), None, file_list(st, hits)),
         Panel::Defs { name, syms } => (
             format!("DEFINITIONS  {name} — {}", syms.len()),
             None,
@@ -141,6 +142,43 @@ fn hit_row(st: St, i: usize, hit: &Hit) -> Element {
             title: "{loc}",
             onclick: move |_| st.open_at(path.clone(), line),
             span { class: "hitloc", "{loc}" }
+            span { class: "hittext", {marked(&hit.text, &hit.marks)} }
+        }
+    }
+}
+
+fn file_list(st: St, hits: &[FileHit]) -> Element {
+    if hits.is_empty() {
+        return rsx! {
+            div { class: "panel-empty",
+                "No file of this repository is named that. The pattern is matched against the whole path, so a folder name finds what is inside it."
+            }
+        };
+    }
+    rsx! {
+        for (i , hit) in hits.iter().enumerate() {
+            {file_row(st, i, hit)}
+        }
+    }
+}
+
+/// One matching file: its name, then the path it matched on with the matching
+/// parts picked out — the same two columns a line hit has, saying the same two
+/// things in the same order.
+fn file_row(st: St, i: usize, hit: &FileHit) -> Element {
+    let path = hit.path.clone();
+    let name = hit
+        .path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| hit.text.clone());
+    rsx! {
+        div {
+            key: "{i}",
+            class: "hitrow",
+            title: "{hit.text}",
+            onclick: move |_| st.open_file(path.clone()),
+            span { class: "hitloc", "{name}" }
             span { class: "hittext", {marked(&hit.text, &hit.marks)} }
         }
     }

@@ -3539,6 +3539,12 @@ button { font-family: inherit; user-select: none; }
 .sopt:hover { color: var(--fg); background: var(--bg-3); }
 .sopt.on { color: var(--accent); background: var(--accent-soft); border-color: var(--accent-line); }
 
+/* `name` — the fourth toggle, which asks the other question: the files rather
+   than what is in them. A word rather than a glyph, and so wider than the
+   square three beside it, because there is no two-character way of writing
+   "by name" that anybody reads correctly the first time. */
+.sopt.wide { width: auto; padding: 0 6px; }
+
 /* ---------- results panel ---------- */
 
 /* Sits beside the panel's title: how far along a walk is, or what it could

@@ -478,7 +478,20 @@ pub enum BranchList {
     Idle,
     Loading,
     Ready(Box<Branches>),
+    /// The pages read so far in hand and the next one on its way — the list
+    /// stays on screen while it comes, since it is what was being read down.
+    More(Box<Branches>),
     Failed(String),
+}
+
+impl BranchList {
+    /// The branches it holds, if it holds any yet.
+    pub fn items(&self) -> Option<&Branches> {
+        match self {
+            BranchList::Ready(b) | BranchList::More(b) => Some(b),
+            _ => None,
+        }
+    }
 }
 
 /// What ran against the commit on screen — and how it went.
@@ -775,6 +788,10 @@ pub struct St {
     pub outline_open: Signal<bool>,
     pub search_text: Signal<String>,
     pub search_opts: Signal<Options>,
+    /// Whether the box is looking for files by name rather than for text
+    /// inside them — the fourth toggle beside the three that shape the
+    /// pattern. Per space, like the pattern itself.
+    pub search_files: Signal<bool>,
     /// What was wrong with the pattern, when it is a regular expression and it
     /// is wrong.
     pub search_error: Signal<Option<String>>,
@@ -2128,6 +2145,7 @@ pub fn App() -> Element {
             outline_open: root(false),
             search_text: root(h.search_text),
             search_opts: root(h.search_opts),
+            search_files: root(h.search_files),
             search_error: root(h.search_error),
 
             token: root(None),

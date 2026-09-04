@@ -103,6 +103,7 @@ pub const CMDS: &[Cmd] = &[
     cmd("gotoline", "Go to Line…", "⌃G"),
     cmd("find", "Find in File", "⌘F"),
     cmd("search", "Search in Repository", "⌘⇧F"),
+    cmd("searchnames", "Find Files by Name in Repository", ""),
     cmd("filter", "Filter Files in Explorer", "⌘⇧E"),
     cmd("nextchange", "Go to Next Change", "F7"),
     cmd("prevchange", "Go to Previous Change", "⇧F7"),
@@ -156,6 +157,13 @@ pub fn run(st: St, id: &str) {
             ide::focus_find();
         }
         "search" => ide::focus_search(),
+        // The same box, asked the other question. Set first and focused after,
+        // so the placeholder already says which question it is.
+        "searchnames" => {
+            let mut names = st.search_files;
+            names.set(true);
+            ide::focus_search();
+        }
         "filter" => ide::focus_filter(),
         "nextchange" => st.step_change(true),
         "prevchange" => st.step_change(false),

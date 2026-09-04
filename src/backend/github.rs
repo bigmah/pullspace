@@ -52,8 +52,12 @@ const MAX_ANNOTATION_PAGES: u32 = 2;
 /// asked for in one request — a second page of a list nobody scrolls to the
 /// bottom of is not worth the wait or the budget.
 pub const PR_PAGE: usize = 100;
-/// 100 branches a page. Three pages is three hundred of them — more than any
-/// list is read down, and the pane says when it stopped there.
+/// 100 branches a page — GitHub's own maximum, which is what every list here
+/// asks for.
+pub const BRANCH_PAGE: usize = 100;
+/// Three pages of them to begin with. More than any list is read down in one
+/// go, and the pane offers the next page rather than stopping there — see
+/// [`list_branches`].
 const MAX_BRANCH_PAGES: u32 = 3;
 /// How many commits of a branch's history arrive at once. A branch is not a
 /// pull request: there is no end to it, so it comes down a page at a time and
@@ -663,8 +667,12 @@ pub struct Branch {
 #[derive(Clone, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
 pub struct Branches {
     pub items: Vec<Branch>,
-    /// More branches than [`MAX_BRANCH_PAGES`] holds, and this says so.
+    /// More branches behind these, one request away — see [`list_branches`].
     pub truncated: bool,
+    /// How many pages of them are in `items`, so the next ask knows where to
+    /// carry on from.
+    #[serde(default)]
+    pub pages: u32,
 }
 
 #[derive(Deserialize)]
@@ -731,24 +739,33 @@ pub async fn matching_branches(token: &str, repo: &RepoRef, prefix: &str) -> Res
     Ok(raw.into_iter().filter_map(branch_of_ref).collect())
 }
 
-/// Every branch of a repository — what the pane lists, and what each row is a
+/// The branches of a repository — what the pane lists, and what each row is a
 /// way into.
 ///
 /// In GitHub's own order, which is by name, and the only one that costs
 /// nothing: sorting by when each was last pushed to would be a request per
-/// branch. The first [`MAX_BRANCH_PAGES`] pages of it, which on a repository
-/// with thousands of branches is a small part of the front — so a list that
-/// says it was cut short is one to search rather than to scroll, and
-/// [`matching_branches`] is what searches it.
-pub async fn list_branches(token: &str, repo: &RepoRef) -> Result<Branches> {
+/// branch.
+///
+/// `read` is how many pages the caller already holds. Zero — the first ask —
+/// takes [`MAX_BRANCH_PAGES`] of them together, since a pane that opens on a
+/// hundred names and a button is a pane that has stopped short of a question it
+/// could have answered. After that they come one at a time, on request, for as
+/// long as there are more: microsoft/vscode's forty-eight hundred branches are
+/// forty-eight pages, and nobody clicks through all of them — but the ones past
+/// the third are reachable, which is the whole difference between a long list
+/// and a truncated one. [`matching_branches`] is the other way to the same
+/// place, and the faster one when the name is known.
+pub async fn list_branches(token: &str, repo: &RepoRef, read: u32) -> Result<Branches> {
     let base = format!(
         "{API}/repos/{}/{}/branches",
         encode_segment(&repo.owner),
         encode_segment(&repo.name),
     );
-    let (raw, truncated): (Vec<RawBranch>, bool) = get_paged(token, &base, MAX_BRANCH_PAGES)
-        .await
-        .with_context(|| format!("reading the branches of {repo}"))?;
+    let count = if read == 0 { MAX_BRANCH_PAGES } else { 1 };
+    let (raw, pages, truncated): (Vec<RawBranch>, u32, bool) =
+        get_pages(token, &base, read + 1, count)
+            .await
+            .with_context(|| format!("reading the branches of {repo}"))?;
     Ok(Branches {
         items: raw
             .into_iter()
@@ -760,6 +777,7 @@ pub async fn list_branches(token: &str, repo: &RepoRef) -> Result<Branches> {
             })
             .collect(),
         truncated,
+        pages: read + pages,
     })
 }
 
@@ -1401,25 +1419,43 @@ fn comment_of(raw: RawComment, kind: CommentKind) -> Comment {
     }
 }
 
-/// Read a list endpoint page by page. The bool is true when there was more than
-/// `pages` worth — which every caller has to say something about, since a list
-/// silently cut off is a list read as complete.
+/// Read a list endpoint page by page from the beginning. The bool is true when
+/// there was more than `pages` worth — which every caller has to say something
+/// about, since a list silently cut off is a list read as complete.
 async fn get_paged<T: serde::de::DeserializeOwned>(
     token: &str,
     base: &str,
     pages: u32,
 ) -> Result<(Vec<T>, bool)> {
+    let (items, _, more) = get_pages(token, base, 1, pages).await?;
+    Ok((items, more))
+}
+
+/// The same, from page `from` rather than from the first — for a list that is
+/// read on and on rather than once, and so has to say where it got to.
+///
+/// The count of pages actually read comes back with them: a short page ends the
+/// walk early, and a caller that assumed it had read `count` of them would ask
+/// for the wrong page next time.
+async fn get_pages<T: serde::de::DeserializeOwned>(
+    token: &str,
+    base: &str,
+    from: u32,
+    count: u32,
+) -> Result<(Vec<T>, u32, bool)> {
     let mut out = Vec::new();
-    for page in 1..=pages {
+    let mut read = 0;
+    for page in from..from.saturating_add(count) {
         let url = format!("{base}?per_page=100&page={page}");
         let raw: Vec<T> = get_json(token, &url).await?;
         let full_page = raw.len() == 100;
         out.extend(raw);
+        read += 1;
         if !full_page {
-            return Ok((out, false));
+            return Ok((out, read, false));
         }
     }
-    Ok((out, true))
+    Ok((out, read, true))
 }
 
 /// A submitted review with nothing to say is just the envelope its line

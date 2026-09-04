@@ -159,6 +159,7 @@ held! {
     index: Index = Index::Off,
     search_text: String = String::new(),
     search_opts: Options = Options::default(),
+    search_files: bool = false,
     search_error: Option<String> = None,
 
     // --- GitHub, and what has been read out of it ---

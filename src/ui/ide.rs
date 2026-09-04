@@ -25,7 +25,7 @@ use dioxus::prelude::*;
 use crate::backend::github::TreeEntry;
 use crate::backend::highlight::{Span, highlight};
 use crate::backend::scan::{self, Flow, Walked};
-use crate::backend::search::{self, Hit, MAX_HITS, Matcher, Options};
+use crate::backend::search::{self, FileHit, Hit, MAX_FILE_HITS, MAX_HITS, Matcher, Options};
 use crate::backend::symbols::{self, Symbol};
 
 use crate::backend::prefs::Prefs;
@@ -63,6 +63,13 @@ pub enum Panel {
         hits: Vec<Hit>,
         /// Files the walk could not read, if any.
         note: Option<String>,
+    },
+    /// Files whose *names* matched, which is the other question the search box
+    /// asks. No walk stands behind this one — see [`find_files`] — so it never
+    /// passes through a [`Working`](Self::Working) of its own.
+    Files {
+        title: String,
+        hits: Vec<FileHit>,
     },
     /// More than one thing is called this. Which one was meant is a question
     /// this index cannot answer, so it asks.
@@ -265,7 +272,8 @@ fn counted(hits: &[Hit], walked: &Walked) -> String {
     )
 }
 
-/// Run the search box's contents over the repository.
+/// Run the search box's contents over the repository — over what is inside the
+/// files, or over what they are called, whichever the box is set to.
 pub fn search(st: St) {
     let query = st.search_text.peek().trim().to_string();
     let mut error = st.search_error;
@@ -279,8 +287,46 @@ pub fn search(st: St) {
     };
     error.set(None);
 
-    let title = format!("SEARCH  “{query}”");
-    start(st, title, matcher);
+    if *st.search_files.peek() {
+        return find_files(&st, &format!("FILES  “{query}”"), &matcher);
+    }
+    start(st, format!("SEARCH  “{query}”"), matcher);
+}
+
+/// Match the pattern against the name of every file of what is open.
+///
+/// Not a walk, and not spawned: the file list is the tree GitHub already handed
+/// over, so this is a few thousand string comparisons and it answers in the
+/// breath the Enter was pressed in. Which is also why it can answer for the
+/// files a clone left behind — nothing here reads a byte of any of them, so a
+/// repository too large to download can still be looked through by name.
+fn find_files(st: &St, title: &str, matcher: &Matcher) {
+    let mut hits: Vec<FileHit> = Vec::new();
+    for entry in head_files(st) {
+        if let Some(hit) = matcher.on_path(&entry.path) {
+            hits.push(hit);
+            if hits.len() >= MAX_FILE_HITS {
+                break;
+            }
+        }
+    }
+    let title = format!("{title} — {}", counted_files(&hits));
+    show(st, Panel::Files { title, hits });
+}
+
+/// "38 files", and whether that was all of them.
+fn counted_files(hits: &[FileHit]) -> String {
+    if hits.is_empty() {
+        return "no matches".to_string();
+    }
+    if hits.len() >= MAX_FILE_HITS {
+        return format!("first {MAX_FILE_HITS} files");
+    }
+    format!(
+        "{} file{}",
+        hits.len(),
+        if hits.len() == 1 { "" } else { "s" }
+    )
 }
 
 /// Every whole-word use of an identifier, anywhere in the repository.

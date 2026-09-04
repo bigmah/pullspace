@@ -7,6 +7,7 @@
 //! markup. See [`crate::backend::markdown`] for why that distinction is the
 //! whole design: a review is read next to a GitHub token in local storage.
 
+use std::collections::HashSet;
 use std::path::Path;
 
 use dioxus::prelude::*;
@@ -155,7 +156,7 @@ pub(super) async fn load_branches(st: St, repo: RepoRef) {
     let mut branches = st.branches;
     branches.set(BranchList::Loading);
     let token = st.api_token();
-    let got = github::list_branches(&token, &repo).await;
+    let got = github::list_branches(&token, &repo, 0).await;
 
     let still_open = st.workspace.peek().repo_ref() == Some(&repo);
     if !still_open {
@@ -165,6 +166,62 @@ pub(super) async fn load_branches(st: St, repo: RepoRef) {
         Ok(list) => BranchList::Ready(Box::new(list)),
         Err(e) => BranchList::Failed(format!("{e:#}")),
     });
+}
+
+/// One more page of them, on to the end of what is already listed.
+///
+/// The same shape as [`load_older`], and for the same reason: what is already
+/// read stays on screen while the next page comes, and stays there if it never
+/// does. Losing three hundred names that were fetched and scrolled to a request
+/// that failed would be the wrong way round.
+pub(super) async fn load_more_branches(st: St, repo: RepoRef) {
+    let mut branches = st.branches;
+    // Only from a settled list that says there is more behind it — which is
+    // also what keeps a double click from asking twice.
+    let held = match &*branches.peek() {
+        BranchList::Ready(held) if held.truncated && held.pages > 0 => held.clone(),
+        _ => return,
+    };
+    if st.workspace.peek().repo_ref() != Some(&repo) {
+        return;
+    }
+    let read = held.pages;
+    branches.set(BranchList::More(held));
+
+    let token = st.api_token();
+    let got = github::list_branches(&token, &repo, read).await;
+
+    // Still the same repository, and still the list this page was asked for —
+    // `⟳` pressed while it was in flight has already replaced it.
+    if st.workspace.peek().repo_ref() != Some(&repo) {
+        return;
+    }
+    let base = match &*branches.peek() {
+        BranchList::More(base) if base.pages == read => base.clone(),
+        _ => return,
+    };
+    match got {
+        Ok(next) => {
+            let mut all = base;
+            // A branch pushed between two pages shifts the window they are cut
+            // from, so the same name can arrive twice. Two rows for one branch
+            // is a duplicate key as well as a lie about the repository.
+            let seen: HashSet<String> = all.items.iter().map(|b| b.name.clone()).collect();
+            all.items
+                .extend(next.items.into_iter().filter(|b| !seen.contains(&b.name)));
+            all.truncated = next.truncated;
+            all.pages = next.pages;
+            branches.set(BranchList::Ready(all));
+        }
+        // The names already read are worth more than the error is: they go back
+        // up as they were, and the reason goes to the one line that reports
+        // what GitHub would not do.
+        Err(e) => {
+            branches.set(BranchList::Ready(base));
+            let mut fetch = st.fetch;
+            fetch.set(Fetch::Failed(format!("{e:#}")));
+        }
+    }
 }
 
 /// Fetch what ran against the commit on screen. Asked for rather than fetched
@@ -303,10 +360,7 @@ pub fn ConvPane() -> Element {
         Conversation::Ready(thread) => thread.comments.len(),
         _ => 0,
     };
-    let branches = match &*st.branches.read() {
-        BranchList::Ready(list) => Some(list.items.len()),
-        _ => None,
-    };
+    let branches = st.branches.read().items().map(|b| b.items.len());
     let commits = st.commits.read().items().map(|c| c.items.len());
     // The checks count carries the verdict with it: a red 14 beside the heading
     // is the answer to the question the tab is there for, before it is opened.
@@ -367,7 +421,10 @@ pub fn ConvPane() -> Element {
 
     let reloading = match showing {
         ConvTab::Talk => matches!(&*conv, Conversation::Loading),
-        ConvTab::Branches => matches!(&*st.branches.read(), BranchList::Loading),
+        ConvTab::Branches => matches!(
+            &*st.branches.read(),
+            BranchList::Loading | BranchList::More(_)
+        ),
         ConvTab::Commits => matches!(
             &*st.commits.read(),
             CommitList::Loading | CommitList::More(_)
@@ -817,7 +874,14 @@ pub(super) fn BranchesBody(
         // Only where the list is not the whole of what the repository has.
         // Where it is, filtering it is the complete answer and a request would
         // buy nothing.
-        let cut_short = matches!(&*st.branches.read(), BranchList::Ready(list) if list.truncated);
+        // Read through `items` rather than matching on `Ready`, so that a page
+        // arriving does not momentarily look like a complete list and throw
+        // away the lookup that is in flight against it.
+        let cut_short = st
+            .branches
+            .read()
+            .items()
+            .is_some_and(|list| list.truncated);
         async move {
             let repo = repo?;
             if typed.is_empty() || !cut_short {
@@ -836,7 +900,7 @@ pub(super) fn BranchesBody(
     });
 
     let held = st.branches.read();
-    let list = match &*held {
+    let (list, waiting) = match &*held {
         // Idle only ever lasts as long as it takes the effect in `App` to see
         // that this tab is up — the same as the commits beside it.
         BranchList::Idle | BranchList::Loading => {
@@ -854,7 +918,8 @@ pub(super) fn BranchesBody(
                 div { class: "panel-empty", "{repo} has no branches." }
             };
         }
-        BranchList::Ready(list) => list,
+        BranchList::Ready(list) => (list, false),
+        BranchList::More(list) => (list, true),
     };
 
     // By name is the order GitHub answers in, and on a repository with two
@@ -929,7 +994,27 @@ pub(super) fn BranchesBody(
             }
         } else if list.truncated && typed.is_empty() {
             div { class: "panel-empty",
-                "The first {list.items.len()} branches of {repo}. Type to look up the rest on GitHub."
+                "The first {list.items.len()} branches of {repo}, by name. Read on for more of them, or type to look one up on GitHub."
+            }
+        }
+        // And the way down the rest of the list, wherever it has got to.
+        // Under the filtered rows as much as under the whole list: what is
+        // typed is matched against the names in hand, so a page more of them
+        // is a page more to match against.
+        if list.truncated {
+            if waiting {
+                div { class: "panel-empty", "Loading more branches…" }
+            } else {
+                button {
+                    class: "convolder",
+                    title: "Read another {github::BRANCH_PAGE} branches of {repo} from GitHub",
+                    // Root scope: the page lands on a pane that may have been
+                    // scrolled, folded away or stepped out of in the meantime.
+                    onclick: move |_| {
+                        spawn_forever(load_more_branches(st, repo.clone()));
+                    },
+                    "Show more branches"
+                }
             }
         }
     }

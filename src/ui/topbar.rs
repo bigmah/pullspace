@@ -623,6 +623,11 @@ fn BranchSwitch(repo: RepoRef, branch: String) -> Element {
 /// Search across every file of what is open, and the readout for the index
 /// being built alongside it.
 ///
+/// Two questions rather than one: what is written in the files, and what the
+/// files are called. `name` beside the box is which of the two — because they
+/// are the same pattern, the same three toggles and the same panel underneath,
+/// and a second box for the second question would be a second box to find.
+///
 /// It takes the place of the bar's spacer rather than sitting next to one: the
 /// box grows into whatever the crumbs on the left have not used, up to a width
 /// past which a search field is just a long empty rectangle.
@@ -631,6 +636,7 @@ fn SearchBox() -> Element {
     let st = use_context::<St>();
     let mut text = st.search_text;
     let mut opts = st.search_opts;
+    let mut by_name = st.search_files;
 
     // Search walks the files of the commit on show. When there is no commit on
     // show, or GitHub would not say what is in it, the box carries the reason
@@ -651,13 +657,20 @@ fn SearchBox() -> Element {
     }
 
     let now = *st.search_opts.read();
+    let names = *by_name.read();
     let error = st.search_error.read().clone();
     let cls = if error.is_some() {
         "searchbox bad"
     } else {
         "searchbox"
     };
-    let why = error.unwrap_or_else(|| "Search every file of this repository  (⌘⇧F)".to_string());
+    let why = error.unwrap_or_else(|| {
+        if names {
+            "Find a file of this repository by its name  (⌘⇧F)".to_string()
+        } else {
+            "Search every file of this repository  (⌘⇧F)".to_string()
+        }
+    });
     let index_label = st.index.read().label();
 
     rsx! {
@@ -665,7 +678,7 @@ fn SearchBox() -> Element {
             input {
                 class: "{cls}",
                 r#type: "text",
-                placeholder: "Search in files…  (Enter)",
+                placeholder: if names { "Find a file by name…  (Enter)" } else { "Search in files…  (Enter)" },
                 title: "{why}",
                 spellcheck: "false",
                 autocomplete: "off",
@@ -684,6 +697,28 @@ fn SearchBox() -> Element {
                         ide::search(st);
                     }
                 },
+            }
+            button {
+                class: if names { "sopt wide on" } else { "sopt wide" },
+                title: if names {
+                    "Looking for files by name. Press again to search inside them instead"
+                } else {
+                    "Look for files by name rather than for text inside them — the pattern is matched against the whole path"
+                },
+                // Read out of the signal rather than off the render that drew
+                // this, the way the three beside it do: a second press before
+                // the redraw would otherwise set what was already set.
+                onclick: move |_| {
+                    let now = *by_name.peek();
+                    by_name.set(!now);
+                    // The two questions have different answers, and the one on
+                    // screen is the answer to the question that is no longer
+                    // being asked. Ask the new one rather than leave it there.
+                    if !st.search_text.peek().trim().is_empty() {
+                        ide::search(st);
+                    }
+                },
+                "name"
             }
             for (label, why, field) in ide::TOGGLES {
                 {

@@ -788,8 +788,13 @@ fn merged(local: Vec<Branch>, found: &[Branch]) -> Vec<Branch> {
 /// search once it is not: past a few hundred branches GitHub's list is a
 /// beginning rather than the whole, and what is typed goes to GitHub as well —
 /// see [`github::matching_branches`].
+///
+/// Drawn in two places: this pane, and the menu behind the branch crumb on the
+/// top bar — which is the same list of the same branches, asked the same two
+/// questions, and so is the same component rather than a second one that could
+/// drift from it.
 #[component]
-fn BranchesBody(
+pub(super) fn BranchesBody(
     repo: RepoRef,
     at: Option<String>,
     /// The branch a comparison started from a row here would be against — the

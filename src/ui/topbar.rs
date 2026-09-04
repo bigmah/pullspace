@@ -3,7 +3,8 @@ use dioxus::prelude::*;
 use crate::backend::auth::open_browser;
 use crate::backend::github::{CommitFrom, RepoRef};
 
-use super::app::{Account, Fetch, St, Workspace};
+use super::app::{Account, BranchList, Fetch, St, Workspace};
+use super::conversation::{BranchesBody, load_branches};
 use super::full;
 use super::github::{
     PrListBody, PrStates, browse_branch, browse_repo, open_commit, open_compare, open_pr,
@@ -79,11 +80,15 @@ pub fn TopBar() -> Element {
             close: "close PR",
             close_why: "Close this pull request",
         }),
+        // The branch is not in the trail: it is the crumb beside this one, so
+        // that the two lists a repository has — its pull requests and its
+        // branches — hang off the halves of the name they belong to. See
+        // [`BranchSwitch`].
         Workspace::Repo(v) => Some(Crumb {
             lead: v.repo.to_string(),
-            trail: format!("@ {}", v.branch),
+            trail: String::new(),
             why: format!(
-                "{} at {} — no pull request, just the code\nOpen one of this repository's pull requests. Its branches are in the pane on the right.",
+                "{} at {} — no pull request, just the code\nOpen one of this repository's pull requests. The branch beside this leads to the rest of them.",
                 v.repo, v.branch
             ),
             url: v.html_url(),
@@ -145,6 +150,13 @@ pub fn TopBar() -> Element {
         }),
     };
     let pr_target = workspace.pr().map(|p| (p.repo.clone(), p.number));
+    // The branch that is open, when a branch is what is open. Its own crumb,
+    // because a branch is the one thing on this bar with somewhere else to be:
+    // the other branches of the same repository, either to read or to be held
+    // up against.
+    let branch_target = workspace
+        .repo()
+        .map(|v| (v.repo.clone(), v.branch.clone()));
     // The branch as well as the repository: `⟳` on a branch means that branch
     // as it is now, not whatever the default one has moved to.
     let repo_target = workspace
@@ -310,6 +322,9 @@ pub fn TopBar() -> Element {
                     trail: crumb.trail,
                     why: crumb.why,
                 }
+                if let Some((repo, branch)) = branch_target {
+                    BranchSwitch { repo, branch }
+                }
                 if let Some((label, why)) = warn {
                     span { class: "prwarn", title: "{why}", "{label}" }
                 }
@@ -441,7 +456,13 @@ fn PrSwitch(lead: String, trail: String, why: String) -> Element {
                     open.set(!showing);
                 },
                 span { class: "prnum", "{lead}" }
-                span { class: "prcrumbtitle", "{trail}" }
+                // Nothing where the title goes when there is no title: a
+                // repository being browsed says what it is called on the crumb
+                // beside this one, and an empty span here is a gap in the
+                // middle of the name.
+                if !trail.is_empty() {
+                    span { class: "prcrumbtitle", "{trail}" }
+                }
                 span { class: "prchev", "▾" }
             }
             if *open.read() {
@@ -494,6 +515,106 @@ fn BrowseFoot(repo: RepoRef, current: bool) -> Element {
             span { class: "prmenufoot-label", "the repository itself" }
             if current {
                 span { class: "prhere", "reading" }
+            }
+        }
+    }
+}
+
+/// The branch crumb: which branch is being read, and every other branch of the
+/// repository behind it.
+///
+/// A branch is opened to answer one of two questions — what is on it, and what
+/// it has that another branch does not — and the second of those had nowhere to
+/// be asked from but the pane on the right. It is asked here instead, off the
+/// name of the branch it is about: pick a row to go and read it, or `⇄` to hold
+/// it up against the one already open.
+///
+/// The rows are the pane's rows. One component, drawn twice, so that the `⇄`
+/// here and the `⇄` in there cannot come to mean two different things.
+#[component]
+fn BranchSwitch(repo: RepoRef, branch: String) -> Element {
+    let st = use_context::<St>();
+    let mut open = use_signal(|| false);
+
+    // The branches are fetched on being asked for rather than with the
+    // repository, and this is the second place that asks — the pane on the
+    // right being the first. Idle is the whole of the test: a list already on
+    // its way, or already here, is *this* list, since the two ask for the
+    // branches of the same repository and both are emptied when it changes.
+    use_effect(move || {
+        if !*open.read() {
+            return;
+        }
+        let repo = st.workspace.read().repo_ref().cloned();
+        let Some(repo) = repo else {
+            return;
+        };
+        if !matches!(*st.branches.peek(), BranchList::Idle) {
+            return;
+        }
+        spawn_forever(load_branches(st, repo));
+    });
+
+    // A branch opened, or a comparison started, is a menu that has done what it
+    // was opened for. On the workspace rather than on the click, so the menu
+    // stays up — with the row still under the pointer — for as long as the
+    // fetching takes.
+    use_effect(move || {
+        let _ = st.workspace.read();
+        open.set(false);
+    });
+
+    let why = format!(
+        "Reading {repo} at {branch}\nEvery other branch of {repo} — one to read, or one to hold this one up against"
+    );
+
+    rsx! {
+        div {
+            class: "prswitch",
+            // Escape, wherever the focus is inside here — which may be the
+            // filter box in the menu as easily as the crumb above it.
+            onkeydown: move |e| {
+                if e.key() == Key::Escape && *open.peek() {
+                    e.stop_propagation();
+                    open.set(false);
+                }
+            },
+            button {
+                class: "prcrumb prcrumbbtn branchcrumb",
+                title: "{why}",
+                onclick: move |_| {
+                    let showing = *open.peek();
+                    open.set(!showing);
+                },
+                span { class: "branchat", "@" }
+                span { class: "branchname", "{branch}" }
+                span { class: "prchev", "▾" }
+            }
+            if *open.read() {
+                div {
+                    class: "menuback",
+                    onclick: move |_| open.set(false),
+                }
+                div { class: "prmenu branchmenu",
+                    div { class: "prmenuhdr",
+                        span { class: "ghlabel", "{repo}" }
+                        span { class: "spacer" }
+                        // What the second control on every row does, said once
+                        // at the top rather than guessed at from a glyph.
+                        span { class: "prmenunote", "⇄ compares against {branch}" }
+                    }
+                    div { class: "prmenubody",
+                        // Nothing is compared yet: what is open is a branch and
+                        // not a comparison, so every row but this one is
+                        // somewhere the ⇄ can still go.
+                        BranchesBody {
+                            repo: repo.clone(),
+                            at: Some(branch.clone()),
+                            against: Some(branch.clone()),
+                            compared: None,
+                        }
+                    }
+                }
             }
         }
     }

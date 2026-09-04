@@ -2109,6 +2109,26 @@ button { font-family: inherit; user-select: none; }
 .prmenufoot.on:hover { background: transparent; color: var(--fg-dim); }
 .prmenufoot-label::before { content: "◧ "; color: var(--fg-faint); }
 
+/* ---------- github: the branch switcher ---------- */
+
+/* The branch beside the repository's name, and its own crumb: the repository
+   leads to its pull requests, the branch to its branches. Quieter than the
+   name it hangs off, because it is the second half of where you are. */
+.branchcrumb { gap: 5px; }
+.branchcrumb .branchat { color: var(--fg-faint); font-size: 11px; flex: none; }
+.branchcrumb .branchname { color: var(--fg-dim); }
+.branchcrumb:hover .branchname { color: var(--fg); }
+
+/* Narrower than the pull request menu, because a branch name is shorter than a
+   title — and the rows come from the pane on the right with their own padding,
+   so the menu gives them the width and nothing else. */
+.branchmenu { width: 340px; }
+.branchmenu .prmenubody { padding: 0; }
+.branchmenu .convitem:last-child { border-bottom: none; }
+
+/* What the ⇄ on every row does, said once at the top of the list. */
+.prmenunote { font-size: 10.5px; color: var(--fg-faint); flex: none; }
+
 /* open · closed · all — one word each, and the one that is on is the one the
    list below is a list of. */
 .prstates { display: inline-flex; gap: 2px; flex: none; }

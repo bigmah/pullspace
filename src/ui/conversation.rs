@@ -14,8 +14,8 @@ use dioxus::prelude::*;
 
 use crate::backend::auth::open_browser;
 use crate::backend::github::{
-    self, Annotation, Branch, Check, Comment, CommentKind, CommitFrom, CommitSummary, PrHeader,
-    RepoRef, short_sha,
+    self, Annotation, Branch, Branches, Check, Comment, CommentKind, CommitFrom, CommitSummary,
+    PrHeader, RepoRef, short_sha,
 };
 use crate::backend::markdown;
 
@@ -813,9 +813,89 @@ const BRANCH_FILTER_AT: usize = 8;
 /// the only way the list can tell "there is no such branch" from "the answer
 /// for what you have typed is still on its way".
 #[derive(Clone, PartialEq)]
-struct Found {
+pub(super) struct Found {
     query: String,
     got: Result<Vec<Branch>, String>,
+}
+
+/// Look up, on GitHub, the branches past the listed ones that match what is
+/// typed into `filter`.
+///
+/// Only where the list is not the whole of what the repository has. Where it
+/// is, filtering it is the complete answer and a request would buy nothing — so
+/// the answer is `None`, and [`shown_branches`] filters the list alone.
+///
+/// Shared by every box over a list of branches: the pane on the right, and the
+/// pickers behind the branch chips on the top bar.
+pub(super) fn use_branch_lookup(filter: Signal<String>) -> Resource<Option<Found>> {
+    let st = use_context::<St>();
+    use_resource(move || {
+        // Read the dependencies here, in the synchronous part, so that a
+        // keystroke cancels the lookup in flight and starts the next one.
+        let typed = filter.read().trim().to_string();
+        let token = st.api_token();
+        let repo = st.workspace.read().repo_ref().cloned();
+        // Read through `items` rather than matching on `Ready`, so that a page
+        // arriving does not momentarily look like a complete list and throw
+        // away the lookup that is in flight against it.
+        let cut_short = st
+            .branches
+            .read()
+            .items()
+            .is_some_and(|list| list.truncated);
+        async move {
+            let repo = repo?;
+            if typed.is_empty() || !cut_short {
+                return None;
+            }
+            // The next keystroke drops this task where it stands, so nothing
+            // reaches GitHub until the typing stops.
+            super::compat::sleep(super::github::SEARCH_DEBOUNCE).await;
+            Some(Found {
+                got: github::matching_branches(&token, &repo, &typed)
+                    .await
+                    .map_err(|e| format!("{e:#}")),
+                query: typed,
+            })
+        }
+    })
+}
+
+/// What a box over a list of branches shows for what is typed into it.
+pub(super) struct Shown {
+    pub rows: Vec<Branch>,
+    /// GitHub would not answer the lookup. The rows in hand are still shown.
+    pub error: Option<String>,
+    /// The lookup for what is typed is still on its way.
+    pub looking: bool,
+}
+
+/// The branches in hand that match what is typed, and after them whatever
+/// GitHub found that was not in hand at all.
+///
+/// `found` is only trusted when it answers what is typed now: the box runs
+/// ahead of the lookup, and an answer to the last keystroke is not an answer.
+pub(super) fn shown_branches(list: &Branches, typed: &str, found: Option<Found>) -> Shown {
+    let needle = typed.to_lowercase();
+    let here: Vec<Branch> = list
+        .items
+        .iter()
+        .filter(|b| needle.is_empty() || b.name.to_lowercase().contains(&needle))
+        .cloned()
+        .collect();
+    let asked = list.truncated && !typed.is_empty();
+    let answer = found.filter(|f| f.query == typed);
+    let looking = asked && answer.is_none();
+    let (rows, error) = match answer.map(|f| f.got) {
+        Some(Ok(hits)) => (merged(here, &hits), None),
+        Some(Err(e)) => (here, Some(e)),
+        None => (here, None),
+    };
+    Shown {
+        rows,
+        error,
+        looking,
+    }
 }
 
 /// The rows to draw: what the list in hand matches, and after it whatever
@@ -846,10 +926,8 @@ fn merged(local: Vec<Branch>, found: &[Branch]) -> Vec<Branch> {
 /// beginning rather than the whole, and what is typed goes to GitHub as well —
 /// see [`github::matching_branches`].
 ///
-/// Drawn in two places: this pane, and the menu behind the branch crumb on the
-/// top bar — which is the same list of the same branches, asked the same two
-/// questions, and so is the same component rather than a second one that could
-/// drift from it.
+/// The same lookup is behind the pickers on the top bar's branch chips — see
+/// [`super::refbar`] — which ask a narrower question of the same list.
 #[component]
 pub(super) fn BranchesBody(
     repo: RepoRef,
@@ -865,39 +943,7 @@ pub(super) fn BranchesBody(
 
     // Before the early returns below: a hook skipped on one render and run on
     // the next is a hook dioxus counts wrong.
-    let found = use_resource(move || {
-        // Read the dependencies here, in the synchronous part, so that a
-        // keystroke cancels the lookup in flight and starts the next one.
-        let typed = filter.read().trim().to_string();
-        let token = st.api_token();
-        let repo = st.workspace.read().repo_ref().cloned();
-        // Only where the list is not the whole of what the repository has.
-        // Where it is, filtering it is the complete answer and a request would
-        // buy nothing.
-        // Read through `items` rather than matching on `Ready`, so that a page
-        // arriving does not momentarily look like a complete list and throw
-        // away the lookup that is in flight against it.
-        let cut_short = st
-            .branches
-            .read()
-            .items()
-            .is_some_and(|list| list.truncated);
-        async move {
-            let repo = repo?;
-            if typed.is_empty() || !cut_short {
-                return None;
-            }
-            // The next keystroke drops this task where it stands, so nothing
-            // reaches GitHub until the typing stops.
-            super::compat::sleep(super::github::SEARCH_DEBOUNCE).await;
-            Some(Found {
-                got: github::matching_branches(&token, &repo, &typed)
-                    .await
-                    .map_err(|e| format!("{e:#}")),
-                query: typed,
-            })
-        }
-    });
+    let found = use_branch_lookup(filter);
 
     let held = st.branches.read();
     let (list, waiting) = match &*held {
@@ -928,24 +974,13 @@ pub(super) fn BranchesBody(
     // with four.
     let searching = list.items.len() > BRANCH_FILTER_AT;
     let typed = filter.read().trim().to_string();
-    let needle = typed.to_lowercase();
-    let here: Vec<Branch> = list
-        .items
-        .iter()
-        .filter(|b| needle.is_empty() || b.name.to_lowercase().contains(&needle))
-        .cloned()
-        .collect();
-
     // And what GitHub had to say about the rest of them, when there is a rest
     // and somebody has typed something to look for in it.
-    let asked = list.truncated && !typed.is_empty();
-    let answer = found.cloned().flatten().filter(|f| f.query == typed);
-    let looking = asked && answer.is_none();
-    let (shown, error) = match answer.as_ref().map(|f| &f.got) {
-        Some(Ok(hits)) => (merged(here, hits), None),
-        Some(Err(e)) => (here, Some(e.clone())),
-        None => (here, None),
-    };
+    let Shown {
+        rows: shown,
+        error,
+        looking,
+    } = shown_branches(list, &typed, found.cloned().flatten());
 
     rsx! {
         if searching {

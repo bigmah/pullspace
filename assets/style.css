@@ -167,8 +167,9 @@ button { font-family: inherit; user-select: none; }
 /* ---------- spaces: the switcher behind the app's own name ---------- */
 
 /* The name is also the way to everything else this tab has open, so it is a
-   button. Quiet until pointed at, like the crumb beside it — what it mostly
-   does is say where you are. */
+   button, and it looks like one before it is pointed at: a tab holding several
+   reviews at once is the thing this app is for, and a name that only lit up
+   under the pointer was a name nobody thought to press. */
 .spswitch { position: relative; display: flex; flex: none; }
 
 .brandbtn {
@@ -177,8 +178,8 @@ button { font-family: inherit; user-select: none; }
   gap: 6px;
   height: var(--ctl);
   padding: 0 8px;
-  background: transparent;
-  border: 1px solid transparent;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
   border-radius: var(--r);
   cursor: pointer;
   transition: background-color var(--quick) var(--ease), border-color var(--quick) var(--ease);
@@ -471,38 +472,6 @@ button { font-family: inherit; user-select: none; }
   from { transform: rotate(0deg); }
   to { transform: rotate(360deg); }
 }
-
-/* ---------- chips ---------- */
-
-/* Leaving a pull request is a real action and the button for it should look
-   like one — a chip the same height as everything beside it, rather than a
-   link floating above the line they all sit on. */
-.closebtn {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  flex: none;
-  height: var(--ctl);
-  padding: 0 11px;
-  background: var(--bg-2);
-  border: 1px solid var(--line);
-  border-radius: var(--r);
-  color: var(--fg-dim);
-  cursor: pointer;
-  font-size: 11.5px;
-  white-space: nowrap;
-  transition: background-color var(--quick) var(--ease), color var(--quick) var(--ease),
-    border-color var(--quick) var(--ease);
-}
-
-.closebtn:hover {
-  background: var(--bg-3);
-  color: var(--deleted);
-  border-color: rgba(224, 108, 117, 0.45);
-}
-
-.closebtn:active { background: var(--bg-2); }
-.closebtn .closex { font-size: 12px; line-height: 1; opacity: 0.85; }
 
 /* ---------- layout ---------- */
 
@@ -2001,41 +1970,33 @@ button { font-family: inherit; user-select: none; }
 .ghchip.on { color: var(--added); border-color: rgba(79, 191, 122, 0.45); }
 .ghchip.bad { color: var(--deleted); border-color: rgba(224, 108, 117, 0.45); }
 
-/* Centred, not baseline-aligned: the number is monospaced and the title is
-   not, and two families do not share a baseline. */
-.prcrumb {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  min-width: 0;
-  flex: 0 1 auto;
-  overflow: hidden;
-}
-
 /* ---------- github: the pull request switcher ---------- */
 
-/* The crumb is also the way to everything else on this repository, so it is a
-   button — quiet until the pointer is on it, since what it mostly does is say
-   where you are. */
-.prswitch {
-  position: relative;
-  display: flex;
-  min-width: 0;
-  flex: 0 1 auto;
-}
+/* Always the same word, in the same place, with its menu hanging off it. */
+.prswitch { position: relative; display: flex; flex: none; }
 
-.prcrumbbtn {
-  background: transparent;
-  border: 1px solid transparent;
-  border-radius: var(--r);
+/* A button that opens something rather than a crumb that says something, so it
+   is drawn with its edge: it is the one control on the bar whose label never
+   changes, and the edge is what makes it read as one before it is pointed at. */
+.barbtn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
   height: var(--ctl);
-  padding: 0 8px;
+  padding: 0 9px 0 10px;
+  background: transparent;
+  border: 1px solid var(--line);
+  border-radius: var(--r);
+  color: var(--fg);
+  font-size: 12px;
+  white-space: nowrap;
   cursor: pointer;
-  text-align: left;
   transition: background-color var(--quick) var(--ease), border-color var(--quick) var(--ease);
 }
 
-.prcrumbbtn:hover { background: var(--bg-3); border-color: var(--line); }
+.barbtn:hover,
+.prswitch.on .barbtn { background: var(--bg-3); border-color: var(--fg-faint); }
 
 .prchev { color: var(--fg-faint); font-size: 9px; flex: none; }
 
@@ -2109,25 +2070,244 @@ button { font-family: inherit; user-select: none; }
 .prmenufoot.on:hover { background: transparent; color: var(--fg-dim); }
 .prmenufoot-label::before { content: "◧ "; color: var(--fg-faint); }
 
-/* ---------- github: the branch switcher ---------- */
+/* ---------- the ref bar: what is open, as the branches it is made of ---------- */
 
-/* The branch beside the repository's name, and its own crumb: the repository
-   leads to its pull requests, the branch to its branches. Quieter than the
-   name it hangs off, because it is the second half of where you are. */
-.branchcrumb { gap: 5px; }
-.branchcrumb .branchat { color: var(--fg-faint); font-size: 11px; flex: none; }
-.branchcrumb .branchname { color: var(--fg-dim); }
-.branchcrumb:hover .branchname { color: var(--fg); }
+/* Which repository. Quiet, because it is the one thing on the bar that does not
+   change as you move between a pull request, a comparison and a branch — and
+   it gives up its width before the chips after it do. */
+.refrepo {
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--fg-dim);
+  white-space: nowrap;
+  flex: 0 0.5 auto;
+  min-width: 12ch;
+  max-width: 30ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 
-/* Narrower than the pull request menu, because a branch name is shorter than a
-   title — and the rows come from the pane on the right with their own padding,
-   so the menu gives them the width and nothing else. */
-.branchmenu { width: 340px; }
-.branchmenu .prmenubody { padding: 0; }
-.branchmenu .convitem:last-child { border-bottom: none; }
+/* The chips do not shrink at all. Shrinking is shared out in proportion, so a
+   chip allowed to give up any width gives some up while the title beside it
+   still has plenty — and a seven-character sha missing two characters is a
+   worse bar than a title missing twenty. Narrow windows cap the names instead:
+   see the query at the end of this section. */
+.refs { display: flex; align-items: center; gap: 4px; flex: none; }
 
-/* What the ⇄ on every row does, said once at the top of the list. */
-.prmenunote { font-size: 10.5px; color: var(--fg-faint); flex: none; }
+.refspot { position: relative; display: flex; flex: none; }
+
+/* One ref: what it is, what it is called, and — where there is a second ref to
+   fall back to — the ✕ that drops it. Drawn as a filled chip rather than a
+   crumb, because where you are is exactly what this bar is for saying. */
+.refchip {
+  display: inline-flex;
+  align-items: stretch;
+  height: var(--ctl);
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  border-radius: var(--r);
+  transition: border-color var(--quick) var(--ease);
+}
+
+.refspot.on .refchip { border-color: var(--accent-line); }
+
+.refmain {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 8px 0 9px;
+  background: transparent;
+  border: 0;
+  border-radius: calc(var(--r) - 1px) 0 0 calc(var(--r) - 1px);
+  color: inherit;
+  /* The name's face, so that the `ch` its width is capped in is a character
+     of the name. */
+  font-family: var(--mono);
+  font-size: 12px;
+  cursor: pointer;
+  transition: background-color var(--quick) var(--ease);
+}
+
+.refmain:last-child { border-radius: calc(var(--r) - 1px); }
+.refmain:hover,
+.refspot.on .refmain { background: var(--bg-3); }
+
+/* A commit's chip has no list behind it. */
+.refmain.still { cursor: default; }
+.refmain.still:hover { background: transparent; }
+
+.reflabel { font-family: var(--sans); font-size: 11px; color: var(--fg-faint); }
+
+/* Monospaced, for the reason `.branchname` is: a ref is not prose. */
+.refname {
+  color: var(--fg);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+  max-width: 24ch;
+}
+
+.refx {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  flex: none;
+  padding: 0;
+  background: transparent;
+  border: 0;
+  border-left: 1px solid var(--border);
+  border-radius: 0 calc(var(--r) - 1px) calc(var(--r) - 1px) 0;
+  color: var(--fg-faint);
+  font-size: 10px;
+  cursor: pointer;
+  transition: background-color var(--quick) var(--ease), color var(--quick) var(--ease);
+}
+
+.refx:hover { background: var(--del-bg); color: var(--deleted); }
+
+/* The second ref, while there is not one yet. Dashed, because it is a slot
+   waiting for something rather than something already there. */
+.refadd {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex: none;
+  height: var(--ctl);
+  padding: 0 10px 0 8px;
+  background: transparent;
+  border: 1px dashed var(--line);
+  border-radius: var(--r);
+  color: var(--fg-dim);
+  font-size: 11.5px;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background-color var(--quick) var(--ease), color var(--quick) var(--ease),
+    border-color var(--quick) var(--ease);
+}
+
+.refadd:hover,
+.refspot.on .refadd {
+  border-style: solid;
+  border-color: var(--accent-line);
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.refplus { font-size: 14px; line-height: 1; }
+
+/* GitHub's arrow between the two: the right-hand ref goes into the left. On a
+   comparison it is also the swap, and says so when it is pointed at. */
+.refsep {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--r-sm);
+  color: var(--fg-faint);
+  font-size: 13px;
+  line-height: 1;
+}
+
+button.refsep { cursor: pointer; }
+button.refsep:hover { color: var(--fg); background: var(--bg-3); border-color: var(--line); }
+.refsep .swap { display: none; }
+button.refsep:hover .dir { display: none; }
+button.refsep:hover .swap { display: block; }
+
+/* A pull request's title, a comparison's count, a commit's subject — the
+   first thing on the bar to give up its width, down to about what a pull
+   request's number takes. */
+.reftrail {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 7ch;
+  flex: 0 4 auto;
+  margin-left: 4px;
+  font-size: 12px;
+  color: var(--fg-dim);
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+.reftrail .prnum { font-family: var(--mono); font-size: 11px; color: var(--accent); flex: none; }
+.reftrail .reftext { overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+
+/* Except a count, which is short and means nothing with its end cut off. */
+.reftrail.whole { flex: none; overflow: visible; }
+
+/* The list behind a chip: typed into first, read down second. */
+.refmenu { width: 360px; }
+
+.refhdr {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  padding: 9px 10px;
+  border-bottom: 1px solid var(--border);
+  flex: none;
+}
+
+.refhdr .ghinput { flex: none; height: 30px; }
+
+/* What picking a row will do — said before it is done, since on a pull request
+   it is leaving the pull request. */
+.refnote { font-size: 11px; color: var(--fg-faint); padding: 0 2px; line-height: 1.45; }
+
+.refbody { overflow-y: auto; padding: 4px; min-height: 0; }
+.refbody .gherror { margin: 4px; }
+.refbody .panel-empty { padding: 10px; }
+
+.refrow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 30px;
+  padding: 0 10px;
+  border-radius: var(--r-sm);
+  cursor: pointer;
+}
+
+.refrow .branchname { flex: 0 1 auto; }
+
+/* Where the keyboard is, and so what Enter opens. The pointer moves it too, so
+   the two never disagree about which row is lit. */
+.refrow.hi { background: var(--bg-3); }
+
+/* The ref this chip already is, and the one the other chip is: in the list,
+   because where they fall is part of reading it, but not somewhere to go. */
+.refrow.on { box-shadow: inset 2px 0 0 var(--accent); cursor: default; }
+.refrow.off { cursor: default; }
+.refrow.off .branchname { color: var(--fg-faint); }
+
+.reftag {
+  font-size: 10px;
+  color: var(--fg-faint);
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  padding: 0 5px;
+  flex: none;
+  white-space: nowrap;
+}
+
+.refrow.on .reftag { color: var(--accent); border-color: var(--accent-line); }
+
+.refsha { font-family: var(--mono); font-size: 10.5px; color: var(--fg-faint); flex: none; }
+
+.refbody .convolder { width: calc(100% - 8px); margin: 6px 4px 4px; }
+
+/* A laptop's width: the names give up theirs before the bar runs off the end. */
+@media (max-width: 1280px) {
+  .refname { max-width: 14ch; }
+  .refrepo { max-width: 18ch; }
+}
 
 /* open · closed · all — one word each, and the one that is on is the one the
    list below is a list of. */
@@ -2150,24 +2330,6 @@ button { font-family: inherit; user-select: none; }
 
 .pstate:hover { color: var(--fg); background: var(--bg-3); }
 .pstate.on { color: var(--accent); background: var(--accent-soft); border-color: var(--accent-line); }
-
-.prcrumb .prnum {
-  font-family: var(--mono);
-  font-size: 11px;
-  color: var(--accent);
-  flex: none;
-}
-
-/* What you are actually here to read, so it takes the foreground colour and
-   whatever width is going, rather than being the dimmer half of the pair. */
-.prcrumbtitle {
-  font-size: 12px;
-  color: var(--fg);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  min-width: 0;
-}
 
 .prwarn {
   color: var(--modified);

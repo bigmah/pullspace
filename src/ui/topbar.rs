@@ -1,31 +1,14 @@
 use dioxus::prelude::*;
 
 use crate::backend::auth::open_browser;
-use crate::backend::github::{CommitFrom, RepoRef};
+use crate::backend::github::RepoRef;
 
-use super::app::{Account, BranchList, Fetch, St, Workspace};
-use super::conversation::{BranchesBody, load_branches};
+use super::app::{Account, Fetch, St, Workspace};
 use super::full;
-use super::github::{
-    PrListBody, PrStates, browse_branch, browse_repo, open_commit, open_compare, open_pr,
-};
+use super::github::{PrListBody, PrStates, browse_repo};
 use super::ide;
+use super::refbar::{Go, Refs};
 use super::spaces::{Kind, SpaceSwitch};
-
-/// What the bar says is open, and what it offers to do about it.
-///
-/// One shape for all three, because the row is the same row: what this is
-/// called, what it is, a link to it on github.com, and the way out of it.
-struct Crumb {
-    /// The name — a pull request's number, a repository, a commit's sha.
-    lead: String,
-    /// And what it is called: the title, the branch, the subject line.
-    trail: String,
-    why: String,
-    url: String,
-    close: &'static str,
-    close_why: &'static str,
-}
 
 /// Bytes, in the units anybody would say them in.
 pub fn size_label(bytes: u64) -> String {
@@ -65,112 +48,20 @@ pub fn TopBar() -> Element {
         }
     };
 
-    // What is open, said the same way whichever of the three it is: a name, the
-    // thing it is called, somewhere on github.com, and the way out of it.
-    let crumb = match &*workspace {
-        Workspace::Empty => None,
-        Workspace::Pr(p) => Some(Crumb {
-            lead: format!("{} #{}", p.repo, p.number),
-            trail: p.title.clone(),
-            why: format!(
-                "{} #{} — {}\nSwitch to another pull request on this repository",
-                p.repo, p.number, p.title
-            ),
-            url: p.html_url.clone(),
-            close: "close PR",
-            close_why: "Close this pull request",
-        }),
-        // The branch is not in the trail: it is the crumb beside this one, so
-        // that the two lists a repository has — its pull requests and its
-        // branches — hang off the halves of the name they belong to. See
-        // [`BranchSwitch`].
-        Workspace::Repo(v) => Some(Crumb {
-            lead: v.repo.to_string(),
-            trail: String::new(),
-            why: format!(
-                "{} at {} — no pull request, just the code\nOpen one of this repository's pull requests. The branch beside this leads to the rest of them.",
-                v.repo, v.branch
-            ),
-            url: v.html_url(),
-            close: "close repo",
-            close_why: "Close this repository",
-        }),
-        // The sha is the name of a commit and the subject is what it is for.
-        Workspace::Commit(v) => Some(Crumb {
-            lead: v.commit.short().to_string(),
-            trail: v.commit.subject().to_string(),
-            why: match (v.pr(), v.branch()) {
-                (Some(pr), _) => format!(
-                    "{} — {}\nOne commit of #{}. Its other commits are in the pane on the right; the pull requests of {} are in here.",
-                    v.commit.short(),
-                    v.commit.subject(),
-                    pr.number,
-                    v.repo,
-                ),
-                (None, Some(branch)) => format!(
-                    "{} — {}\nOne commit of {branch}. The rest of that branch is in the pane on the right.",
-                    v.commit.short(),
-                    v.commit.subject(),
-                ),
-                (None, None) if v.compare().is_some() => {
-                    let (base, head) = v.compare().unwrap_or_default();
-                    format!(
-                        "{} — {}\nOne commit of {base}...{head}. The rest of that comparison is in the pane on the right.",
-                        v.commit.short(),
-                        v.commit.subject(),
-                    )
-                }
-                (None, None) => format!(
-                    "{} — {}\nOne commit of {}, diffed against the commit before it",
-                    v.commit.short(),
-                    v.commit.subject(),
-                    v.repo,
-                ),
-            },
-            url: v.html_url(),
-            close: "close commit",
-            close_why: "Close this commit",
-        }),
-        // The two names are what this is; how they stand is what it found.
-        Workspace::Compare(v) => Some(Crumb {
-            lead: format!("{}...{}", v.base, v.head),
-            trail: v.summary(),
-            why: format!(
-                "{}...{} — {}\nWhat {} has that {} does not, diffed against where the two last agreed. The branches of {} are in the pane on the right.",
-                v.base,
-                v.head,
-                v.summary(),
-                v.head,
-                v.base,
-                v.repo,
-            ),
-            url: v.html_url(),
-            close: "close compare",
-            close_why: "Close this comparison",
-        }),
-    };
-    let pr_target = workspace.pr().map(|p| (p.repo.clone(), p.number));
-    // The branch that is open, when a branch is what is open. Its own crumb,
-    // because a branch is the one thing on this bar with somewhere else to be:
-    // the other branches of the same repository, either to read or to be held
-    // up against.
-    let branch_target = workspace
-        .repo()
-        .map(|v| (v.repo.clone(), v.branch.clone()));
-    // The branch as well as the repository: `⟳` on a branch means that branch
-    // as it is now, not whatever the default one has moved to.
-    let repo_target = workspace
-        .repo()
-        .map(|v| (v.repo.clone(), v.branch.clone(), v.default));
-    let commit_target = workspace
-        .commit()
-        .map(|v| (v.repo.clone(), v.commit.sha.clone(), v.from.clone()));
-    // Both ways round: which of two branches is the base is a thing to get
-    // wrong, and the answer is one click rather than a trip back through the
-    // branch list.
-    let compare_target = workspace
-        .compare()
-        .map(|v| (v.repo.clone(), v.base.clone(), v.head.clone()));
+    // Which repository, and where what is open is on github.com. The rest of
+    // what is open — its branches, its title — is `Refs`, which reads the
+    // workspace for itself.
+    let open = workspace.repo_ref().map(|repo| {
+        let url = match &*workspace {
+            Workspace::Pr(p) => p.html_url.clone(),
+            Workspace::Repo(v) => v.html_url(),
+            Workspace::Commit(v) => v.html_url(),
+            Workspace::Compare(v) => v.html_url(),
+            Workspace::Empty => String::new(),
+        };
+        (repo.to_string(), url)
+    });
+    let reload = Go::reload(&workspace);
     let ws_open = workspace.is_open();
 
     let (reload_note, reload_error) = match &*st.fetch.read() {
@@ -316,15 +207,10 @@ pub fn TopBar() -> Element {
         div { class: "{bar_cls}",
             SpaceSwitch {}
             span { class: "{ws_cls}", title: "{ws_why}", "{ws_label}" }
-            if let Some(crumb) = crumb {
-                PrSwitch {
-                    lead: crumb.lead,
-                    trail: crumb.trail,
-                    why: crumb.why,
-                }
-                if let Some((repo, branch)) = branch_target {
-                    BranchSwitch { repo, branch }
-                }
+            if let Some((repo, url)) = open {
+                span { class: "refrepo", title: "{repo}", "{repo}" }
+                PrSwitch {}
+                Refs {}
                 if let Some((label, why)) = warn {
                     span { class: "prwarn", title: "{why}", "{label}" }
                 }
@@ -334,31 +220,11 @@ pub fn TopBar() -> Element {
                 if let Some(e) = reload_error {
                     span { class: "prwarn", title: "{e}", "reload failed" }
                 }
-                if let Some((repo, base, head)) = compare_target {
-                    button {
-                        class: "iconbtn",
-                        title: "Compare them the other way round — {head}...{base}",
-                        // Root scope: the swap replaces the bar this button is in.
-                        onclick: move |_| {
-                            spawn_forever(
-                                open_compare(st, repo.clone(), head.clone(), base.clone()),
-                            );
-                        },
-                        span { class: "glyph", "⇄" }
-                    }
-                }
                 button {
                     class: "iconbtn",
                     title: "Open on github.com",
-                    onclick: move |_| open_browser(&crumb.url),
+                    onclick: move |_| open_browser(&url),
                     "↗"
-                }
-                button {
-                    class: "closebtn",
-                    title: "{crumb.close_why}",
-                    onclick: move |_| st.close_workspace(),
-                    span { class: "closex", "✕" }
-                    "{crumb.close}"
                 }
             }
             SearchBox {}
@@ -394,27 +260,22 @@ pub fn TopBar() -> Element {
                 onclick: move |_| full::toggle(),
                 span { class: "glyph", "\u{26f6}" }
             }
-            RefreshButton {
-                pr_target,
-                repo_target,
-                commit_target,
-                reloading,
-                refresh_title,
-            }
+            RefreshButton { reload, reloading, refresh_title }
         }
     }
 }
 
-/// The crumb that says what is open — and, behind it, everything else that
-/// could be.
+/// The pull requests of the repository that is open — and, at the foot of the
+/// list, the repository itself.
 ///
 /// A review is rarely one pull request. The list of them is already here, kept
 /// alongside whatever is open (see the effect in [`App`](super::app::App)), so
-/// swapping is a click on the thing you are already looking at rather than a
-/// trip back through the picker. The repository itself is at the foot of the
-/// list, which is the way out of a pull request and into the code around it.
+/// swapping is one click from anywhere rather than a trip back through the
+/// picker. Always the same word in the same place: what is open is said by the
+/// chip before it and the branches after it, and a button whose label changed
+/// with every pull request is a button that has to be found again every time.
 #[component]
-fn PrSwitch(lead: String, trail: String, why: String) -> Element {
+fn PrSwitch() -> Element {
     let st = use_context::<St>();
     let mut open = use_signal(|| false);
 
@@ -427,6 +288,10 @@ fn PrSwitch(lead: String, trail: String, why: String) -> Element {
     // the picker can have moved on to another one without opening it — and a
     // list that says whose it is cannot be read as the wrong repository's.
     let listed = st.prs.read().as_ref().map(|l| l.repo.to_string());
+    let why = match &repo {
+        Some(repo) => format!("The pull requests of {repo}"),
+        None => "Pull requests".to_string(),
+    };
 
     // A swap that has landed is a menu that has done what it was opened for.
     // On the workspace rather than on the click, so the menu stays up — with
@@ -436,11 +301,13 @@ fn PrSwitch(lead: String, trail: String, why: String) -> Element {
         open.set(false);
     });
 
+    let showing = *open.read();
+
     rsx! {
         div {
-            class: "prswitch",
+            class: if showing { "prswitch on" } else { "prswitch" },
             // Escape, wherever the focus is inside here — which after the click
-            // that opened the menu is the crumb, above the menu rather than in
+            // that opened the menu is the button, above the menu rather than in
             // it, so the handler goes on the pair of them.
             onkeydown: move |e| {
                 if e.key() == Key::Escape && *open.peek() {
@@ -449,23 +316,16 @@ fn PrSwitch(lead: String, trail: String, why: String) -> Element {
                 }
             },
             button {
-                class: "prcrumb prcrumbbtn",
+                class: "barbtn",
                 title: "{why}",
                 onclick: move |_| {
                     let showing = *open.peek();
                     open.set(!showing);
                 },
-                span { class: "prnum", "{lead}" }
-                // Nothing where the title goes when there is no title: a
-                // repository being browsed says what it is called on the crumb
-                // beside this one, and an empty span here is a gap in the
-                // middle of the name.
-                if !trail.is_empty() {
-                    span { class: "prcrumbtitle", "{trail}" }
-                }
+                "Pull requests"
                 span { class: "prchev", "▾" }
             }
-            if *open.read() {
+            if showing {
                 // Everything else on the page, for as long as the menu is up:
                 // a click anywhere out here puts it away, which is the one
                 // thing every menu does.
@@ -515,106 +375,6 @@ fn BrowseFoot(repo: RepoRef, current: bool) -> Element {
             span { class: "prmenufoot-label", "the repository itself" }
             if current {
                 span { class: "prhere", "reading" }
-            }
-        }
-    }
-}
-
-/// The branch crumb: which branch is being read, and every other branch of the
-/// repository behind it.
-///
-/// A branch is opened to answer one of two questions — what is on it, and what
-/// it has that another branch does not — and the second of those had nowhere to
-/// be asked from but the pane on the right. It is asked here instead, off the
-/// name of the branch it is about: pick a row to go and read it, or `⇄` to hold
-/// it up against the one already open.
-///
-/// The rows are the pane's rows. One component, drawn twice, so that the `⇄`
-/// here and the `⇄` in there cannot come to mean two different things.
-#[component]
-fn BranchSwitch(repo: RepoRef, branch: String) -> Element {
-    let st = use_context::<St>();
-    let mut open = use_signal(|| false);
-
-    // The branches are fetched on being asked for rather than with the
-    // repository, and this is the second place that asks — the pane on the
-    // right being the first. Idle is the whole of the test: a list already on
-    // its way, or already here, is *this* list, since the two ask for the
-    // branches of the same repository and both are emptied when it changes.
-    use_effect(move || {
-        if !*open.read() {
-            return;
-        }
-        let repo = st.workspace.read().repo_ref().cloned();
-        let Some(repo) = repo else {
-            return;
-        };
-        if !matches!(*st.branches.peek(), BranchList::Idle) {
-            return;
-        }
-        spawn_forever(load_branches(st, repo));
-    });
-
-    // A branch opened, or a comparison started, is a menu that has done what it
-    // was opened for. On the workspace rather than on the click, so the menu
-    // stays up — with the row still under the pointer — for as long as the
-    // fetching takes.
-    use_effect(move || {
-        let _ = st.workspace.read();
-        open.set(false);
-    });
-
-    let why = format!(
-        "Reading {repo} at {branch}\nEvery other branch of {repo} — one to read, or one to hold this one up against"
-    );
-
-    rsx! {
-        div {
-            class: "prswitch",
-            // Escape, wherever the focus is inside here — which may be the
-            // filter box in the menu as easily as the crumb above it.
-            onkeydown: move |e| {
-                if e.key() == Key::Escape && *open.peek() {
-                    e.stop_propagation();
-                    open.set(false);
-                }
-            },
-            button {
-                class: "prcrumb prcrumbbtn branchcrumb",
-                title: "{why}",
-                onclick: move |_| {
-                    let showing = *open.peek();
-                    open.set(!showing);
-                },
-                span { class: "branchat", "@" }
-                span { class: "branchname", "{branch}" }
-                span { class: "prchev", "▾" }
-            }
-            if *open.read() {
-                div {
-                    class: "menuback",
-                    onclick: move |_| open.set(false),
-                }
-                div { class: "prmenu branchmenu",
-                    div { class: "prmenuhdr",
-                        span { class: "ghlabel", "{repo}" }
-                        span { class: "spacer" }
-                        // What the second control on every row does, said once
-                        // at the top rather than guessed at from a glyph.
-                        span { class: "prmenunote", "⇄ compares against {branch}" }
-                    }
-                    div { class: "prmenubody",
-                        // Nothing is compared yet: what is open is a branch and
-                        // not a comparison, so every row but this one is
-                        // somewhere the ⇄ can still go.
-                        BranchesBody {
-                            repo: repo.clone(),
-                            at: Some(branch.clone()),
-                            against: Some(branch.clone()),
-                            compared: None,
-                        }
-                    }
-                }
             }
         }
     }
@@ -760,17 +520,11 @@ fn SearchBox() -> Element {
     }
 }
 
-/// `⟳`. Reloading means fetching the pull request again: a push moves the head
+/// `⟳`. Reloading means fetching what is open again: a push moves the head
 /// commit, and the changed-file list, the tree and the cached contents all hang
 /// off it.
 #[component]
-fn RefreshButton(
-    pr_target: Option<(RepoRef, u64)>,
-    repo_target: Option<(RepoRef, String, bool)>,
-    commit_target: Option<(RepoRef, String, CommitFrom)>,
-    reloading: bool,
-    refresh_title: &'static str,
-) -> Element {
+fn RefreshButton(reload: Option<Go>, reloading: bool, refresh_title: &'static str) -> Element {
     let st = use_context::<St>();
     let cls = if reloading {
         "iconbtn lg spin"
@@ -782,32 +536,11 @@ fn RefreshButton(
         button {
             class: cls,
             title: "{refresh_title}",
-            disabled: reloading,
-            onclick: move |_| match (
-                pr_target.clone(),
-                repo_target.clone(),
-                commit_target.clone(),
-            ) {
-                // Root scope: reloading replaces the workspace, and this button
-                // is re-rendered underneath the task that did it.
-                (Some((repo, number)), ..) => {
-                    spawn_forever(open_pr(st, repo, number));
+            disabled: reloading || reload.is_none(),
+            onclick: move |_| {
+                if let Some(go) = reload.clone() {
+                    go.run(st);
                 }
-                // The default branch is looked up again rather than taken as
-                // read: it is a setting on the repository, and reloading is
-                // when a change to one shows up.
-                (_, Some((repo, _, true)), _) => {
-                    spawn_forever(browse_repo(st, repo));
-                }
-                (_, Some((repo, branch, false)), _) => {
-                    spawn_forever(browse_branch(st, repo, branch, None));
-                }
-                (.., Some((repo, sha, from))) => {
-                    spawn_forever(open_commit(st, repo, sha, from));
-                }
-                // The bar only exists while something is open, so one of the
-                // three targets above is always there to take the click.
-                _ => {}
             },
             // The glyph turns, not the button: a spinning hover square is not
             // what anyone means by "it is working".

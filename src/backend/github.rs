@@ -828,6 +828,30 @@ struct RawRef {
     #[serde(rename = "ref")]
     name: String,
     sha: String,
+    /// Which repository the ref is in. Null on the head of a pull request whose
+    /// fork has since been deleted.
+    #[serde(default)]
+    repo: Option<RawRefRepo>,
+}
+
+#[derive(Deserialize)]
+struct RawRefRepo {
+    full_name: String,
+}
+
+/// The fork a pull request's head is in, when it is not the repository the pull
+/// request is against.
+///
+/// `None` for a branch of that repository — and for a fork that has been
+/// deleted, which leaves nowhere else to read the branch from. GitHub's names
+/// are not case-sensitive, so neither is the comparison.
+fn fork_of(base: &RepoRef, head: Option<&RawRefRepo>) -> Option<RepoRef> {
+    let (owner, name) = head?.full_name.split_once('/')?;
+    let same = owner.eq_ignore_ascii_case(&base.owner) && name.eq_ignore_ascii_case(&base.name);
+    (!same && !owner.is_empty() && !name.is_empty()).then(|| RepoRef {
+        owner: owner.to_string(),
+        name: name.to_string(),
+    })
 }
 
 #[derive(Deserialize)]
@@ -1162,6 +1186,10 @@ pub struct PrDetail {
     pub draft: bool,
     pub html_url: String,
     pub head_ref: String,
+    /// The fork `head_ref` is a branch of, when it is not `repo` — see
+    /// [`head_label`](Self::head_label).
+    #[serde(default)]
+    pub head_repo: Option<RepoRef>,
     pub base_ref: String,
     /// The merge base — the commit GitHub's "Files changed" tab diffs against.
     pub base_sha: String,
@@ -1230,6 +1258,16 @@ impl PrDetail {
 
     pub fn blob_key_of(&self, f: &PrFile) -> Cow<'_, str> {
         blob_key_of_in(&self.tree, &self.base_tree, f)
+    }
+
+    /// The head, named the way the repository it is against has to name it:
+    /// the branch, or `owner:branch` for a branch of a fork — GitHub's own
+    /// spelling, and what its compare endpoint takes.
+    pub fn head_label(&self) -> String {
+        match &self.head_repo {
+            Some(fork) => format!("{}:{}", fork.owner, self.head_ref),
+            None => self.head_ref.clone(),
+        }
     }
 
     /// The half of a pull request that is worth keeping hold of while one of
@@ -1303,6 +1341,7 @@ pub async fn load_pr(token: &str, repo: &RepoRef, number: u64) -> Result<PrDetai
 
     let base_sha = compare.merge_base_commit.sha;
     let head_sha = pr.head.sha;
+    let head_repo = fork_of(repo, pr.head.repo.as_ref());
     Ok(PrDetail {
         repo: repo.clone(),
         number: pr.number,
@@ -1313,6 +1352,7 @@ pub async fn load_pr(token: &str, repo: &RepoRef, number: u64) -> Result<PrDetai
         draft: pr.draft,
         html_url: pr.html_url,
         head_ref: pr.head.name,
+        head_repo,
         base_ref: pr.base.name,
         tree: Snapshot::unknown(repo, &head_sha),
         base_tree: Snapshot::unknown(repo, &base_sha),
@@ -2909,6 +2949,7 @@ mod tests {
             draft: false,
             html_url: String::new(),
             head_ref: String::new(),
+            head_repo: None,
             base_ref: String::new(),
             base_sha: String::new(),
             head_sha: String::new(),
@@ -3159,10 +3200,12 @@ mod tests {
             head: RawRef {
                 name: "feature".to_string(),
                 sha: String::new(),
+                repo: None,
             },
             base: RawRef {
                 name: "main".to_string(),
                 sha: String::new(),
+                repo: None,
             },
         };
         let open = summary_of(raw("open", false));
@@ -3437,6 +3480,36 @@ mod tests {
         )
         .unwrap();
         assert_eq!(raw.body.unwrap_or_default(), "");
+    }
+
+    #[test]
+    fn a_head_in_a_fork_is_named_by_the_fork() {
+        let raw: RawPr = serde_json::from_str(
+            r#"{"number":1,"title":"t","state":"open","updated_at":"t","html_url":"u",
+                "head":{"ref":"fix","sha":"1","repo":{"full_name":"someone/Dioxus"}},
+                "base":{"ref":"main","sha":"2","repo":{"full_name":"DioxusLabs/dioxus"}}}"#,
+        )
+        .unwrap();
+        let base = RepoRef {
+            owner: "DioxusLabs".to_string(),
+            name: "dioxus".to_string(),
+        };
+        let fork = fork_of(&base, raw.head.repo.as_ref()).expect("another owner is a fork");
+        assert_eq!(fork.to_string(), "someone/Dioxus");
+        // The base's own repository is not a fork of itself, whatever the case.
+        assert_eq!(fork_of(&base, raw.base.repo.as_ref()), None);
+        let shouted = RawRefRepo {
+            full_name: "dioxuslabs/DIOXUS".to_string(),
+        };
+        assert_eq!(fork_of(&base, Some(&shouted)), None);
+        // And a deleted fork leaves nothing to name.
+        assert_eq!(fork_of(&base, None), None);
+
+        let mut pr = pr_with(Snapshot::default(), Snapshot::default(), Vec::new());
+        pr.head_ref = "fix".to_string();
+        assert_eq!(pr.head_label(), "fix");
+        pr.head_repo = Some(fork);
+        assert_eq!(pr.head_label(), "someone:fix");
     }
 
     #[test]

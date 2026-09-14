@@ -11,7 +11,15 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { DEFAULT_BASE, handoffUrl, isGithub, normalizeBase } from "./handoff.js";
+import {
+  DEFAULT_BASE,
+  handoffUrl,
+  isGithub,
+  isPullspace,
+  normalizeBase,
+  originPattern,
+  pullspaceTab,
+} from "./handoff.js";
 
 test("the escaping is what route.rs undoes", () => {
   const url = handoffUrl(
@@ -89,4 +97,64 @@ test("the settings the options page offers all produce an address", () => {
     assert.equal(url.searchParams.get("url"), "https://github.com/o/r/tree/feat/thing/src");
     assert.ok(url.toString().startsWith(base));
   }
+});
+
+test("a pullspace tab is the page at the base, at any route", () => {
+  const base = "https://x.dev/app/";
+  for (const yes of [
+    "https://x.dev/app/",
+    "https://x.dev/app/#/o/r/pull/1",
+    "https://x.dev/app/index.html#/o/r",
+    // Mid-handoff, before the app has taken the field back out.
+    "https://x.dev/app/?url=https%3A%2F%2Fgithub.com%2Fo%2Fr",
+  ]) {
+    assert.ok(isPullspace(base, yes), yes);
+  }
+  for (const no of [
+    // Something else on the same host.
+    "https://x.dev/",
+    "https://x.dev/app/other.html",
+    "https://x.dev/application/",
+    "http://x.dev/app/",
+    "https://x.dev:8443/app/",
+    "https://github.com/o/r",
+    // What a tab looks like when Chrome has not shown this extension its address.
+    undefined,
+    "",
+  ]) {
+    assert.ok(!isPullspace(base, no), `${no}`);
+  }
+  // A dev server is its port, not every port on the machine.
+  assert.ok(isPullspace("localhost:8123", "http://localhost:8123/#/o/r"));
+  assert.ok(!isPullspace("localhost:8123", "http://localhost:8080/#/o/r"));
+});
+
+test("the tab to reuse is in this window, and the one looked at last", () => {
+  const base = "https://x.dev/";
+  const tab = (id, windowId, lastAccessed, url = "https://x.dev/#/o/r") => ({
+    id,
+    windowId,
+    lastAccessed,
+    url,
+  });
+  const tabs = [
+    tab(1, 1, 100),
+    tab(2, 2, 900),
+    tab(3, 1, 500),
+    tab(4, 1, 999, "https://github.com/o/r"),
+    // No address: not one Chrome let this extension see, so not a candidate.
+    { id: 5, windowId: 1, lastAccessed: 1000 },
+  ];
+  assert.equal(pullspaceTab(base, tabs, 1)?.id, 3);
+  assert.equal(pullspaceTab(base, tabs, 2)?.id, 2);
+  // None in this window: the most recent anywhere, rather than a new tab.
+  assert.equal(pullspaceTab(base, tabs, 7)?.id, 2);
+  assert.equal(pullspaceTab(base, [tab(4, 1, 1, "https://github.com/o/r")], 1), undefined);
+  assert.equal(pullspaceTab(base, [], 1), undefined);
+});
+
+test("the permission asked for is the base's host, port and all", () => {
+  assert.equal(originPattern(DEFAULT_BASE), "https://pullspace.dev/*");
+  assert.equal(originPattern("https://x.dev/app/"), "https://x.dev/*");
+  assert.equal(originPattern("localhost:8123"), "http://localhost:8123/*");
 });

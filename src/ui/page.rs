@@ -4,7 +4,7 @@
 //! same reason the stylesheet is `include_str!` rather than a file beside it —
 //! `dx build` leaves an index.html, a .wasm and a .js, and nothing about this
 //! app should add a fourth thing to serve. The icon is therefore a data URI:
-//! 300 bytes of SVG, built at startup, with no request behind it.
+//! a few bytes of SVG, built at startup, with no request behind it.
 //!
 //! The name is worth setting for a different reason. A review of four pull
 //! requests is four tabs, and four tabs all called "pullspace" is a row of
@@ -16,16 +16,13 @@ use super::app::{St, Workspace};
 
 /// The icon, as the file it would have been.
 ///
-/// A diff, drawn small enough to survive being 16 pixels wide: the gutter down
-/// the left, and three lines of a file — one added, one removed, one that
-/// stayed. Single quotes throughout, because [`data_uri`] has enough to encode
-/// without them.
-const ICON: &str = "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'>\
-<rect width='32' height='32' rx='7' fill='#17181d'/>\
-<rect x='5' y='6' width='3' height='20' rx='1.5' fill='#5c9cf5'/>\
-<rect x='12' y='7' width='15' height='4' rx='2' fill='#4fbf7a'/>\
-<rect x='12' y='14' width='11' height='4' rx='2' fill='#e06c75'/>\
-<rect x='12' y='21' width='15' height='4' rx='2' fill='#848a9c'/>\
+/// A telescope — an emoji set as text, so it is drawn by whatever emoji font
+/// the reader's system has, which is also why it needs no image of its own.
+/// Centred on both axes rather than sat on a baseline, which lands it a
+/// different distance from the top in every one of those fonts. Single quotes
+/// throughout, because [`data_uri`] has enough to encode without them.
+const ICON: &str = "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'>\
+<text x='50' y='50' font-size='88' text-anchor='middle' dominant-baseline='central'>\u{1F52D}</text>\
 </svg>";
 
 /// SVG as a URL.
@@ -102,12 +99,15 @@ mod tests {
     fn the_icon_survives_being_a_url() {
         let uri = data_uri(ICON);
         assert!(uri.starts_with("data:image/svg+xml,%3Csvg"), "{uri}");
-        // The ones that would split the URL, end the attribute, or — the one
-        // that actually happens, since every colour in there has one — start a
+        // The ones that would split the URL, end the attribute, or start a
         // fragment halfway through the picture.
         for bad in ['<', '>', '#', ' ', '"'] {
             assert!(!uri.contains(bad), "{bad:?} left raw in {uri}");
         }
+        // The emoji is four bytes of UTF-8, and each goes over as an escape of
+        // its own — a raw one is not a URL.
+        assert!(uri.is_ascii(), "{uri}");
+        assert!(uri.contains("%F0%9F%94%AD"), "{uri}");
         // And every escape is a whole escape.
         let bytes = uri.as_bytes();
         for (i, _) in uri.match_indices('%') {

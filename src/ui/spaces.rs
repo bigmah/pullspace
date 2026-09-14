@@ -52,7 +52,7 @@ use crate::backend::auth::open_tab;
 use crate::backend::clone::Progress;
 use crate::backend::difftool::Expansion;
 use crate::backend::github::PrState;
-use crate::backend::route::{self, Place, Route, Target};
+use crate::backend::route::{self, Link, Place, Route, Target};
 use crate::backend::search::Options;
 use crate::backend::store;
 use crate::backend::tree::ChangeKind;
@@ -749,6 +749,46 @@ pub fn wake(spaces: &mut [Space], on: u32) {
     }
 }
 
+/// Which space a link handed over from outside the page opens into — making a
+/// new one for it if none will do.
+///
+/// The extension sends a link to a pullspace tab that is already open by
+/// loading it again on `?url=`, and whatever that tab had on screen is
+/// somebody's review rather than a blank to write over. So the link goes to
+/// the space that already has exactly it open, or to the one on screen if that
+/// has nothing in it, or to a new one beside it — where [`open_new`] would have
+/// put it.
+///
+/// A `blob/…` link never matches a space: which branch it is on is not known
+/// until GitHub is asked, so no space can be said to have it open already.
+pub fn make_room(spaces: &mut Vec<Space>, on: u32, handed: &Link) -> u32 {
+    let points_at = |space: &Space| match &space.state {
+        State::Away(route) => route.at.clone(),
+        State::Live(held) => held.workspace.target(),
+    };
+    if let Link::At(route) = handed
+        && let Some(space) = spaces.iter().find(|s| points_at(s) == route.at)
+    {
+        return space.id;
+    }
+    let Some(at) = spaces.iter().position(|s| s.id == on) else {
+        return on;
+    };
+    if points_at(&spaces[at]) == Target::Home {
+        return on;
+    }
+    let id = spaces.iter().map(|s| s.id).max().map_or(1, |n| n + 1);
+    spaces.insert(
+        at + 1,
+        Space {
+            id,
+            card: Card::blank(),
+            state: State::Live(Box::new(Held::fresh())),
+        },
+    );
+    id
+}
+
 // ------------------------------------------------------------- the switcher
 
 /// The name in the corner, and everything else open behind it.
@@ -1059,6 +1099,74 @@ mod tests {
         // An `on` naming a space that is not in the list.
         let (spaces, on) = read(Some(raw.replace(r#""on":5"#, r#""on":99"#)));
         assert_eq!(on, spaces[0].id);
+    }
+
+    /// A link handed to a tab that already has reviews open is a review more,
+    /// not a replacement for the one on screen.
+    #[test]
+    fn a_handed_over_link_gets_a_space_of_its_own() {
+        let repo = crate::backend::github::RepoRef {
+            owner: "o".to_string(),
+            name: "r".to_string(),
+        };
+        let pr = |n: u64| Link::At(Route::to(Target::Pr(repo.clone(), n)));
+        let saved = |on: u32, rows: &[(u32, &str)]| {
+            let rows: Vec<String> = rows
+                .iter()
+                .map(|(id, at)| {
+                    format!(
+                        r#"{{"id":{id},"at":"{at}","card":{{"kind":"Pr","lead":"","trail":"","note":""}}}}"#
+                    )
+                })
+                .collect();
+            read(Some(format!(
+                r#"{{"on":{on},"spaces":[{}]}}"#,
+                rows.join(",")
+            )))
+        };
+
+        // Beside the one on screen, which is left as the link it was.
+        let (mut spaces, on) = saved(4, &[(4, "#/o/r/pull/4"), (9, "#/o/r/pull/9")]);
+        let into = make_room(&mut spaces, on, &pr(7));
+        assert_eq!(into, 10, "a new id, past every one in use");
+        let ids: Vec<u32> = spaces.iter().map(|s| s.id).collect();
+        assert_eq!(ids, [4, 10, 9]);
+        wake(&mut spaces, into);
+        assert!(spaces[1].here());
+        assert!(
+            matches!(&spaces[0].state, State::Away(r) if r.at == Target::Pr(repo.clone(), 4)),
+            "the review that was on screen is still in the list"
+        );
+
+        // The space that already has it, wherever it is — and nothing added.
+        let (mut spaces, on) = saved(4, &[(4, "#/o/r/pull/4"), (9, "#/o/r/pull/9")]);
+        assert_eq!(make_room(&mut spaces, on, &pr(9)), 9);
+        assert_eq!(spaces.len(), 2);
+
+        // A space with nothing in it has nothing to lose.
+        let (mut spaces, on) = saved(3, &[(4, "#/o/r/pull/4"), (3, "#/")]);
+        assert_eq!(make_room(&mut spaces, on, &pr(7)), 3);
+        assert_eq!(spaces.len(), 2);
+        // And a tab with no session at all is one of those.
+        let (mut spaces, on) = read(None);
+        assert_eq!(make_room(&mut spaces, on, &pr(7)), on);
+        assert_eq!(spaces.len(), 1);
+
+        // A `blob/…` link is never already open, even in the space reading
+        // that very repository: its branch is still a question.
+        let (mut spaces, on) = saved(4, &[(4, "#/o/r")]);
+        let blob = Link::Ref {
+            repo: repo.clone(),
+            rest: "main/src/main.rs".to_string(),
+            line: None,
+        };
+        assert_eq!(make_room(&mut spaces, on, &blob), 5);
+
+        // A github.com page with nothing here to show goes to an empty space if
+        // there is one, rather than making another.
+        let (mut spaces, on) = saved(4, &[(4, "#/o/r/pull/4"), (6, "#/")]);
+        assert_eq!(make_room(&mut spaces, on, &Link::At(Route::home())), 6);
+        assert_eq!(spaces.len(), 2);
     }
 
     #[test]

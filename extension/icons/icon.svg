@@ -1,8 +1,9 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
-  <!-- The app's own favicon, as the file it never needed to be: see
-       `src/ui/page.rs`, where the same drawing is built into a data URI. A diff
-       small enough to survive being 16 pixels wide — the gutter down the left,
-       and three lines of a file: one added, one removed, one that stayed. -->
+  <!-- What the .pngs beside this were drawn from. A diff small enough to
+       survive being 16 pixels wide — the gutter down the left, and three lines
+       of a file: one added, one removed, one that stayed. The app's own tab
+       wears an emoji instead (see `src/ui/page.rs`); this stays a drawing
+       because a store listing should not ship somebody's emoji font. -->
   <rect width="32" height="32" rx="7" fill="#17181d"/>
   <rect x="5" y="6" width="3" height="20" rx="1.5" fill="#5c9cf5"/>
   <rect x="12" y="7" width="15" height="4" rx="2" fill="#4fbf7a"/>

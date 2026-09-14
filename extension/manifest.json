@@ -28,6 +28,8 @@
     "open_in_tab": false
   },
   "permissions": ["activeTab", "contextMenus", "storage"],
+  "host_permissions": ["https://pullspace.dev/*"],
+  "optional_host_permissions": ["https://*/*", "http://*/*"],
   "commands": {
     "_execute_action": {
       "suggested_key": { "default": "Alt+Shift+P" },

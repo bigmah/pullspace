@@ -5,7 +5,7 @@ use crate::backend::github::RepoRef;
 
 use super::app::{Account, Fetch, St, Workspace};
 use super::full;
-use super::github::{PrListBody, PrStates, browse_repo};
+use super::github::{GithubMark, PrListBody, PrStates, browse_repo};
 use super::ide;
 use super::refbar::{Go, Refs};
 use super::spaces::{Kind, SpaceSwitch};
@@ -224,7 +224,7 @@ pub fn TopBar() -> Element {
                     class: "iconbtn",
                     title: "Open on github.com",
                     onclick: move |_| open_browser(&url),
-                    "↗"
+                    GithubMark {}
                 }
             }
             SearchBox {}

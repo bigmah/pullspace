@@ -26,6 +26,13 @@ pointing at in a fragment of its own (`#L58`) and a URL has room for exactly
 one. Handed over unescaped it would be read as *pullspace's* fragment and the
 file it belongs to would be lost with it.
 
+If a pullspace tab is already open, that tab gets the URL instead of a new tab
+being opened — one in the same window first, then whichever was looked at last
+— and is brought to the front. The app puts the link into a space of its own
+beside whatever that tab had on screen (or into the space that already has it
+open), so nothing being read there is lost. Pressing the button somewhere that
+is not GitHub just brings that tab forward.
+
 Everything that decides what the URL comes out as lives in `handoff.js`, which
 touches no `chrome.*` API for exactly that reason: `node --test test.js` runs
 it. The other end of the same contract is
@@ -34,11 +41,20 @@ the strings in that test came out of this one.
 
 ### What it asks for
 
-`activeTab`, `contextMenus`, `storage`, and no host permissions at all.
+`activeTab`, `contextMenus`, `storage`, and one host: `https://pullspace.dev/*`.
 `activeTab` is granted at the moment you invoke the extension and not before,
 so it can read the address of the tab you pressed the button on and nothing
 else — no content script, no page access, nothing running in the background
 while you browse.
+
+The host permission is what lets it find a pullspace tab that is already open:
+Chrome only shows an extension the address of a tab on a host it has been
+granted, and without that address there is no telling a pullspace tab from any
+other. It is asked for the pullspace host alone and is used for nothing else.
+Pointing the options panel at another copy asks for that copy's host when you
+press **Save** (`optional_host_permissions` in the manifest is what allows the
+request); say no, or remove the access later, and every click opens a new tab
+exactly as it did before.
 
 ## Files
 
@@ -47,7 +63,7 @@ manifest.json    what Chrome reads first — Manifest V3
 background.js    the service worker: the button, the menu, the shortcut
 handoff.js       the URL, worked out — pure, and the only part worth testing
 options.html/js  where your copy of pullspace is served from
-icons/           the app's own favicon, at the four sizes Chrome asks for
+icons/           the toolbar icon, at the four sizes Chrome asks for
 test.js          node --test test.js
 make.sh          the zip the Chrome Web Store wants
 ```
@@ -130,8 +146,8 @@ a mail; do it while you are there rather than discovering it at submission.
 
 **3. Check the default address.** `DEFAULT_BASE` in `handoff.js` is what every
 installer gets before they touch the options panel. It is
-`https://pullspace.dev/`; if that ever moves, change it there and rebuild the
-zip.
+`https://pullspace.dev/`; if that ever moves, change it there and in
+`host_permissions` in `manifest.json`, and rebuild the zip.
 
 **4. New item, and upload the zip.** The listing wants:
 
@@ -150,6 +166,10 @@ zip.
     so it can open the same page in pullspace."
   - *contextMenus*: "Adds a right-click entry on GitHub pages and links."
   - *storage*: "Remembers which pullspace instance the user has chosen."
+  - *Host permission (pullspace.dev, and optionally the user's own
+    instance)*: "Reads the addresses of pullspace tabs only, so a page is
+    opened in the pullspace tab the user already has open instead of a new
+    one."
 - **Privacy.** There is no remote code, no analytics and no data collection —
   tick *does not collect user data* and say so. You still have to give a
   privacy policy URL; the repository README will do if you have nothing else.

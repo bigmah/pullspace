@@ -5,7 +5,7 @@
 // nothing else, so the panel shows the whole URL a click would open — escaping
 // and all — while it is being typed.
 
-import { DEFAULT_BASE, handoffUrl, normalizeBase } from "./handoff.js";
+import { DEFAULT_BASE, handoffUrl, normalizeBase, originPattern } from "./handoff.js";
 
 /// A page worth showing the escaping of: a file, on a branch, at a line, which
 /// is the form with something in it for `?url=` to do.
@@ -43,6 +43,14 @@ async function save() {
   if (!show()) {
     return say("Not saved.", true);
   }
+  // Asked before anything is awaited, while this is still the click: Chrome
+  // only puts up a permission prompt for a request made in answer to one. It
+  // is what lets the button find a pullspace tab on that host already open —
+  // the default address is granted at install and answers without a prompt,
+  // and one the extension cannot be granted (a file:// path) simply answers no.
+  const seen = chrome.permissions
+    .request({ origins: [originPattern(field.value)] })
+    .catch(() => false);
   // Stored tidied rather than as typed, so the missing trailing slash is fixed
   // once here instead of on every click for the life of the setting.
   await chrome.storage.sync.set({
@@ -51,7 +59,11 @@ async function save() {
   });
   field.value = normalizeBase(field.value);
   show();
-  say("Saved.");
+  if (await seen) {
+    say("Saved.");
+  } else {
+    say("Saved — but without access to that site, every click opens a new tab.", true);
+  }
 }
 
 const stored = await chrome.storage.sync.get({ base: DEFAULT_BASE, newTab: true });

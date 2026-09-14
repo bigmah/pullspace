@@ -148,7 +148,7 @@
 
     <div class="row">
       <input id="newTab" type="checkbox" />
-      <label for="newTab">Open in a new tab</label>
+      <label for="newTab">Open in a new tab when no pullspace tab is open</label>
     </div>
 
     <footer>
@@ -160,7 +160,9 @@
       The button hands the GitHub page you are on to that address in a
       <code>?url=</code> field, and pullspace opens what it names. Any static
       host will do — a server of your own, or <code>localhost:8123</code> while
-      you are working on it.
+      you are working on it. A pullspace tab already open there gets the page
+      instead of a new tab, so saving asks Chrome to let the extension see
+      that site's tabs.
     </p>
 
     <script type="module" src="options.js"></script>

@@ -668,6 +668,19 @@ pub fn take_handoff() -> Option<Link> {
     Some(link)
 }
 
+/// The link [`take_handoff`] is going to take, read without taking it.
+///
+/// For the one thing that has to be decided before anything opens: which space
+/// it opens into, now that the extension sends links to a tab that is already
+/// open rather than always to a new one. A github.com page this app has nothing
+/// to show for — a gist, somebody's profile — is a link to the front page,
+/// which is where it lands.
+pub fn handed() -> Option<Link> {
+    let at = location()?;
+    let text = param(&at.search().ok()?, HANDOFF)?;
+    Some(github_link(&text).unwrap_or_else(|| Link::At(Route::home())))
+}
+
 /// What the page was opened on, read without taking anything.
 ///
 /// The same address [`take_handoff`] and [`fragment`] are read out of, asked

@@ -23,6 +23,7 @@ use super::app::{
     Annots, BranchList, CheckList, CommitList, CommitSource, ConvTab, Conversation, Fetch, Reading,
     St,
 };
+use super::github::GithubMark;
 use super::panes::{Edge, Splitter};
 
 /// A comment's links are written from the root of the repository — there is no
@@ -792,7 +793,7 @@ fn CommitRow(c: CommitSummary, repo: RepoRef, from: CommitFrom, current: bool) -
                             e.stop_propagation();
                             open_browser(&url);
                         },
-                        "↗"
+                        GithubMark {}
                     }
                 }
             }
@@ -1243,7 +1244,7 @@ fn CheckRow(c: Check) -> Element {
         (true, false) => "Show what this check wrote",
         // Said rather than left blank: a row that does not open when its
         // neighbours do is worth a word.
-        _ => "This check left nothing behind — ↗ opens its log on github.com",
+        _ => "This check left nothing behind — the GitHub mark opens its log on github.com",
     };
     let id = c.id;
     let wanted = c.annotations > 0;
@@ -1287,7 +1288,7 @@ fn CheckRow(c: Check) -> Element {
                             e.stop_propagation();
                             open_browser(&url);
                         },
-                        "↗"
+                        GithubMark {}
                     }
                 }
             }
@@ -1493,7 +1494,7 @@ fn Description(desc: PrHeader) -> Element {
                     class: "iconbtn",
                     title: "Open on github.com",
                     onclick: move |_| open_browser(&url),
-                    "↗"
+                    GithubMark {}
                 }
             }
             div {
@@ -1563,7 +1564,7 @@ fn CommentRow(c: Comment) -> Element {
                         class: "iconbtn sm",
                         title: "Open on github.com",
                         onclick: move |_| open_browser(&url),
-                        "↗"
+                        GithubMark {}
                     }
                 }
             }

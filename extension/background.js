@@ -6,7 +6,7 @@
 // event, so every listener is registered at the top level here — one added
 // inside a callback would only exist in whichever run happened to get that far.
 
-import { DEFAULT_BASE, handoffUrl } from "./handoff.js";
+import { DEFAULT_BASE, handoffUrl, isGithub, pullspaceTab } from "./handoff.js";
 
 /// The two menu entries, by the ids their clicks come back under.
 const PAGE = "pullspace-page";
@@ -41,20 +41,39 @@ async function addressOf(tab) {
   return active?.url ?? "";
 }
 
-/// Open it, in a tab beside the one it came from.
+/// Open it — in the pullspace tab already open, if there is one, and otherwise
+/// in a tab beside the one it came from.
 ///
-/// Beside rather than at the end of the strip: this is a second view of the
-/// page being read, and the two belong together. `openerTabId` is what has
-/// Chrome put the reader back on the GitHub tab when the pullspace one is
-/// closed.
+/// An open tab first because pullspace keeps several reviews in one tab
+/// already: the app puts a link handed to it into a space of its own beside
+/// whatever was on screen (see `make_room` in `src/ui/spaces.rs`), so a tab per
+/// click would only be the same app loaded again. Seeing which tabs are
+/// pullspace takes the host permission for wherever it is served; without it
+/// no tab has an address to match, and every click opens a new one.
+///
+/// A new tab goes beside rather than at the end of the strip: this is a second
+/// view of the page being read, and the two belong together. `openerTabId` is
+/// what has Chrome put the reader back on the GitHub tab when the pullspace one
+/// is closed.
 async function open(target, tab) {
+  let at;
   let url;
   try {
-    url = handoffUrl(await base(), target);
+    at = await base();
+    url = handoffUrl(at, target);
   } catch {
     // The only way here is a base nobody can open, which is a thing to fix
     // rather than a thing to report on every click.
     return chrome.runtime.openOptionsPage();
+  }
+  const there = pullspaceTab(at, await chrome.tabs.query({}), tab?.windowId);
+  if (there) {
+    // Nothing to hand over — the button, pressed on a page that is not GitHub
+    // — asks for pullspace itself, which that tab already is. Loading it again
+    // on its bare address would only swap what it had open for the front page.
+    await chrome.tabs.update(there.id, isGithub(target) ? { url, active: true } : { active: true });
+    await chrome.windows.update(there.windowId, { focused: true });
+    return;
   }
   const { newTab } = await chrome.storage.sync.get({ newTab: true });
   if (!newTab && tab?.id !== undefined) {

@@ -2095,8 +2095,13 @@ pub fn App() -> Element {
         highlight::use_light(look.theme.is_light());
         // And so do the spaces, if this tab has been here before. Every one of
         // them comes back as a link; the one that was on screen is opened by
-        // the address bar, which is where it was written on the way out.
-        let (mut spaces, on) = spaces::load();
+        // the address bar, which is where it was written on the way out —
+        // unless the address bar is a link handed over from outside, which
+        // gets a space of its own rather than the one that was on screen.
+        let (mut spaces, mut on) = spaces::load();
+        if let Some(link) = route::handed() {
+            on = spaces::make_room(&mut spaces, on, &link);
+        }
         spaces::wake(&mut spaces, on);
         // The state of the space the app starts in. Every per-space signal
         // below is seeded from it, so what an empty space holds is stated in

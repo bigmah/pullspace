@@ -11,11 +11,16 @@
 // the file it belongs to would be lost with it. `searchParams` escapes it,
 // which is the whole of what this file is for.
 //
+// And, once there is an address, which tab to open it in: a pullspace tab that
+// is already open, before a new one.
+//
 // Nothing here touches a `chrome.*` API, so it can be — and is — run straight
 // through node: see `test.js`.
 
 /// Where the extension looks unless it is told otherwise: the deployment this
-/// copy is built against, and the one line to change if it ever moves.
+/// copy is built against. If it ever moves, this and `host_permissions` in
+/// `manifest.json` move with it — that is what lets a fresh install find a
+/// pullspace tab already open there.
 ///
 /// The options panel overrides it per profile and remembers the override, so
 /// this is a default rather than a setting — it is what a fresh install gets
@@ -79,4 +84,48 @@ export function handoffUrl(base, target) {
     at.searchParams.set("url", target.trim());
   }
   return at.toString();
+}
+
+/// The page a directory base is served as, so `…/` and `…/index.html` are
+/// the one page they are to a static host.
+function page(pathname) {
+  return pathname.replace(/\/index\.html$/, "/");
+}
+
+/// Whether a tab's address is the copy of pullspace at `base` — at any route,
+/// since the route is all behind the `#`.
+///
+/// The page and not merely the host: a copy served from a subdirectory shares
+/// its host with whatever else is served there.
+export function isPullspace(base, url) {
+  try {
+    const want = new URL(normalizeBase(base));
+    const at = new URL(url);
+    return at.origin === want.origin && page(at.pathname) === page(want.pathname);
+  } catch {
+    return false;
+  }
+}
+
+/// Of the tabs open, the pullspace one to send a link to — or nothing, and a
+/// new tab it is.
+///
+/// One in the window the click came from before one in another, since that is
+/// the window being read in; among those, the one looked at last. A tab Chrome
+/// has not shown this extension the address of has no `url`, and is not one.
+export function pullspaceTab(base, tabs, windowId) {
+  const open = tabs.filter((tab) => isPullspace(base, tab.url));
+  const here = open.filter((tab) => tab.windowId === windowId);
+  const latest = (a, b) => (b.lastAccessed ?? 0) - (a.lastAccessed ?? 0);
+  return (here.length ? here : open).sort(latest)[0];
+}
+
+/// The match pattern for the host `base` is on — what the extension has to be
+/// granted before Chrome shows it the addresses of that host's tabs.
+///
+/// A port is part of it, so a dev server on :8123 is not the whole of
+/// localhost.
+export function originPattern(base) {
+  const at = new URL(normalizeBase(base));
+  return `${at.protocol}//${at.host}/*`;
 }

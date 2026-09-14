@@ -22,6 +22,7 @@ use crate::backend::auth::open_browser;
 use crate::backend::markdown::{self, Entry, Refs};
 
 use super::app::{Reading, St};
+use super::github::GithubMark;
 
 /// A comment's links are written from the root of the repository — there is no
 /// file they are relative to, the way a README's are.
@@ -160,7 +161,7 @@ pub fn Reader(doc: Reading) -> Element {
                         class: "iconbtn sm",
                         title: "Open on github.com",
                         onclick: move |_| open_browser(&url),
-                        "\u{2197}"
+                        GithubMark {}
                     }
                 }
                 button {

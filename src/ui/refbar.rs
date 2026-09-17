@@ -142,6 +142,12 @@ struct Side {
 }
 
 /// The chips for what is open.
+///
+/// `Two` is 208 bytes over `One` — the way to swap the two refs, which the
+/// other shapes have nowhere to put. Boxing it would trade an allocation on
+/// every render for bytes nothing ever holds: exactly one of these exists at a
+/// time, built by [`shape_of`] and taken apart by [`Refs`] on the next line.
+#[allow(clippy::large_enum_variant)]
 enum Shape {
     /// A branch being read, and the empty slot for a second one.
     One { side: Side, add: Side },
@@ -219,7 +225,9 @@ fn shape_of(ws: &Workspace) -> Option<(RepoRef, Shape, Trail)> {
             let right = Side {
                 label: "compare",
                 name: head.clone(),
-                why: format!("What {head} has that {base} does not\nPick another branch to compare"),
+                why: format!(
+                    "What {head} has that {base} does not\nPick another branch to compare"
+                ),
                 pick: Some(Pick::Head {
                     at: Some(head.clone()),
                     base: base.clone(),

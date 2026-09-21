@@ -1035,7 +1035,11 @@ fn links_in(text: &str, refs: &Refs) -> Vec<(usize, usize, String)> {
 
 /// A bare URL at the start of `rest`, as its length and where it goes.
 fn url_at(rest: &str) -> Option<(usize, String)> {
-    let starts = |p: &str| rest.len() > p.len() && rest[..p.len()].eq_ignore_ascii_case(p);
+    // On the bytes: `rest[..8]` of "punted — and" ends inside the dash and
+    // panics, and the prefixes are ASCII, so a match cannot split a character.
+    let starts = |p: &str| {
+        rest.len() > p.len() && rest.as_bytes()[..p.len()].eq_ignore_ascii_case(p.as_bytes())
+    };
     let bare = match () {
         _ if starts("https://") || starts("http://") => false,
         // `www.example.com`, written without a scheme, as half the internet
@@ -1625,6 +1629,25 @@ mod tests {
         assert!(links("fixes #123, thanks @octocat", &Refs::default()).is_empty());
         // And neither is a colour or the middle of a word.
         assert!(links("#fff and a#1 and me@example.com", &refs).is_empty());
+    }
+
+    #[test]
+    fn a_word_that_runs_into_a_wide_character_is_scanned_past() {
+        // Found in a pull request description: the `#` makes the paragraph
+        // worth scanning, and "punted " is seven bytes, so the eighth that
+        // "https://" is checked against falls inside the dash.
+        let text = "see #12: punted — and the leading team called its own timeout in 49% of sims.";
+        let blocks = parse_refs(text, &Refs::of("o/r")).blocks;
+        let Block::Para(spans) = &blocks[0] else {
+            panic!("expected a paragraph: {blocks:?}")
+        };
+        assert_eq!(plain(spans), text);
+        // And a link after one is still found.
+        let Block::Para(spans) = &doc("résumé → https://example.com/é ok")[0] else {
+            panic!("expected a paragraph")
+        };
+        let link = spans.iter().find_map(|s| s.link.clone());
+        assert_eq!(link.as_deref(), Some("https://example.com/é"));
     }
 
     #[test]

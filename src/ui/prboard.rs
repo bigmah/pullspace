@@ -539,13 +539,15 @@ pub fn PrBoard() -> Element {
                 // different pane, which is what starts its description at the
                 // top rather than wherever the last one was scrolled to.
                 for pr in peeked {
+                    // Cloned for the same reason as `Row`'s above: without it a
+                    // release build moves `pr` before the key is written.
                     Peek {
                         key: "{pr.number}",
                         more: more.get(&pr.number).cloned(),
                         current: reading == Some(pr.number),
                         opening: opening == Some(pr.number),
                         repo: repo.clone(),
-                        pr,
+                        pr: pr.clone(),
                         now,
                     }
                 }

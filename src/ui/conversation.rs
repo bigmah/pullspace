@@ -42,11 +42,14 @@ pub(super) async fn load(st: St, repo: RepoRef, number: u64) {
     let token = st.api_token();
     let got = github::pr_comments(&token, &repo, number).await;
 
+    // Asked the way `App` asked for it — one of the pull request's commits is
+    // still inside the pull request. Asked of `pr()` instead, a load started
+    // with a commit open threw its answer away and left `Loading` up for good.
     let still_open = st
         .workspace
         .peek()
-        .pr()
-        .is_some_and(|pr| pr.repo == repo && pr.number == number);
+        .review_key()
+        .is_some_and(|(r, n)| r == repo && n == number);
     if !still_open {
         return;
     }
@@ -131,7 +134,12 @@ pub(super) async fn load_older(st: St, source: CommitSource) {
     match got {
         Ok(next) => {
             let mut all = base;
-            all.items.extend(next.items);
+            // A push between two pages shifts the window they are cut from —
+            // newest first, so the page after repeats the commits the push
+            // moved down — and a repeated sha is a repeated row key.
+            let seen: HashSet<String> = all.items.iter().map(|c| c.sha.clone()).collect();
+            all.items
+                .extend(next.items.into_iter().filter(|c| !seen.contains(&c.sha)));
             all.truncated = next.truncated;
             all.total = next.total;
             all.pages = page;

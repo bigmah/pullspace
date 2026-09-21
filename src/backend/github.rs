@@ -8,7 +8,7 @@
 //! it is also what keeps the parsing in here testable on the host.
 
 use std::borrow::Cow;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
@@ -777,10 +777,14 @@ pub async fn list_branches(token: &str, repo: &RepoRef, read: u32) -> Result<Bra
         get_pages(token, &base, read + 1, count)
             .await
             .with_context(|| format!("reading the branches of {repo}"))?;
+    // The pages are cut from a list sorted by name, so a branch created while
+    // they are read shifts the next one along and a name arrives twice — which
+    // is a repeated row key as well as a branch that is not there.
+    let mut seen = HashSet::new();
     Ok(Branches {
         items: raw
             .into_iter()
-            .filter(|b| !b.name.is_empty())
+            .filter(|b| !b.name.is_empty() && seen.insert(b.name.clone()))
             .map(|b| Branch {
                 name: b.name,
                 sha: b.commit.sha,

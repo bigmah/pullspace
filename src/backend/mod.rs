@@ -2,6 +2,7 @@ pub mod auth;
 pub mod blobs;
 pub mod clip;
 pub mod clone;
+pub mod crash;
 pub mod difftool;
 pub mod fuzzy;
 pub mod github;

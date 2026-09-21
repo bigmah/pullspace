@@ -314,6 +314,7 @@ pub fn parse_refs(text: &str, refs: &Refs) -> Doc {
         raw_html: false,
         refs: refs.clone(),
         slugs: HashMap::new(),
+        depth: 0,
     };
     let blocks = reader.container(&mut None, None);
     Doc {
@@ -497,7 +498,20 @@ struct Reader<'a> {
     /// called "Testing" are `testing` and `testing-1` — github.com's rule, and
     /// therefore the rule a link written for github.com expects.
     slugs: HashMap<String, usize>,
+    /// How many quotes, lists and folds the block being read is inside.
+    depth: usize,
 }
+
+/// How deep quotes, lists and folds nest before what is inside them is left
+/// out.
+///
+/// Each level is a call inside a call — here, in the renderer, and in every
+/// `Clone` and `Drop` of the tree — and a browser's stack runs out a couple of
+/// thousand levels down. `>` written two and a half thousand times is 2.4KB of
+/// pull request description, which anyone can post; the stack running out is
+/// the app stopping, on everyone who opens it. Nobody writes sixty-four levels
+/// of anything on purpose.
+const MAX_NEST: usize = 64;
 
 impl Reader<'_> {
     /// Everything inside one container — the document, a block quote, a list
@@ -576,11 +590,25 @@ impl Reader<'_> {
                     text: self.verbatim(),
                 })
             }
-            Tag::BlockQuote(kind) => Piece::Block(Block::Quote {
-                alert: kind.map(Alert::of),
-                blocks: self.container(&mut None, None),
-            }),
-            Tag::List(start) => Piece::Block(self.list(start)),
+            Tag::BlockQuote(_) | Tag::List(_) if self.depth >= MAX_NEST => {
+                self.skip();
+                Piece::None
+            }
+            Tag::BlockQuote(kind) => {
+                self.depth += 1;
+                let blocks = self.container(&mut None, None);
+                self.depth -= 1;
+                Piece::Block(Block::Quote {
+                    alert: kind.map(Alert::of),
+                    blocks,
+                })
+            }
+            Tag::List(start) => {
+                self.depth += 1;
+                let list = self.list(start);
+                self.depth -= 1;
+                Piece::Block(list)
+            }
             Tag::Table(_) => Piece::Block(self.table()),
             Tag::HtmlBlock => self.html_block(),
             // Footnote definitions, front matter, definition lists.
@@ -608,7 +636,15 @@ impl Reader<'_> {
                 Some(label) => Piece::Summary(inline_of(&label, &self.refs)),
                 None => Piece::None,
             },
-            Some("details") => Piece::Block(self.details(text)),
+            // Too deep to open: its inside is read as if the fold were not
+            // there, which is flat rather than one level further down.
+            Some("details") if self.depth >= MAX_NEST => Piece::None,
+            Some("details") => {
+                self.depth += 1;
+                let fold = self.details(text);
+                self.depth -= 1;
+                Piece::Block(fold)
+            }
             // A picture on a line of its own — a screenshot in a description,
             // sized with an attribute markdown has no way of writing.
             Some("img") => match self.pictures(text) {
@@ -797,7 +833,10 @@ fn tag_of(text: &str) -> Option<&'static str> {
     let rest = text.strip_prefix('<')?;
     let name = rest
         .find(|c: char| c.is_whitespace() || c == '>' || c == '/')
-        .map(|i| &rest[..i.max(1)])
+        // Up to the character found and not one byte past it: `< b>` with a
+        // no-break space is a two-byte character at 0, and an empty name is
+        // one that matches no tag, which is the answer either way.
+        .map(|i| &rest[..i])
         .unwrap_or(rest);
     // `</details>` — the slash is part of the name, so it is measured from the
     // character after it.
@@ -1670,5 +1709,57 @@ mod tests {
     fn an_empty_document_is_no_blocks_at_all() {
         assert!(doc("").is_empty());
         assert!(doc("   \n\n  \n").is_empty());
+    }
+
+    #[test]
+    fn a_wide_space_after_an_angle_bracket_is_not_cut_into() {
+        // The `<img>` opens an HTML block, so the next line is read as a tag
+        // too — and what follows its `<` is a no-break space, two bytes wide.
+        let text = "<img src=\"a.png\">\n<\u{a0}b>";
+        assert!(parse(text).raw_html);
+        assert_eq!(tag_of("<\u{3000}img>"), None);
+        assert_eq!(tag_of("<img src=a.png>"), Some("img"));
+        assert_eq!(tag_of("<br/>"), Some("br"));
+        assert_eq!(tag_of("</details>"), Some("/details"));
+    }
+
+    #[test]
+    fn nesting_stops_before_the_stack_does() {
+        fn nesting(blocks: &[Block]) -> usize {
+            blocks
+                .iter()
+                .map(|b| match b {
+                    Block::Quote { blocks, .. } | Block::Details { blocks, .. } => {
+                        1 + nesting(blocks)
+                    }
+                    Block::List { items, .. } => {
+                        1 + items.iter().map(|i| nesting(&i.blocks)).max().unwrap_or(0)
+                    }
+                    _ => 0,
+                })
+                .max()
+                .unwrap_or(0)
+        }
+        // Each a few KB, and each deep enough to run a browser's stack out.
+        for text in [
+            ">".repeat(5000) + " x",
+            "- ".repeat(5000) + "x",
+            "1. ".repeat(5000) + "x",
+            "> - ".repeat(3000) + "x",
+            "<details>\n\n".repeat(3000) + "x",
+        ] {
+            assert_eq!(nesting(&doc(&text)), MAX_NEST, "{}", &text[..8]);
+        }
+        // And short of the limit, nothing is lost.
+        let Block::Quote { blocks, .. } = &doc(">>> deep")[0] else {
+            panic!("expected a quote")
+        };
+        let Block::Quote { blocks, .. } = &blocks[0] else {
+            panic!("expected a quote")
+        };
+        let Block::Quote { blocks, .. } = &blocks[0] else {
+            panic!("expected a quote")
+        };
+        assert_eq!(paras(blocks), ["deep"]);
     }
 }

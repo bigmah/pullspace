@@ -9,4 +9,6 @@ mod ui;
 /// is the whole deployment.
 fn main() {
     dioxus::launch(ui::App);
+    // After, not before: see `crash::catch`.
+    backend::crash::catch();
 }

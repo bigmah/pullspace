@@ -64,7 +64,12 @@ fn pic_of(from: &Path, url: &str) -> Pic {
         || url.starts_with("//")
         || ["data:", "blob:", "mailto:", "about:"]
             .iter()
-            .any(|s| url.len() >= s.len() && url[..s.len()].eq_ignore_ascii_case(s));
+            // `get`, not a slice: the `src` is whatever the page says, and
+            // `图片/logo.png` has no char boundary at byte five.
+            .any(|s| {
+                url.get(..s.len())
+                    .is_some_and(|p| p.eq_ignore_ascii_case(s))
+            });
     if scheme_like {
         return Pic::Elsewhere;
     }
@@ -1693,5 +1698,26 @@ fn split_block(diff: &FileDiff, block: Block, m: &Marks<'_>, at: Option<usize>) 
                 }
             }
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A `src` is whatever the page says, in whatever script it was written in —
+    /// and a byte slice of `图片/logo.png` took the app down with it.
+    #[test]
+    fn a_src_in_any_script_is_read_rather_than_sliced() {
+        let page = Path::new("site/index.html");
+        assert_eq!(
+            pic_of(page, "图片/logo.png"),
+            Pic::File(PathBuf::from("site/图片/logo.png"))
+        );
+        assert_eq!(
+            pic_of(page, "logoé.png"),
+            Pic::File(PathBuf::from("site/logoé.png"))
+        );
+        assert_eq!(pic_of(page, "DATA:image/png;base64,AAAA"), Pic::Elsewhere);
     }
 }

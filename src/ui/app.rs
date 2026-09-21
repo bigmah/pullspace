@@ -12,7 +12,7 @@ use crate::backend::clone::Progress;
 use crate::backend::difftool::Expansion;
 use crate::backend::github::{
     Annotation, Branches, Checks, CommitFrom, CommitView, Commits, CompareView, FetchJob, PrDetail,
-    PrHeader, PrState, PrSummary, RepoRef, RepoView, Snapshot, Thread, statuses_of,
+    PrHeader, PrMore, PrState, PrSummary, RepoRef, RepoView, Snapshot, Thread, statuses_of,
 };
 use crate::backend::highlight;
 use crate::backend::markdown;
@@ -35,6 +35,7 @@ use super::opening::Opening;
 use super::page::Tab;
 use super::palette::Picker;
 use super::panes::{self, Drag, DragMask, Edge};
+use super::prboard::PrBoard;
 use super::prefs::PrefsPanel;
 use super::spaces::{self, Card, Held, Space};
 use super::tabs;
@@ -341,19 +342,61 @@ pub struct PrList {
     pub repo: RepoRef,
     pub state: PrState,
     pub got: Got,
+    /// What the list itself does not say about the pull requests in it. Part
+    /// of the list rather than beside it, so that it cannot outlive the list it
+    /// is about: a new list arrives with nothing known, however much was known
+    /// about the last one.
+    pub more: More,
 }
 
 /// How a list of pull requests is getting on.
+///
+/// Each behind an `Rc`, because a pull request now brings its description with
+/// it and a list of them is handed around — to the rows, to the pane that reads
+/// one out — far more often than it changes.
 #[derive(Clone, PartialEq)]
 pub enum Got {
     Loading,
-    Ready(Vec<PrSummary>),
+    Ready(Vec<Rc<PrSummary>>),
     Failed(String),
+}
+
+/// The checks, reviews and sizes of a list's pull requests — see
+/// [`PrMore`] for why they are not simply part of it.
+///
+/// They arrive a page at a time, from the top of the list down, so what is
+/// known and how the asking is going are two things: a row near the top has its
+/// checks while the rows under it are still waiting for theirs, and a page that
+/// fails takes nothing back from the pages before it.
+#[derive(Clone, PartialEq, Default)]
+pub struct More {
+    /// By pull request number.
+    pub known: Rc<HashMap<u64, PrMore>>,
+    pub got: MoreGot,
+}
+
+#[derive(Clone, PartialEq, Default)]
+pub enum MoreGot {
+    /// Not asked for. Nobody has looked at the board, or nobody is signed in to
+    /// ask as.
+    #[default]
+    Idle,
+    Loading,
+    Done,
+    Failed(String),
+}
+
+impl More {
+    /// Whether there is nothing to show for it and nothing on its way — which
+    /// is when the board does without the columns it fills.
+    pub fn absent(&self) -> bool {
+        self.known.is_empty() && matches!(self.got, MoreGot::Idle | MoreGot::Failed(_))
+    }
 }
 
 impl PrList {
     /// The pull requests themselves, empty until they are here.
-    pub fn items(&self) -> &[PrSummary] {
+    pub fn items(&self) -> &[Rc<PrSummary>] {
         match &self.got {
             Got::Ready(items) => items,
             _ => &[],
@@ -808,6 +851,8 @@ pub struct St {
     pub prs: Signal<Option<PrList>>,
     /// Which of them to ask for: open, closed, or the lot.
     pub pr_state: Signal<PrState>,
+    /// Whether that list has the page to itself — see [`super::prboard`].
+    pub pr_board: Signal<bool>,
     /// What is being fetched from GitHub, if anything, and what went wrong the
     /// last time something was.
     pub fetch: Signal<Fetch>,
@@ -1230,6 +1275,12 @@ impl St {
         route::show(&link);
         let mut gh = self.gh_open;
         gh.set(false);
+        // And the board, which is a list of places to go: having got to one,
+        // it has done what it was opened for. Here rather than on the click,
+        // so it stays up — with the row still under the pointer — for as long
+        // as the loading takes.
+        let mut board = self.pr_board;
+        board.set(false);
         self.bump_tick();
         // And now that there is a tree to look a path up in, whatever the link
         // named inside it.
@@ -1379,6 +1430,9 @@ impl St {
         // workspace being empty.
         let mut gh = self.gh_open;
         gh.set(false);
+        // The board hangs off the top bar, and the top bar has just gone.
+        let mut board = self.pr_board;
+        board.set(false);
         self.bump_tick();
     }
 
@@ -2162,6 +2216,7 @@ pub fn App() -> Element {
             repo_input: root(h.repo_input),
             prs: root(h.prs),
             pr_state: root(h.pr_state),
+            pr_board: root(h.pr_board),
             fetch: root(h.fetch),
             workspace: root(h.workspace),
             // The one field not taken from `h`, because the answer is not in
@@ -2602,6 +2657,11 @@ pub fn App() -> Element {
                         Bottom {}
                     }
                     ConvPane {}
+                }
+                // Under the panels and over the panes: everything but the bar
+                // it was opened from.
+                if *st.pr_board.read() {
+                    PrBoard {}
                 }
                 if *st.gh_open.read() {
                     GhPanel {}

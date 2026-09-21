@@ -34,6 +34,7 @@ use super::app::St;
 use super::compat;
 use super::full;
 use super::palette::{self, Pick};
+use super::prboard;
 use super::spaces;
 
 /// How long to wait for the clone before indexing anyway. It is a backstop for
@@ -644,6 +645,9 @@ const KEYS: &str = r#"
     // Escape out of a text box is about the text box. Everything else it
     // could mean is one more press away.
     if (what === 'escape' && typing) { el.blur(); e.preventDefault(); return; }
+    // And Escape inside a panel is the panel's, which closes itself on it. Sent
+    // on as well, it would go on to close whatever is under the panel.
+    if (what === 'escape' && el.closest && el.closest('.ghoverlay')) return;
     // And an arrow in one is about the caret, not about the review — nor is
     // a letter in one about the file behind it, and three of these are
     // letters: on a Mac ⌥W, ⌥T and ⌥Z type '∑', '†' and 'Ω'. The spaces are
@@ -746,6 +750,20 @@ fn escape(st: St) {
     // is about that box and never arrives here, see `KEYS`.
     if *st.picker.peek() {
         return palette::shut(&st);
+    }
+    // The panels, when the focus is somewhere they cannot hear the key from —
+    // which is where it is left by the Escape that came out of one of their
+    // text boxes. With the focus inside one, the panel takes the key itself
+    // and it is never sent here: see `KEYS`.
+    for mut panel in [st.prefs_open, st.gh_open] {
+        if *panel.peek() {
+            return panel.set(false);
+        }
+    }
+    // And under those, the board — which covers everything below this line,
+    // so nothing below this line is what the key was for.
+    if *st.pr_board.peek() {
+        return prboard::shut(&st);
     }
     if *st.find_open.peek() {
         return st.toggle_find(false);

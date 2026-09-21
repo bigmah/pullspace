@@ -8,6 +8,7 @@
 //! it is also what keeps the parsing in here testable on the host.
 
 use std::borrow::Cow;
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
@@ -292,7 +293,14 @@ async fn get_raw(token: &str, url: &str, accept: &str) -> Result<(u16, Vec<u8>)>
         headers.push(("Authorization", auth.as_str()));
     }
     let reply = http::get(url, &headers).await?;
+    refused(token, &reply)?;
+    Ok((reply.status, reply.body))
+}
 
+/// The answers that are GitHub declining to answer, whatever was asked and
+/// however it was asked: a token it will not take, a budget that has run out,
+/// a door that is shut.
+fn refused(token: &str, reply: &http::Reply) -> Result<()> {
     if reply.status == 401 {
         // Read on the sign-in form as often as anywhere else, so it says what
         // is wrong rather than what to do about it — "sign in again" is no help
@@ -319,7 +327,7 @@ async fn get_raw(token: &str, url: &str, accept: &str) -> Result<(u16, Vec<u8>)>
     if reply.status == 403 {
         bail!("GitHub denied access (403). The token may lack the `repo` scope.");
     }
-    Ok((reply.status, reply.body))
+    Ok(())
 }
 
 async fn get_json<T: serde::de::DeserializeOwned>(token: &str, url: &str) -> Result<T> {
@@ -341,6 +349,9 @@ async fn get_json<T: serde::de::DeserializeOwned>(token: &str, url: &str) -> Res
 #[derive(Deserialize)]
 struct User {
     login: String,
+    /// Where their picture is. Only the lists that draw one read it.
+    #[serde(default)]
+    avatar_url: Option<String>,
 }
 
 /// Verify a token and get the account it belongs to.
@@ -870,31 +881,151 @@ struct RawPr {
     /// one thing `state` does not say.
     #[serde(default)]
     merged_at: Option<String>,
+    #[serde(default)]
+    created_at: Option<String>,
     updated_at: String,
     html_url: String,
     head: RawRef,
     base: RawRef,
+    #[serde(default)]
+    labels: Vec<RawLabel>,
+    /// Who has been asked to look and has not yet — GitHub takes a name off
+    /// this list the moment its owner submits a review.
+    #[serde(default)]
+    requested_reviewers: Vec<User>,
+    #[serde(default)]
+    requested_teams: Vec<RawTeam>,
 }
 
-#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+#[derive(Deserialize)]
+struct RawLabel {
+    #[serde(default)]
+    name: String,
+    /// Six hex digits, no `#`.
+    #[serde(default)]
+    color: String,
+}
+
+#[derive(Deserialize)]
+struct RawTeam {
+    #[serde(default)]
+    slug: String,
+}
+
+/// One of the labels on a pull request.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct Label {
+    pub name: String,
+    /// The colour its repository gave it, as `#rrggbb` — or empty, when what
+    /// GitHub sent is not one. It ends up inside a `style` attribute, so it is
+    /// checked here rather than trusted there.
+    pub color: String,
+}
+
+fn label_of(raw: RawLabel) -> Option<Label> {
+    let name = raw.name.trim().to_string();
+    if name.is_empty() {
+        return None;
+    }
+    let hex = raw.color.trim();
+    let color = if hex.len() == 6 && hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+        format!("#{hex}")
+    } else {
+        String::new()
+    };
+    Some(Label { name, color })
+}
+
+/// One pull request, as a list of them knows it.
+///
+/// Everything here arrives with the list itself — one request for the lot — so
+/// a row can say who, when, where from and what about without a request of its
+/// own. What a list cannot be asked for that way is in [`PrMore`].
+///
+/// `Eq`, which is what lets a list hold these behind an `Rc` and have two of
+/// them compared by where they are rather than by reading both descriptions.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct PrSummary {
     pub number: u64,
     pub title: String,
     pub author: String,
+    /// The author's picture, or empty for an account that no longer has one.
+    #[serde(default)]
+    pub avatar: String,
     pub draft: bool,
     /// `open` or `closed`, as GitHub says it.
     pub state: String,
     /// Closed by landing rather than by being turned down. GitHub calls both
     /// `closed`, and they are not the same news.
     pub merged: bool,
+    #[serde(default)]
+    pub created_at: String,
     pub updated_at: String,
+    #[serde(default)]
+    pub html_url: String,
     pub head_ref: String,
+    /// The fork the head is a branch of, when it is not the repository the pull
+    /// request is against.
+    #[serde(default)]
+    pub head_repo: Option<RepoRef>,
     pub base_ref: String,
+    /// The description, as the markdown it was written in. Empty when nobody
+    /// wrote one.
+    #[serde(default)]
+    pub body: String,
+    #[serde(default)]
+    pub labels: Vec<Label>,
+    /// Who is still being waited on for a review: people by login, teams by
+    /// slug.
+    #[serde(default)]
+    pub reviewers: Vec<String>,
 }
 
 impl PrSummary {
     pub fn is_open(&self) -> bool {
         self.state == "open"
+    }
+
+    /// Which of the four things a pull request can be.
+    pub fn status(&self) -> PrStatus {
+        match () {
+            _ if self.merged => PrStatus::Merged,
+            _ if !self.is_open() => PrStatus::Closed,
+            _ if self.draft => PrStatus::Draft,
+            _ => PrStatus::Open,
+        }
+    }
+
+    /// The branch it comes from, with the fork's owner in front when it comes
+    /// from somebody else's — GitHub's own `owner:branch`.
+    pub fn head_label(&self) -> String {
+        match &self.head_repo {
+            Some(fork) => format!("{}:{}", fork.owner, self.head_ref),
+            None => self.head_ref.clone(),
+        }
+    }
+}
+
+/// Where a pull request has got to.
+///
+/// GitHub's `state` has two values and its badge has four, because a draft is
+/// open and a merge is closed and neither is the same news as its neighbour.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum PrStatus {
+    Open,
+    Draft,
+    Merged,
+    Closed,
+}
+
+impl PrStatus {
+    pub fn label(self) -> &'static str {
+        match self {
+            PrStatus::Open => "open",
+            PrStatus::Draft => "draft",
+            PrStatus::Merged => "merged",
+            PrStatus::Closed => "closed",
+        }
     }
 }
 
@@ -952,20 +1083,36 @@ pub async fn list_prs(token: &str, repo: &RepoRef, state: PrState) -> Result<Vec
         state.label(),
     );
     let raw: Vec<RawPr> = get_json(token, &url).await?;
-    Ok(raw.into_iter().map(summary_of).collect())
+    Ok(raw.into_iter().map(|p| summary_of(repo, p)).collect())
 }
 
-fn summary_of(p: RawPr) -> PrSummary {
+/// `base` is the repository the list was asked of, which is what says whether a
+/// head is in a fork.
+fn summary_of(base: &RepoRef, p: RawPr) -> PrSummary {
+    let reviewers = p
+        .requested_reviewers
+        .into_iter()
+        .map(|u| u.login)
+        .chain(p.requested_teams.into_iter().map(|t| t.slug))
+        .filter(|name| !name.is_empty())
+        .collect();
     PrSummary {
         number: p.number,
         title: p.title,
         author: author_of(&p.user),
+        avatar: p.user.and_then(|u| u.avatar_url).unwrap_or_default(),
         draft: p.draft,
         merged: p.merged_at.is_some(),
         state: p.state,
+        created_at: p.created_at.unwrap_or_default(),
         updated_at: p.updated_at,
+        html_url: p.html_url,
+        head_repo: fork_of(base, p.head.repo.as_ref()),
         head_ref: p.head.name,
         base_ref: p.base.name,
+        body: p.body.unwrap_or_default(),
+        labels: p.labels.into_iter().filter_map(label_of).collect(),
+        reviewers,
     }
 }
 
@@ -2320,6 +2467,24 @@ impl Tally {
         }
         parts.join(" · ")
     }
+
+    pub fn total(&self) -> usize {
+        self.passed + self.failed + self.running + self.quiet
+    }
+
+    /// The verdict, as one state.
+    ///
+    /// A failure outranks anything still running, which outranks a pass:
+    /// something already red is red however much of the rest is green, and a
+    /// build still going is not one that has passed.
+    pub fn state(&self) -> CheckState {
+        match () {
+            _ if self.failed > 0 => CheckState::Failed,
+            _ if self.running > 0 => CheckState::Running,
+            _ if self.passed > 0 => CheckState::Passed,
+            _ => CheckState::Quiet,
+        }
+    }
 }
 
 impl Checks {
@@ -2337,19 +2502,9 @@ impl Checks {
         t
     }
 
-    /// The commit's verdict, as one state.
-    ///
-    /// A failure outranks anything still running, which outranks a pass:
-    /// something already red is red however much of the rest is green, and a
-    /// build still going is not one that has passed.
+    /// The commit's verdict, as one state — see [`Tally::state`].
     pub fn state(&self) -> CheckState {
-        let t = self.tally();
-        match () {
-            _ if t.failed > 0 => CheckState::Failed,
-            _ if t.running > 0 => CheckState::Running,
-            _ if t.passed > 0 => CheckState::Passed,
-            _ => CheckState::Quiet,
-        }
+        self.tally().state()
     }
 }
 
@@ -2605,6 +2760,60 @@ fn epoch_secs(ts: &str) -> Option<i64> {
     Some(days_from_civil(year, month, day) * 86_400 + hour * 3_600 + minute * 60 + secs)
 }
 
+/// Seconds since the epoch, now.
+pub fn now_secs() -> i64 {
+    // web_time reads `Date.now()` in a page; std's SystemTime panics there.
+    web_time::SystemTime::now()
+        .duration_since(web_time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or_default()
+}
+
+/// How far back `ts` is from `now`, as a count and the unit it is a count of —
+/// the long word for it, and the letter. Zero of nothing is "under a minute".
+///
+/// Whole units, rounded down, in the largest unit that leaves a number worth
+/// reading: a pull request is "3 weeks" old, not "23 days" and not "0 months".
+fn age(ts: &str, now: i64) -> Option<(i64, &'static str, &'static str)> {
+    const MIN: i64 = 60;
+    const HOUR: i64 = 60 * MIN;
+    const DAY: i64 = 24 * HOUR;
+    // Two machines, two clocks: something from a few seconds into the future
+    // happened just now.
+    let secs = (now - epoch_secs(ts)?).max(0);
+    Some(match secs {
+        s if s < MIN => (0, "", ""),
+        s if s < HOUR => (s / MIN, "minute", "m"),
+        s if s < DAY => (s / HOUR, "hour", "h"),
+        s if s < 7 * DAY => (s / DAY, "day", "d"),
+        s if s < 30 * DAY => (s / (7 * DAY), "week", "w"),
+        s if s < 365 * DAY => (s / (30 * DAY), "month", "mo"),
+        s => (s / (365 * DAY), "year", "y"),
+    })
+}
+
+/// When something happened, the way somebody would say it: `3 days ago`.
+///
+/// Empty for a time that cannot be read, so the sentence it goes in says a
+/// little less rather than saying something wrong.
+pub fn ago(ts: &str, now: i64) -> String {
+    match age(ts, now) {
+        None => String::new(),
+        Some((0, ..)) => "just now".to_string(),
+        Some((1, unit, _)) => format!("1 {unit} ago"),
+        Some((n, unit, _)) => format!("{n} {unit}s ago"),
+    }
+}
+
+/// The same, in the width of a column: `3d`.
+pub fn ago_short(ts: &str, now: i64) -> String {
+    match age(ts, now) {
+        None => String::new(),
+        Some((0, ..)) => "now".to_string(),
+        Some((n, _, letter)) => format!("{n}{letter}"),
+    }
+}
+
 /// How long something took, in the words a build log uses.
 ///
 /// Both ends are needed: a check that is still running has no end to measure
@@ -2740,6 +2949,343 @@ pub async fn check_annotations(token: &str, repo: &RepoRef, check: u64) -> Resul
         .await
         .with_context(|| "reading what this check marked up".to_string())?;
     Ok(raw.into_iter().map(annotation_of).collect())
+}
+
+// ------------------------------------------------- the list, filled in
+
+/// GitHub's other API, which answers one question this one cannot.
+const GRAPHQL: &str = "https://api.github.com/graphql";
+
+/// What the reviewers have made of a pull request, where its repository asks
+/// for their say-so.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Review {
+    Approved,
+    ChangesRequested,
+    /// The branch needs an approval and does not have one yet.
+    Required,
+}
+
+impl Review {
+    pub fn label(self) -> &'static str {
+        match self {
+            Review::Approved => "approved",
+            Review::ChangesRequested => "changes requested",
+            Review::Required => "review required",
+        }
+    }
+
+    /// The stylesheet's name for the colour that goes with it — the same four
+    /// a check is drawn in.
+    pub fn tone(self) -> &'static str {
+        match self {
+            Review::Approved => "ok",
+            Review::ChangesRequested => "bad",
+            Review::Required => "off",
+        }
+    }
+}
+
+/// What a list of pull requests does not say about one of them, and a row of
+/// that list is worth reading for: whether the build is green, what the
+/// reviewers made of it, how big it is, how much has been said.
+///
+/// The REST list has none of it. Asked for there, the checks alone are two
+/// requests a row — two hundred for a full page, which is more than an
+/// anonymous caller gets in three hours. GraphQL answers for the whole page in
+/// one, and the price is that it will not talk to anybody who has not signed
+/// in: so this is an extra, laid over rows that are complete without it.
+#[derive(Clone, PartialEq, Eq, Debug, Default)]
+pub struct PrMore {
+    pub additions: u32,
+    pub deletions: u32,
+    pub files: u32,
+    /// Everything said on it: the conversation, the reviews, and the comments
+    /// on lines.
+    pub comments: u32,
+    /// `None` where nobody has to approve anything.
+    pub review: Option<Review>,
+    /// What ran against its head commit. `None` where nothing did.
+    pub checks: Option<Tally>,
+    /// It cannot be merged as it stands: the base has moved under it.
+    pub conflicts: bool,
+}
+
+/// How many pull requests to ask GraphQL about at once.
+///
+/// Not the whole list, though the whole list is one query: rolling up the
+/// checks of a hundred head commits takes GitHub about as long as it allows a
+/// query to take, and the answer to running over is a 502 with nothing in it. A
+/// quarter of that comes back in a couple of seconds, from the top of the list
+/// down — which is the order the rows are being read in anyway.
+pub const MORE_PAGE: usize = 25;
+
+const MORE_QUERY: &str = "query($owner:String!,$name:String!,$states:[PullRequestState!],\
+$first:Int!,$after:String){\
+repository(owner:$owner,name:$name){\
+pullRequests(first:$first,after:$after,states:$states,orderBy:{field:UPDATED_AT,direction:DESC}){\
+pageInfo{hasNextPage endCursor} \
+nodes{number additions deletions changedFiles reviewDecision mergeable totalCommentsCount \
+commits(last:1){nodes{commit{statusCheckRollup{state contexts{\
+checkRunCountsByState{state count} statusContextCountsByState{state count}}}}}}}}}}";
+
+/// One page of [`PrMore`], and where the page after it starts.
+#[derive(Debug, Default)]
+pub struct MorePage {
+    pub more: HashMap<u64, PrMore>,
+    /// The cursor to ask for the next page with. `None` at the end of the list.
+    pub next: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct GqlReply {
+    #[serde(default)]
+    data: Option<GqlData>,
+    #[serde(default)]
+    errors: Vec<GqlError>,
+}
+
+#[derive(Deserialize)]
+struct GqlError {
+    #[serde(default)]
+    message: String,
+}
+
+#[derive(Deserialize)]
+struct GqlData {
+    #[serde(default)]
+    repository: Option<GqlRepo>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GqlRepo {
+    pull_requests: GqlNodes<RawMore>,
+}
+
+/// A GraphQL list. Any entry of one can be null — it is how GraphQL says "this
+/// one I may not show you" without failing the rest.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GqlNodes<T> {
+    #[serde(default = "Vec::new")]
+    nodes: Vec<Option<T>>,
+    #[serde(default)]
+    page_info: Option<GqlPageInfo>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GqlPageInfo {
+    #[serde(default)]
+    has_next_page: bool,
+    #[serde(default)]
+    end_cursor: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RawMore {
+    number: u64,
+    #[serde(default)]
+    additions: u32,
+    #[serde(default)]
+    deletions: u32,
+    #[serde(default)]
+    changed_files: u32,
+    /// `APPROVED`, `CHANGES_REQUESTED`, `REVIEW_REQUIRED` — or null, on a branch
+    /// nobody has to approve anything for.
+    #[serde(default)]
+    review_decision: Option<String>,
+    /// `MERGEABLE`, `CONFLICTING`, or `UNKNOWN` while GitHub works it out.
+    #[serde(default)]
+    mergeable: Option<String>,
+    #[serde(default)]
+    total_comments_count: Option<u32>,
+    #[serde(default)]
+    commits: Option<GqlNodes<RawMoreCommit>>,
+}
+
+#[derive(Deserialize)]
+struct RawMoreCommit {
+    commit: RawMoreCommitBody,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RawMoreCommitBody {
+    #[serde(default)]
+    status_check_rollup: Option<RawRollup>,
+}
+
+#[derive(Deserialize)]
+struct RawRollup {
+    /// The rollup's own verdict. Only read when the counts under it are
+    /// missing, which is what a token that may not see them leaves behind.
+    #[serde(default)]
+    state: String,
+    #[serde(default)]
+    contexts: Option<RawRollupCounts>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RawRollupCounts {
+    #[serde(default)]
+    check_run_counts_by_state: Vec<RawCount>,
+    #[serde(default)]
+    status_context_counts_by_state: Vec<RawCount>,
+}
+
+#[derive(Deserialize)]
+struct RawCount {
+    #[serde(default)]
+    state: String,
+    #[serde(default)]
+    count: usize,
+}
+
+/// Which of the four one of GraphQL's words comes to — the check runs' fourteen
+/// and the commit statuses' five, which overlap and agree where they do.
+///
+/// The same sorting as [`run_state`] and [`status_check_of`], so a row here and
+/// the checks pane beside the code cannot colour one build two ways.
+fn rollup_state(word: &str) -> CheckState {
+    match word {
+        "SUCCESS" => CheckState::Passed,
+        "FAILURE" | "ERROR" | "TIMED_OUT" | "ACTION_REQUIRED" | "STARTUP_FAILURE" => {
+            CheckState::Failed
+        }
+        "IN_PROGRESS" | "PENDING" | "QUEUED" | "WAITING" | "REQUESTED" | "EXPECTED" => {
+            CheckState::Running
+        }
+        // Skipped, cancelled, stale, neutral — and `COMPLETED`, which is a run
+        // that finished and never said how.
+        _ => CheckState::Quiet,
+    }
+}
+
+fn tally_of(rollup: RawRollup) -> Tally {
+    let mut t = Tally::default();
+    let counts = rollup.contexts.unwrap_or(RawRollupCounts {
+        check_run_counts_by_state: Vec::new(),
+        status_context_counts_by_state: Vec::new(),
+    });
+    for c in counts
+        .check_run_counts_by_state
+        .iter()
+        .chain(&counts.status_context_counts_by_state)
+    {
+        let slot = match rollup_state(&c.state) {
+            CheckState::Passed => &mut t.passed,
+            CheckState::Failed => &mut t.failed,
+            CheckState::Running => &mut t.running,
+            CheckState::Quiet => &mut t.quiet,
+        };
+        *slot += c.count;
+    }
+    // No counts to go on, but a verdict: one of whatever it was, so the row
+    // still gets its colour.
+    if t.total() == 0 {
+        let slot = match rollup_state(&rollup.state) {
+            CheckState::Passed => &mut t.passed,
+            CheckState::Failed => &mut t.failed,
+            CheckState::Running => &mut t.running,
+            CheckState::Quiet => &mut t.quiet,
+        };
+        *slot = 1;
+    }
+    t
+}
+
+fn more_of(raw: RawMore) -> (u64, PrMore) {
+    let checks = raw
+        .commits
+        .and_then(|c| c.nodes.into_iter().flatten().next())
+        .and_then(|c| c.commit.status_check_rollup)
+        .map(tally_of);
+    let more = PrMore {
+        additions: raw.additions,
+        deletions: raw.deletions,
+        files: raw.changed_files,
+        comments: raw.total_comments_count.unwrap_or_default(),
+        review: match raw.review_decision.as_deref() {
+            Some("APPROVED") => Some(Review::Approved),
+            Some("CHANGES_REQUESTED") => Some(Review::ChangesRequested),
+            Some("REVIEW_REQUIRED") => Some(Review::Required),
+            _ => None,
+        },
+        checks,
+        conflicts: raw.mergeable.as_deref() == Some("CONFLICTING"),
+    };
+    (raw.number, more)
+}
+
+/// Read the answer to [`MORE_QUERY`], by pull request number.
+///
+/// GraphQL fails by halves: a field this token may not read comes back null
+/// with a complaint beside it, and everything else comes back as asked. So the
+/// complaints only become the error when there is nothing else to show.
+fn parse_more(body: &[u8]) -> Result<MorePage> {
+    let reply: GqlReply =
+        serde_json::from_slice(body).context("parsing what GitHub said about the list")?;
+    let Some(repo) = reply.data.and_then(|d| d.repository) else {
+        match reply.errors.first() {
+            Some(e) if !e.message.is_empty() => bail!("GitHub said: {}", e.message),
+            _ => bail!("GitHub had nothing to say about this repository's pull requests"),
+        }
+    };
+    let list = repo.pull_requests;
+    Ok(MorePage {
+        next: list
+            .page_info
+            .filter(|p| p.has_next_page)
+            .and_then(|p| p.end_cursor),
+        more: list.nodes.into_iter().flatten().map(more_of).collect(),
+    })
+}
+
+/// Checks, reviews, sizes and comment counts for the pull requests
+/// [`list_prs`] lists — the same ones, asked for the same way round, a
+/// [`MORE_PAGE`] at a time. `after` is where the last page said the next one
+/// starts; `None` asks for the top of the list.
+///
+/// Signed in only: GraphQL has no anonymous tier, and the caller is expected to
+/// know that before asking rather than find out from a 401 that reads like a
+/// rejected token.
+pub async fn pr_more(
+    token: &str,
+    repo: &RepoRef,
+    state: PrState,
+    after: Option<&str>,
+) -> Result<MorePage> {
+    let states: &[&str] = match state {
+        PrState::Open => &["OPEN"],
+        PrState::Closed => &["CLOSED", "MERGED"],
+        PrState::All => &["OPEN", "CLOSED", "MERGED"],
+    };
+    let ask = serde_json::json!({
+        "query": MORE_QUERY,
+        "variables": {
+            "owner": repo.owner,
+            "name": repo.name,
+            "states": states,
+            "first": MORE_PAGE,
+            "after": after,
+        },
+    });
+    let auth = format!("Bearer {token}");
+    let headers = [
+        ("Accept", "application/vnd.github+json"),
+        ("Content-Type", "application/json"),
+        ("Authorization", auth.as_str()),
+    ];
+    let reply = http::post(GRAPHQL, &headers, ask.to_string()).await?;
+    refused(token, &reply)?;
+    if !(200..300).contains(&reply.status) {
+        bail!("GitHub returned HTTP {}", reply.status);
+    }
+    parse_more(&reply.body)
 }
 
 /// One file's bytes from the CDN, named by commit and path.
@@ -3038,6 +3584,7 @@ mod tests {
             },
             author: login.map(|login| User {
                 login: login.to_string(),
+                avatar_url: None,
             }),
             html_url: String::new(),
         }
@@ -3195,6 +3742,7 @@ mod tests {
             draft: false,
             state: state.to_string(),
             merged_at: merged.then(|| "2026-08-13T09:00:00Z".to_string()),
+            created_at: None,
             updated_at: String::new(),
             html_url: String::new(),
             head: RawRef {
@@ -3207,16 +3755,168 @@ mod tests {
                 sha: String::new(),
                 repo: None,
             },
+            labels: Vec::new(),
+            requested_reviewers: Vec::new(),
+            requested_teams: Vec::new(),
         };
-        let open = summary_of(raw("open", false));
+        let base = RepoRef::default();
+        let open = summary_of(&base, raw("open", false));
         assert!(open.is_open() && !open.merged);
+        assert_eq!(open.status(), PrStatus::Open);
         // Both of these are `closed` to GitHub, and the badge on them differs.
-        let landed = summary_of(raw("closed", true));
+        let landed = summary_of(&base, raw("closed", true));
         assert!(!landed.is_open() && landed.merged);
-        let dropped = summary_of(raw("closed", false));
+        assert_eq!(landed.status(), PrStatus::Merged);
+        let dropped = summary_of(&base, raw("closed", false));
         assert!(!dropped.is_open() && !dropped.merged);
+        assert_eq!(dropped.status(), PrStatus::Closed);
         // And nobody's account is still somebody.
         assert_eq!(open.author, "ghost");
+    }
+
+    /// Everything a row of the list says comes out of the one request that
+    /// listed it — which is the whole reason a row can afford to say it.
+    #[test]
+    fn a_listed_pull_request_says_who_when_and_what_about() {
+        let raw: RawPr = serde_json::from_str(
+            r#"{"number":482,"title":"Fix the crash","body":"Wide characters.\n\nFixes #480.",
+                "state":"open","draft":true,
+                "user":{"login":"ada","avatar_url":"https://avatars.githubusercontent.com/u/1?v=4"},
+                "created_at":"2026-09-18T09:00:00Z","updated_at":"2026-09-21T07:30:00Z",
+                "html_url":"https://github.com/o/r/pull/482",
+                "labels":[{"name":"bug","color":"d73a4a"},{"name":"odd","color":"red;x"},{"name":" "}],
+                "requested_reviewers":[{"login":"bob"}],
+                "requested_teams":[{"slug":"core"}],
+                "head":{"ref":"fix/wide","sha":"1","repo":{"full_name":"ada/r"}},
+                "base":{"ref":"main","sha":"2","repo":{"full_name":"o/r"}}}"#,
+        )
+        .unwrap();
+        let base = RepoRef {
+            owner: "o".to_string(),
+            name: "r".to_string(),
+        };
+        let pr = summary_of(&base, raw);
+        assert_eq!(
+            pr.status(),
+            PrStatus::Draft,
+            "a draft is open, and says draft"
+        );
+        assert_eq!(pr.author, "ada");
+        assert!(pr.avatar.ends_with("/u/1?v=4"));
+        assert_eq!(pr.created_at, "2026-09-18T09:00:00Z");
+        assert!(pr.body.starts_with("Wide characters."));
+        assert_eq!(
+            pr.head_label(),
+            "ada:fix/wide",
+            "a fork is named by its owner"
+        );
+        assert_eq!(pr.reviewers, ["bob", "core"]);
+        // A colour goes into a style attribute, so only a colour gets there —
+        // and a label with no name is not a label.
+        let labels: Vec<_> = pr
+            .labels
+            .iter()
+            .map(|l| (l.name.as_str(), l.color.as_str()))
+            .collect();
+        assert_eq!(labels, [("bug", "#d73a4a"), ("odd", "")]);
+    }
+
+    #[test]
+    fn how_long_ago_is_said_in_the_largest_unit_worth_reading() {
+        let now = epoch_secs("2026-09-21T12:00:00Z").unwrap();
+        let said = |ts: &str| (ago(ts, now), ago_short(ts, now));
+        let both = |long: &str, short: &str| (long.to_string(), short.to_string());
+
+        assert_eq!(said("2026-09-21T11:59:30Z"), both("just now", "now"));
+        assert_eq!(said("2026-09-21T11:59:00Z"), both("1 minute ago", "1m"));
+        assert_eq!(said("2026-09-21T09:10:00Z"), both("2 hours ago", "2h"));
+        assert_eq!(said("2026-09-18T12:00:00Z"), both("3 days ago", "3d"));
+        assert_eq!(said("2026-08-29T12:00:00Z"), both("3 weeks ago", "3w"));
+        assert_eq!(said("2026-05-01T12:00:00Z"), both("4 months ago", "4mo"));
+        assert_eq!(said("2024-09-01T12:00:00Z"), both("2 years ago", "2y"));
+        // Somebody else's clock, a few seconds fast.
+        assert_eq!(said("2026-09-21T12:00:05Z"), both("just now", "now"));
+        // And something that is not a time says nothing rather than something
+        // wrong.
+        assert_eq!(said("yesterday"), both("", ""));
+    }
+
+    /// The order asked of GraphQL is the order asked of REST, or the pages of
+    /// one would not be the top of the other.
+    #[test]
+    fn the_extras_are_asked_for_in_the_order_of_the_list() {
+        assert!(MORE_QUERY.contains("field:UPDATED_AT,direction:DESC"));
+        assert!(MORE_QUERY.contains("first:$first,after:$after"));
+        assert_eq!(PR_PAGE % MORE_PAGE, 0, "whole pages add up to the list");
+    }
+
+    #[test]
+    fn what_graphql_says_about_a_list_is_read_by_number() {
+        let body = br#"{"data":{"repository":{"pullRequests":{"nodes":[
+            {"number":7,"additions":120,"deletions":30,"changedFiles":8,
+             "reviewDecision":"CHANGES_REQUESTED","mergeable":"CONFLICTING","totalCommentsCount":4,
+             "commits":{"nodes":[{"commit":{"statusCheckRollup":{"state":"FAILURE","contexts":{
+               "checkRunCountsByState":[{"state":"SUCCESS","count":19},{"state":"FAILURE","count":1},
+                 {"state":"SKIPPED","count":2},{"state":"IN_PROGRESS","count":0}],
+               "statusContextCountsByState":[{"state":"PENDING","count":1},{"state":"ERROR","count":1}]}}}}]}},
+            null,
+            {"number":8,"additions":1,"deletions":0,"changedFiles":1,
+             "reviewDecision":null,"mergeable":"UNKNOWN","totalCommentsCount":0,
+             "commits":{"nodes":[{"commit":{"statusCheckRollup":null}}]}}
+        ],"pageInfo":{"hasNextPage":true,"endCursor":"Y3Vyc29y"}}}}}"#;
+        let page = parse_more(body).unwrap();
+        assert_eq!(
+            page.next.as_deref(),
+            Some("Y3Vyc29y"),
+            "and there is a page after it"
+        );
+        let more = page.more;
+        assert_eq!(
+            more.len(),
+            2,
+            "a null entry is one GitHub would not show, not a failure"
+        );
+
+        let red = &more[&7];
+        assert_eq!((red.additions, red.deletions, red.files), (120, 30, 8));
+        assert_eq!(red.comments, 4);
+        assert_eq!(red.review, Some(Review::ChangesRequested));
+        assert!(red.conflicts);
+        // Both of GitHub's lists, in one tally — sorted the way the checks pane
+        // sorts them.
+        let t = red.checks.unwrap();
+        assert_eq!((t.passed, t.failed, t.running, t.quiet), (19, 2, 1, 2));
+        assert_eq!(t.state(), CheckState::Failed);
+
+        let plain = &more[&8];
+        assert_eq!(plain.review, None, "nobody has to approve anything here");
+        assert_eq!(plain.checks, None, "and nothing ran");
+        assert!(!plain.conflicts, "not known to conflict is not a conflict");
+    }
+
+    /// GraphQL fails by halves, and the half that arrived is worth having.
+    #[test]
+    fn a_field_the_token_may_not_read_costs_that_field_and_nothing_else() {
+        let body = br#"{"data":{"repository":{"pullRequests":{"nodes":[
+            {"number":7,"additions":5,"deletions":5,"changedFiles":1,"reviewDecision":"APPROVED",
+             "commits":{"nodes":[{"commit":{"statusCheckRollup":{"state":"SUCCESS","contexts":null}}}]}}
+        ],"pageInfo":{"hasNextPage":false,"endCursor":"Y3Vyc29y"}}}},
+        "errors":[{"message":"Resource not accessible by personal access token"}]}"#;
+        let page = parse_more(body).unwrap();
+        assert_eq!(
+            page.next, None,
+            "the last page has nothing after it, cursor or no cursor"
+        );
+        let more = page.more;
+        assert_eq!(more[&7].review, Some(Review::Approved));
+        // A verdict with no counts behind it still colours the row.
+        assert_eq!(more[&7].checks.unwrap().state(), CheckState::Passed);
+
+        // Nothing at all, though, is an error — and it is GitHub's own words
+        // that say which.
+        let refused = br#"{"data":{"repository":null},"errors":[{"message":"Could not resolve to a Repository"}]}"#;
+        let e = format!("{:#}", parse_more(refused).unwrap_err());
+        assert!(e.contains("Could not resolve"), "{e}");
     }
 
     #[test]

@@ -14,6 +14,7 @@ mod opening;
 mod page;
 mod palette;
 mod panes;
+mod prboard;
 mod prcache;
 mod prefs;
 mod reader;

@@ -131,6 +131,7 @@ pub const CMDS: &[Cmd] = &[
     cmd("forward", "Go Forward", "⌘]"),
     cmd("panel", "Close the Panel Below the Code", "Esc"),
     cmd("conv", "Toggle the Conversation Pane", ""),
+    cmd("prs", "Show the Pull Requests of This Repository", ""),
     cmd("newspace", "New Space", "⌥⇧T"),
     cmd("closespace", "Close Space", "⌥⇧W"),
     cmd("nextspace", "Next Space", "⌥⇧→"),
@@ -236,6 +237,11 @@ pub fn run(st: St, id: &str) {
             let mut conv = st.conv_open;
             let now = *conv.peek();
             conv.set(!now);
+        }
+        "prs" => {
+            let mut board = st.pr_board;
+            let now = *board.peek();
+            board.set(!now);
         }
         "newspace" => spaces::open_new(&st),
         // Bound first — see the same call in `super::ide`, and why.

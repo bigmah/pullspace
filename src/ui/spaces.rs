@@ -167,6 +167,7 @@ held! {
     repo_input: String = String::new(),
     prs: Option<PrList> = None,
     pr_state: PrState = PrState::default(),
+    pr_board: bool = false,
     fetch: Fetch = Fetch::Idle,
     conv: Conversation = Conversation::Loading,
     conv_open: bool = true,

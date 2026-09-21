@@ -1,11 +1,11 @@
 use dioxus::prelude::*;
 
 use crate::backend::auth::open_browser;
-use crate::backend::github::RepoRef;
+use crate::backend::github::{PR_PAGE, PrState};
 
 use super::app::{Account, Fetch, St, Workspace};
 use super::full;
-use super::github::{GithubMark, PrListBody, PrStates, browse_repo};
+use super::github::GithubMark;
 use super::ide;
 use super::refbar::{Go, Refs};
 use super::spaces::{Kind, SpaceSwitch};
@@ -265,8 +265,7 @@ pub fn TopBar() -> Element {
     }
 }
 
-/// The pull requests of the repository that is open — and, at the foot of the
-/// list, the repository itself.
+/// The way to the pull requests of the repository that is open.
 ///
 /// A review is rarely one pull request. The list of them is already here, kept
 /// alongside whatever is open (see the effect in [`App`](super::app::App)), so
@@ -274,107 +273,53 @@ pub fn TopBar() -> Element {
 /// picker. Always the same word in the same place: what is open is said by the
 /// chip before it and the branches after it, and a button whose label changed
 /// with every pull request is a button that has to be found again every time.
+///
+/// What it opens is [`PrBoard`](super::prboard::PrBoard) — the page under this
+/// bar, given over to the list. It used to be a menu hanging off this button,
+/// and a menu is as wide as a menu: a title, a name and a date, which is enough
+/// to find a pull request you already know and not enough to choose between the
+/// ones you do not.
 #[component]
 fn PrSwitch() -> Element {
     let st = use_context::<St>();
-    let mut open = use_signal(|| false);
+    let mut board = st.pr_board;
+    let showing = *board.read();
 
-    let current = st.workspace.read().pr_number();
-    let repo = st.workspace.read().repo_ref().cloned();
-    // The repository row is the one being read only when the repository itself
-    // is what is open — a commit of it is somewhere else.
-    let browsing = st.workspace.read().repo().is_some();
-    // Whose pull requests these are. Usually the repository that is open, but
-    // the picker can have moved on to another one without opening it — and a
-    // list that says whose it is cannot be read as the wrong repository's.
-    let listed = st.prs.read().as_ref().map(|l| l.repo.to_string());
-    let why = match &repo {
+    // How many are open, once that is known — which is what says whether the
+    // button is worth pressing. Only ever that: the list behind it can be
+    // toggled to the closed ones, or moved on to another repository by the
+    // picker, and a number on this bar about either would be read as this one.
+    let count = {
+        let held = st.prs.read();
+        let ws = st.workspace.read();
+        held.as_ref()
+            .filter(|l| l.state == PrState::Open && ws.repo_ref() == Some(&l.repo))
+            .map(|l| l.items().len())
+            .filter(|n| *n > 0)
+            .map(|n| match n {
+                n if n >= PR_PAGE => format!("{PR_PAGE}+"),
+                n => n.to_string(),
+            })
+    };
+    let why = match st.workspace.read().repo_ref() {
+        Some(repo) if showing => {
+            format!("Back to what is open  (Esc) — the pull requests of {repo}")
+        }
         Some(repo) => format!("The pull requests of {repo}"),
         None => "Pull requests".to_string(),
     };
 
-    // A swap that has landed is a menu that has done what it was opened for.
-    // On the workspace rather than on the click, so the menu stays up — with
-    // the row still under the pointer — for as long as the loading takes.
-    use_effect(move || {
-        let _ = st.workspace.read();
-        open.set(false);
-    });
-
-    let showing = *open.read();
-
     rsx! {
-        div {
-            class: if showing { "prswitch on" } else { "prswitch" },
-            // Escape, wherever the focus is inside here — which after the click
-            // that opened the menu is the button, above the menu rather than in
-            // it, so the handler goes on the pair of them.
-            onkeydown: move |e| {
-                if e.key() == Key::Escape && *open.peek() {
-                    e.stop_propagation();
-                    open.set(false);
-                }
-            },
-            button {
-                class: "barbtn",
-                title: "{why}",
-                onclick: move |_| {
-                    let showing = *open.peek();
-                    open.set(!showing);
-                },
-                "Pull requests"
-                span { class: "prchev", "▾" }
-            }
-            if showing {
-                // Everything else on the page, for as long as the menu is up:
-                // a click anywhere out here puts it away, which is the one
-                // thing every menu does.
-                div {
-                    class: "menuback",
-                    onclick: move |_| open.set(false),
-                }
-                div { class: "prmenu",
-                    div { class: "prmenuhdr",
-                        if let Some(listed) = listed {
-                            span { class: "ghlabel", "{listed}" }
-                        }
-                        span { class: "spacer" }
-                        PrStates {}
-                    }
-                    div { class: "prmenubody", PrListBody { current } }
-                    if let Some(repo) = repo {
-                        BrowseFoot { repo, current: browsing }
-                    }
-                }
-            }
-        }
-    }
-}
-
-/// The way out of a pull request and into the repository it is against — the
-/// row at the foot of the switcher, and the one that is already ticked when the
-/// repository is what is open.
-#[component]
-fn BrowseFoot(repo: RepoRef, current: bool) -> Element {
-    let st = use_context::<St>();
-    let class = if current {
-        "prmenufoot on"
-    } else {
-        "prmenufoot"
-    };
-    rsx! {
-        div {
-            class: "{class}",
-            title: if current { "Already open" } else { "Read {repo} at its default branch, with no pull request" },
-            // Root scope: loading replaces the bar this row hangs off.
+        button {
+            class: if showing { "barbtn on" } else { "barbtn" },
+            title: "{why}",
             onclick: move |_| {
-                if !current {
-                    spawn_forever(browse_repo(st, repo.clone()));
-                }
+                let showing = *board.peek();
+                board.set(!showing);
             },
-            span { class: "prmenufoot-label", "the repository itself" }
-            if current {
-                span { class: "prhere", "reading" }
+            "Pull requests"
+            if let Some(count) = count {
+                span { class: "barcount", title: "Open pull requests", "{count}" }
             }
         }
     }

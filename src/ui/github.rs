@@ -15,6 +15,7 @@
 //! the box would be charging entry to a public building.
 
 use std::collections::HashMap;
+use std::rc::Rc;
 use std::time::Duration;
 
 use dioxus::prelude::*;
@@ -27,7 +28,7 @@ use crate::backend::github::{
 };
 use crate::backend::route::{self, Link, Route, Target};
 
-use super::app::{Account, Fetch, Got, PrList, St};
+use super::app::{Account, Fetch, Got, More, MoreGot, PrList, St};
 use super::compat;
 use super::spaces::Claim;
 use super::topbar::size_label;
@@ -584,7 +585,7 @@ pub(super) fn PrStates() -> Element {
 
 /// The adjective in "3 open pull requests" — with the space it needs, since the
 /// list of everything has no adjective at all.
-fn state_word(state: PrState) -> &'static str {
+pub(super) fn state_word(state: PrState) -> &'static str {
     match state {
         PrState::Open => "open ",
         PrState::Closed => "closed ",
@@ -1272,7 +1273,7 @@ fn BrowseRow(repo: RepoRef, no_prs: bool) -> Element {
 }
 
 #[component]
-fn PrRow(repo: RepoRef, pr: PrSummary, current: bool) -> Element {
+fn PrRow(repo: RepoRef, pr: Rc<PrSummary>, current: bool) -> Element {
     let st = use_context::<St>();
     let number = pr.number;
     let target = repo;
@@ -1388,10 +1389,11 @@ pub(super) async fn load_repo_prs(st: St, repo: RepoRef) {
         repo: repo.clone(),
         state,
         got: Got::Loading,
+        more: More::default(),
     }));
 
     let got = match github::list_prs(&token, &repo, state).await {
-        Ok(items) => Got::Ready(items),
+        Ok(items) => Got::Ready(items.into_iter().map(Rc::new).collect()),
         Err(e) => Got::Failed(format!("{e:#}")),
     };
     // A repository opened, or the toggle flipped, while this was in flight: the
@@ -1399,7 +1401,70 @@ pub(super) async fn load_repo_prs(st: St, repo: RepoRef) {
     // changed under it too, which no question about this list can see.
     let wanted = claim.kept() && prs.peek().as_ref().is_some_and(|l| l.covers(&repo, state));
     if wanted {
-        prs.set(Some(PrList { repo, state, got }));
+        prs.set(Some(PrList {
+            repo,
+            state,
+            got,
+            more: More::default(),
+        }));
+    }
+}
+
+/// Fill in what the list on the shelf does not say: checks, reviews, sizes.
+///
+/// Asked for by the board, the first time it shows a list — see
+/// [`super::prboard`] — and never by the list itself, so a review that never
+/// opens the board never pays for it. Signed in only; the caller has already
+/// checked that somebody is.
+///
+/// A page at a time, each one put on the rows as it lands rather than held for
+/// the last: the top of the list is what is being read, and it is the first
+/// page back.
+pub(super) async fn load_pr_more(st: St, repo: RepoRef, state: PrState) {
+    let claim = Claim::new(st);
+    let token = st.api_token();
+    let mut prs = st.prs;
+    // Still the list this is about? Asked before the first request and again
+    // after every one, the same way and for the same reasons as the list's own
+    // fetch.
+    let held = st.prs;
+    let wanted = || claim.kept() && held.peek().as_ref().is_some_and(|l| l.covers(&repo, state));
+
+    if !wanted() {
+        return;
+    }
+    if let Some(list) = prs.write().as_mut() {
+        list.more.got = MoreGot::Loading;
+    }
+
+    let mut after: Option<String> = None;
+    let mut asked = 0;
+    let end = loop {
+        let page = match github::pr_more(&token, &repo, state, after.as_deref()).await {
+            Ok(page) => page,
+            Err(e) => break MoreGot::Failed(format!("{e:#}")),
+        };
+        if !wanted() {
+            return;
+        }
+        if let Some(list) = prs.write().as_mut() {
+            let mut known = (*list.more.known).clone();
+            known.extend(page.more);
+            list.more.known = Rc::new(known);
+        }
+        asked += github::MORE_PAGE;
+        after = page.next;
+        // The end of GitHub's list, or the end of ours: the rows stop at
+        // `PR_PAGE`, so there is nobody to tell about the pull request after.
+        if after.is_none() || asked >= PR_PAGE {
+            break MoreGot::Done;
+        }
+    };
+    if !wanted() {
+        return;
+    }
+    if let Some(list) = prs.write().as_mut() {
+        list.more.got = end;
     }
 }
 

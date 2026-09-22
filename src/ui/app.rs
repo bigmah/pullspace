@@ -922,6 +922,11 @@ pub struct St {
     pub side_w: Signal<f64>,
     pub conv_w: Signal<f64>,
     pub bottom_h: Signal<f64>,
+    /// The left-hand side's share of a side-by-side diff, from 0 to 1.
+    pub split: Signal<f64>,
+    /// How wide that diff was last drawn, which is what turns a drag in
+    /// pixels into a change of share. `0` until it is first drawn.
+    pub split_w: Signal<f64>,
     /// The area the two panes share, as last measured. `(0, 0)` until the
     /// first report from the resize observer.
     pub main_size: Signal<(f64, f64)>,
@@ -1137,14 +1142,30 @@ impl St {
     /// The commits between them come with the comparison, so the pane beside it
     /// is filled in here rather than left to fetch what is already in hand —
     /// after [`enter`](Self::enter), which is what clears the last list out.
+    ///
+    /// Swapping the two sides is the same pair asked the other way round, so
+    /// the file being read follows the swap, as it follows a branch switch —
+    /// the question is what this file looks like from the other side.
     pub fn enter_compare(&self, view: CompareView) {
-        let reload = self.workspace.peek().compare().is_some_and(|open| {
-            open.repo == view.repo && open.base == view.base && open.head == view.head
-        });
+        let (reload, swapped) = {
+            let held = self.workspace.peek();
+            let open = held.compare().filter(|open| open.repo == view.repo);
+            (
+                open.is_some_and(|open| open.base == view.base && open.head == view.head),
+                open.is_some_and(|open| open.base == view.head && open.head == view.base),
+            )
+        };
+        let was_reading = self.open.peek().clone();
         let commits = view.commits.clone();
-        self.enter(Workspace::Compare(Box::new(view)), reload);
+        let linked = self.enter(Workspace::Compare(Box::new(view)), reload);
         let mut held = self.commits;
         held.set(CommitList::Ready(Box::new(commits)));
+        if swapped && !linked {
+            let carried = was_reading.filter(|path| self.has_file(path));
+            if let Some(path) = carried {
+                self.open_file(path);
+            }
+        }
     }
 
     /// Show one commit, diffed against the commit before it.
@@ -2247,6 +2268,8 @@ pub fn App() -> Element {
             side_w: root(saved.side_w),
             conv_w: root(saved.conv_w),
             bottom_h: root(saved.bottom_h),
+            split: root(saved.split),
+            split_w: root(0.0),
             main_size: root((0.0, 0.0)),
             full: root(false),
             drag: root(None),
@@ -2612,10 +2635,11 @@ pub fn App() -> Element {
     // a half pixel blurs the hairline it draws, and the extra precision is not
     // something anyone is dragging for.
     let panes = format!(
-        "--side-w:{:.0}px;--conv-w:{:.0}px;--bottom-h:{:.0}px",
+        "--side-w:{:.0}px;--conv-w:{:.0}px;--bottom-h:{:.0}px;--split:{:.4}",
         *st.side_w.read(),
         *st.conv_w.read(),
         *st.bottom_h.read(),
+        *st.split.read(),
     );
 
     // The chosen palette, font and size, as the stylesheet that applies them.

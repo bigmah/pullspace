@@ -25,6 +25,7 @@ use super::compat;
 use super::ide;
 use super::imgcache::{all_settled, drawable, ensure_image};
 use super::markdown::Target;
+use super::panes::{Edge, Splitter};
 use super::prcache::ensure_path;
 use super::reader::Reader;
 use super::tabs::{self, TabStrip};
@@ -522,7 +523,7 @@ pub fn Viewer() -> Element {
         },
         ViewMode::Split => match diff.read().as_ref() {
             Some(d) if d.is_empty() => rsx! { div { class: "notice", "No differences." } },
-            Some(d) => render_split(d, &open_gaps, &marks, at),
+            Some(d) => render_split(st, d, &open_gaps, &marks, at),
             None => rsx! { div { class: "notice", "Binary file — cannot diff." } },
         },
         ViewMode::Preview if prose => match doc.read().as_ref() {
@@ -1655,14 +1656,30 @@ fn split_cell(l: Option<&Line>, right: bool, m: &Marks<'_>, at: Option<usize>) -
     }
 }
 
+/// Two columns, split wherever the seam down the middle was last dragged to.
+///
+/// The share is the stylesheet's (`--split`, published with the pane sizes),
+/// so a drag re-renders none of the rows. The seam is one element laid over
+/// the whole diff rather than a border on every row, because it is the one
+/// thing to take hold of.
 fn render_split(
+    st: St,
     diff: &FileDiff,
     open: &HashMap<usize, Expansion>,
     m: &Marks<'_>,
     at: Option<usize>,
 ) -> Element {
     rsx! {
-        div { class: "code split",
+        div {
+            class: "code split",
+            // What a pixel of drag is worth as a share of the diff.
+            onresize: move |e| {
+                if let Ok(size) = e.get_content_box_size() {
+                    let mut w = st.split_w;
+                    w.set(size.width);
+                }
+            },
+            Splitter { edge: Edge::Diff }
             for block in blocks(diff, open) {
                 {split_block(diff, block, m, at)}
             }

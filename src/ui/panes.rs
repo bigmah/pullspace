@@ -1,5 +1,5 @@
 //! Draggable dividers between the explorer, the code, the results panel and the
-//! conversation.
+//! conversation — and the seam between the two sides of a side-by-side diff.
 //!
 //! The sizes are published as CSS custom properties on the app's root element
 //! and read back by the stylesheet, so moving a divider re-renders exactly one
@@ -31,6 +31,9 @@ pub enum Edge {
     Conv,
     /// The results panel's top edge — the one that moves vertically.
     Bottom,
+    /// The seam down the middle of a side-by-side diff. Its size is the left
+    /// side's share of the diff rather than pixels.
+    Diff,
 }
 
 /// A drag in progress: which divider, and the two numbers every later pointer
@@ -49,6 +52,9 @@ const MIN_SIDE: f64 = 170.0;
 const MAX_SIDE: f64 = 720.0;
 const MIN_CONV: f64 = 250.0;
 const MAX_CONV: f64 = 780.0;
+/// The narrowest a side of a side-by-side diff is dragged to: a gutter and a
+/// few characters, enough to see there is a side there to drag back.
+const MIN_DIFF_SIDE: f64 = 120.0;
 /// The results panel, folded as small as it is worth being. Matches
 /// `.bottom`'s `min-height`.
 const MIN_BOTTOM: f64 = 92.0;
@@ -84,8 +90,17 @@ impl Edge {
     /// backwards — as does the results panel, which grows upwards.
     fn sign(self) -> f64 {
         match self {
-            Edge::Sidebar => 1.0,
+            Edge::Sidebar | Edge::Diff => 1.0,
             Edge::Conv | Edge::Bottom => -1.0,
+        }
+    }
+
+    /// Pixels of pointer travel per unit of size. One, except for the diff's
+    /// seam, whose size is a share of however wide the diff is.
+    fn scale(self, st: &St) -> f64 {
+        match self {
+            Edge::Diff => st.split_w.peek().max(1.0),
+            _ => 1.0,
         }
     }
 
@@ -94,6 +109,7 @@ impl Edge {
             Edge::Sidebar => st.side_w,
             Edge::Conv => st.conv_w,
             Edge::Bottom => st.bottom_h,
+            Edge::Diff => st.split,
         }
     }
 
@@ -103,6 +119,7 @@ impl Edge {
             Edge::Sidebar => d.side_w,
             Edge::Conv => d.conv_w,
             Edge::Bottom => d.bottom_h,
+            Edge::Diff => d.split,
         }
     }
 
@@ -111,6 +128,7 @@ impl Edge {
             Edge::Sidebar => "explorer",
             Edge::Conv => "conversation",
             Edge::Bottom => "results panel",
+            Edge::Diff => "two sides",
         }
     }
 }
@@ -161,6 +179,17 @@ fn bounds(edge: Edge, st: &St) -> (f64, f64) {
             let room = h - MIN_ABOVE;
             (MIN_BOTTOM, if h > 0.0 { room } else { 640.0 })
         }
+        Edge::Diff => {
+            let w = *st.split_w.peek();
+            // Never past the middle: a diff too narrow for two minimums is
+            // still one whose seam can sit halfway.
+            let lo = if w > 0.0 {
+                (MIN_DIFF_SIDE / w).min(0.5)
+            } else {
+                0.0
+            };
+            (lo.max(0.05), (1.0 - lo).min(0.95))
+        }
     };
     // A window too small for both limits still has to answer with a range, and
     // the minimum is the one worth keeping — a pane below it is unreadable.
@@ -176,7 +205,12 @@ pub fn Splitter(edge: Edge) -> Element {
     let mut last = st.last_grab;
 
     let holding = matches!(*st.drag.read(), Some(d) if d.edge == edge);
-    let axis = if edge.vertical() { "horiz" } else { "vert" };
+    let axis = match edge {
+        Edge::Bottom => "horiz",
+        // Laid over the diff rather than between two panes — see `.seam`.
+        Edge::Diff => "vert seam",
+        _ => "vert",
+    };
     let cls = if holding {
         format!("splitter {axis} on")
     } else {
@@ -257,7 +291,8 @@ pub fn DragMask() -> Element {
                 let at = if d.edge.vertical() { p.y } else { p.x };
                 let (lo, hi) = bounds(d.edge, &st);
                 let mut size = d.edge.size(&st);
-                size.set((d.start + d.edge.sign() * (at - d.origin)).clamp(lo, hi));
+                let moved = d.edge.sign() * (at - d.origin) / d.edge.scale(&st);
+                size.set((d.start + moved).clamp(lo, hi));
             },
             onmouseup: move |_| release(st),
         }
@@ -272,7 +307,7 @@ fn release(st: St) {
     // Only a press that let go without moving anything can be the first half
     // of a double-click — which is the rule everywhere else, and the reason a
     // drag is not one.
-    let moved = (*d.edge.size(&st).peek() - d.start).abs() >= SLOP;
+    let moved = (*d.edge.size(&st).peek() - d.start).abs() * d.edge.scale(&st) >= SLOP;
     let mut last = st.last_grab;
     last.set((!moved).then_some((d.edge, Instant::now())));
     if moved {
@@ -312,5 +347,6 @@ fn remember(st: St) {
         side_w: *st.side_w.peek(),
         conv_w: *st.conv_w.peek(),
         bottom_h: *st.bottom_h.peek(),
+        split: *st.split.peek(),
     });
 }

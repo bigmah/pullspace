@@ -244,7 +244,9 @@ fn shape_of(ws: &Workspace) -> Option<(RepoRef, Shape, Trail)> {
                 )),
             };
             // Which of two branches is the base is a thing to get wrong, and
-            // the answer is one click rather than two trips through the lists.
+            // the answer is one click rather than two trips through the lists —
+            // on a button that is always there, rather than one found by
+            // pointing at the arrow.
             let swap = Some((
                 Go::Compare(repo.clone(), head.clone(), base.clone()),
                 format!("Swap them — compare {base} into {head}"),
@@ -386,8 +388,7 @@ pub fn Refs() -> Element {
                             class: "refsep",
                             title: "{why}",
                             onclick: move |_| go.clone().run(st),
-                            span { class: "dir", "←" }
-                            span { class: "swap", "⇄" }
+                            "⇄"
                         }
                     } else {
                         span { class: "refsep", title: "Merges into the branch on the left",

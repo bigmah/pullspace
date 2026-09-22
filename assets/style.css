@@ -1346,23 +1346,40 @@ button { font-family: inherit; user-select: none; }
 
 /* side-by-side */
 
-.split { min-width: 100%; }
+.split { min-width: 100%; position: relative; }
 
 .srow { display: flex; align-items: stretch; }
 
+/* The left side takes the share the seam was dragged to (`--split`, from
+   `panes.rs`); the right side has the rest. */
 .scell {
   display: flex;
   align-items: flex-start;
-  flex: 1 1 50%;
+  flex: 1 1 0;
   min-width: 0;
   overflow: hidden;
   white-space: pre;
+}
+
+.scell:first-child {
+  flex: 0 0 calc(var(--split, 0.5) * 100%);
   border-right: 1px solid var(--border);
 }
 
-/* The seam between the two sides is worth a line; the outer edge of the pane
-   is not. */
-.scell:last-child { border-right: none; }
+/* The seam, laid over the diff's whole height on the left side's border — so
+   the line is the rows' own and this adds only something to take hold of,
+   lit when it is. Absolute rather than a flex item: there is no row it sits
+   between, only two columns. */
+.splitter.seam {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: calc(var(--split, 0.5) * 100% - 1px);
+  background: transparent;
+}
+
+.splitter.seam:hover,
+.splitter.seam.on { background: var(--accent); }
 
 .scell .lc { overflow: hidden; text-overflow: ellipsis; }
 
@@ -2657,7 +2674,7 @@ button { font-family: inherit; user-select: none; }
 .refplus { font-size: 14px; line-height: 1; }
 
 /* GitHub's arrow between the two: the right-hand ref goes into the left. On a
-   comparison it is also the swap, and says so when it is pointed at. */
+   comparison it is the swap instead, drawn as the button it is. */
 .refsep {
   display: inline-flex;
   align-items: center;
@@ -2674,11 +2691,21 @@ button { font-family: inherit; user-select: none; }
   line-height: 1;
 }
 
-button.refsep { cursor: pointer; }
-button.refsep:hover { color: var(--fg); background: var(--bg-3); border-color: var(--line); }
-.refsep .swap { display: none; }
-button.refsep:hover .dir { display: none; }
-button.refsep:hover .swap { display: block; }
+button.refsep {
+  width: 24px;
+  height: var(--ctl);
+  border-color: var(--line);
+  color: var(--fg-dim);
+  font-size: 14px;
+  cursor: pointer;
+  transition: background-color var(--quick) var(--ease), color var(--quick) var(--ease),
+    border-color var(--quick) var(--ease);
+}
+button.refsep:hover {
+  color: var(--accent);
+  background: var(--accent-soft);
+  border-color: var(--accent-line);
+}
 
 /* A pull request's title, a comparison's count, a commit's subject — the
    first thing on the bar to give up its width, down to about what a pull

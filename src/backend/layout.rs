@@ -21,6 +21,10 @@ pub struct Layout {
     pub conv_w: f64,
     /// The results panel's height, when something has put it up.
     pub bottom_h: f64,
+    /// How much of a side-by-side diff the left-hand side takes, as a
+    /// fraction: a proportion rather than pixels, so it holds as the pane
+    /// around it is resized.
+    pub split: f64,
 }
 
 impl Default for Layout {
@@ -29,6 +33,7 @@ impl Default for Layout {
             side_w: 280.0,
             conv_w: 440.0,
             bottom_h: 240.0,
+            split: 0.5,
         }
     }
 }
@@ -50,6 +55,7 @@ impl Layout {
             side_w: ok(self.side_w, 120.0, 1200.0, d.side_w),
             conv_w: ok(self.conv_w, 160.0, 1200.0, d.conv_w),
             bottom_h: ok(self.bottom_h, 80.0, 1200.0, d.bottom_h),
+            split: ok(self.split, 0.05, 0.95, d.split),
         }
     }
 }
@@ -80,11 +86,13 @@ mod tests {
             side_w: f64::NAN,
             conv_w: -40.0,
             bottom_h: f64::INFINITY,
+            split: 1.5,
         };
         let fixed = broken.sane();
         assert_eq!(fixed.side_w, d.side_w);
         assert_eq!(fixed.conv_w, d.conv_w);
         assert_eq!(fixed.bottom_h, d.bottom_h);
+        assert_eq!(fixed.split, d.split);
     }
 
     #[test]
@@ -93,6 +101,7 @@ mod tests {
             side_w: 331.0,
             conv_w: 500.0,
             bottom_h: 300.0,
+            split: 0.62,
         };
         let raw = serde_json::to_string(&mine).unwrap();
         let back: Layout = serde_json::from_str(&raw).unwrap();
@@ -105,5 +114,6 @@ mod tests {
         assert_eq!(back.side_w, 200.0);
         assert_eq!(back.conv_w, Layout::default().conv_w);
         assert_eq!(back.bottom_h, Layout::default().bottom_h);
+        assert_eq!(back.split, Layout::default().split);
     }
 }

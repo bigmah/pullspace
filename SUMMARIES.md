@@ -70,6 +70,8 @@ with the branch.
   Directories with a page have a ◈ on their row. The command palette has
   *Open Summaries*. When nothing is open yet, the welcome pane offers the
   guide.
+- **Clicking a page's `.html` file** in the explorer, or choosing Preview on
+  one, opens it as a summary too.
 - **Links work.** Clicking a directory link goes down the map. Clicking a file
   link opens the file at the linked line. The summary keeps its tab in the
   strip while you read code, so coming back is one click.

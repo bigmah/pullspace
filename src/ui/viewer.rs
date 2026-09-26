@@ -408,6 +408,21 @@ pub fn Viewer() -> Element {
         }))
     });
 
+    // A summary page asked for as a page — the Preview button, the palette,
+    // a tab left in Preview — is shown in the summary pane instead. The
+    // generic preview's frame denies everything, links included, and a
+    // summary is mostly links. The file's own tab goes back to its source,
+    // which is what it is for from here on.
+    use_effect(move || {
+        let wanted = *st.view_mode.read() == ViewMode::Preview;
+        let open = st.open.read().clone();
+        if let Some(page) = open.filter(|p| wanted && crate::backend::summary::is_page(p)) {
+            let mut vm = st.view_mode;
+            vm.set(ViewMode::Source);
+            st.open_summary(page);
+        }
+    });
+
     // A file arrives where it was left — and, the first time, at the top of
     // itself. The scroll container outlives the file in it, so without this,
     // opening something short after reading deep into something long lands you

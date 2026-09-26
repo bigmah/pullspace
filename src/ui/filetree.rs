@@ -526,7 +526,15 @@ fn TreeRow(row: Row, active: bool, viewed: bool, summarized: bool) -> Element {
                     // a handler here would put a blocking round trip to Rust in the
                     // way of the highlight — see `HOVER_JS`.
                     "data-path": "{path_attr}",
-                    onclick: move |_| st.open_file(path.clone()),
+                    // A summary page opens as one, where its links work — see
+                    // `super::summary`. Its HTML is the pane's Source button.
+                    onclick: move |_| {
+                        if crate::backend::summary::is_page(&path) {
+                            st.open_summary(path.clone());
+                        } else {
+                            st.open_file(path.clone());
+                        }
+                    },
                     span { class: "arrow" }
                     span { class: "{name_cls}", "{row.name}" }
                     if let Some(dir) = hint {

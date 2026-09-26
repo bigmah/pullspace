@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="pullspace:tree" content="fbbce04794df682fe8ae9736861c6972d8f1920d">
+<meta name="pullspace:tree" content="5839253cc09c27e038b57aecc60b8b0858fe697f">
 <meta name="pullspace:written" content="2026-09-26">
 <title>src/ui</title>
 </head>
@@ -44,7 +44,7 @@
   <p><strong>Untrusted content, three ways.</strong> A GitHub token sits in localStorage beside every file shown, so nothing from a repository reaches the page as markup:</p>
   <ul>
     <li>Markdown (READMEs, PR descriptions, comments) is parsed by <a href="/src/backend/markdown.rs"><code>backend::markdown</code></a> and built into the app's own elements by <a href="/src/ui/markdown.rs"><code>markdown.rs</code></a>. Images are fetched only out of the repository being read (<a href="/src/backend/images.rs"><code>backend::images</code></a>).</li>
-    <li>An HTML file's Preview goes into an iframe with <code>sandbox=""</code> (everything denied, no same-origin): <a href="/src/ui/viewer.rs#L1415-L1446"><code>viewer::render_preview</code></a>.</li>
+    <li>An HTML file's Preview goes into an iframe with <code>sandbox=""</code> (everything denied, no same-origin): <a href="/src/ui/viewer.rs#L1435-L1461"><code>viewer::render_preview</code></a>. A summary page is the exception: asked for in Preview, or clicked in the explorer, it goes to the summary pane instead, whose frame lets links through.</li>
     <li>A <code>.pullspace/</code> summary page goes into an iframe with <code>sandbox="allow-scripts"</code> and <em>no</em> <code>allow-same-origin</code> (<a href="/src/ui/summary.rs#L648-L682"><code>summary::frame</code></a>). The only script allowed in is the one <a href="/src/backend/summary.rs"><code>backend::summary::frame_doc</code></a> injects under a per-load nonce: the link bridge, which posts clicked links out signed with a random token, and, on a page the PR rewrote, the comparison that lights passages only one side has. <a href="/src/ui/summary.rs#L244-L259"><code>side_of</code></a> hands each side the other's text for that, and only when both sides exist. <a href="/src/ui/summary.rs#L183-L209"><code>LISTEN_JS</code></a> accepts a message only if the token matches <em>and</em> its source is one of the <code>iframe.summaryframe</code> windows, then <a href="/src/ui/summary.rs#L211-L234"><code>follow</code></a> opens the directory's page, the file at its line, or the browser.</li>
   </ul>
 

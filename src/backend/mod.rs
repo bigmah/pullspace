@@ -18,6 +18,7 @@ pub mod scan;
 pub mod screen;
 pub mod search;
 pub mod store;
+pub mod summary;
 pub mod symbols;
 pub mod tree;
 pub mod viewed;

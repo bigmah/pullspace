@@ -25,7 +25,7 @@ use crate::backend::{clip, fuzzy, route};
 
 use super::app::{St, ViewMode};
 use super::ide::Index;
-use super::{filetree, full, ide, spaces};
+use super::{filetree, full, ide, spaces, summary};
 
 /// How many rows the list draws. Nobody reads past the first screen of a
 /// picker — they type another letter — and the count of what was left out is
@@ -132,6 +132,7 @@ pub const CMDS: &[Cmd] = &[
     cmd("panel", "Close the Panel Below the Code", "Esc"),
     cmd("conv", "Toggle the Conversation Pane", ""),
     cmd("prs", "Show the Pull Requests of This Repository", ""),
+    cmd("summary", "Open Summaries (.pullspace)", ""),
     cmd("newspace", "New Space", "⌥⇧T"),
     cmd("closespace", "Close Space", "⌥⇧W"),
     cmd("nextspace", "Next Space", "⌥⇧→"),
@@ -237,6 +238,11 @@ pub fn run(st: St, id: &str) {
             let mut conv = st.conv_open;
             let now = *conv.peek();
             conv.set(!now);
+        }
+        "summary" => {
+            if let Some(page) = summary::home(&st) {
+                st.open_summary(page);
+            }
         }
         "prs" => {
             let mut board = st.pr_board;

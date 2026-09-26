@@ -236,6 +236,7 @@ pub fn TabStrip() -> Element {
     use_effect(move || {
         let _ = st.open.read();
         let _ = st.reading.read();
+        let _ = st.summary_on.read();
         document::eval(
             "var e=document.querySelector('.tab.on');\
              if(e) e.scrollIntoView({block:'nearest',inline:'nearest'});",
@@ -247,14 +248,28 @@ pub fn TabStrip() -> Element {
     // gets a tab of its own at the head of the strip: it is a thing that is
     // open, and the strip is what says what is open.
     let doc = st.reading.read().as_ref().map(|d| d.title.clone());
-    if tabs.is_empty() && doc.is_none() {
+    // And a summary, which keeps its tab while the code it links to is read,
+    // so that coming back to it is a click. See `super::summary`.
+    let sum = st.summary.read().clone();
+    let sum_on = *st.summary_on.read() && sum.is_some();
+    if tabs.is_empty() && doc.is_none() && sum.is_none() {
         return rsx! {};
     }
     // A file's tab is the one being read only while nothing else has the pane.
-    let here = match doc.is_some() {
+    let here = match doc.is_some() || sum_on {
         true => None,
         false => st.open.read().clone(),
     };
+    let sum_label = sum
+        .as_deref()
+        .map(|page| match crate::backend::summary::dir_of(page) {
+            Some(dir) if dir.as_os_str().is_empty() => "Summary".to_string(),
+            Some(dir) => format!("Summary: {}", dir.display()),
+            None => format!(
+                "Guide: {}",
+                page.file_stem().unwrap_or_default().to_string_lossy()
+            ),
+        });
     let statuses = st.statuses.read();
     let paths: Vec<&Path> = tabs.iter().map(|t| t.at.path.as_path()).collect();
 
@@ -271,6 +286,23 @@ pub fn TabStrip() -> Element {
                         onclick: move |e| {
                             e.stop_propagation();
                             st.stop_reading();
+                        },
+                        "\u{00d7}"
+                    }
+                }
+            }
+            if let Some(label) = sum_label {
+                div {
+                    class: if sum_on { "tab doc sum on" } else { "tab doc sum" },
+                    title: "{label}",
+                    onclick: move |_| st.show_summary(),
+                    span { class: "tname", "{label}" }
+                    button {
+                        class: "tabx",
+                        title: "Close  (\u{2325}W)",
+                        onclick: move |e| {
+                            e.stop_propagation();
+                            st.close_summary();
                         },
                         "\u{00d7}"
                     }

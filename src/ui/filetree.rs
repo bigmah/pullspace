@@ -9,6 +9,7 @@ use crate::backend::tree::{FileNode, Row, RowKind, matching_rows, seed_expansion
 use super::app::St;
 use super::panes::{Edge, Splitter};
 use super::prcache::ensure_hover;
+use super::summary;
 
 /// How many matches the filter draws. Typing one letter in a large repository
 /// matches thousands of files, and nobody scrolls past the first screen of a
@@ -277,6 +278,15 @@ pub fn FileTreePane() -> Element {
         Listing { rows, hidden }
     });
 
+    // Directories with a summary of their own, which get a way into it on
+    // their row. See `super::summary`.
+    let summarized = use_memo(move || summary::summarized_dirs(&st.workspace.read()));
+    // Memoised, because the answer for a repository with no summaries is a
+    // scan of every file in it, and the explorer redraws on every click.
+    let has_map = use_memo(move || summary::available(&st.workspace.read()));
+    let has_map = has_map();
+    let summary_on = *st.summary_on.read();
+
     let filtering = !query.read().trim().is_empty();
     let showing_all = !changes_only();
     let filter_cls = if showing_all {
@@ -357,6 +367,18 @@ pub fn FileTreePane() -> Element {
                     onclick: move |_| st.collapse_tree(),
                     "⊟"
                 }
+                if has_map {
+                    button {
+                        class: if summary_on { "iconbtn sm sumbtn on" } else { "iconbtn sm sumbtn" },
+                        title: "Open the summaries this repository keeps in .pullspace/",
+                        onclick: move |_| {
+                            if let Some(page) = summary::home(&st) {
+                                st.open_summary(page);
+                            }
+                        },
+                        "\u{25c8}"
+                    }
+                }
                 button {
                     class: "iconbtn sm",
                     title: "Show the open file in the tree",
@@ -404,6 +426,7 @@ pub fn FileTreePane() -> Element {
                         row: rs.row.clone(),
                         active: rs.active,
                         viewed: rs.viewed,
+                        summarized: summarized.read().contains(&rs.row.path),
                     }
                 }
                 if let Some(note) = empty {
@@ -422,7 +445,7 @@ pub fn FileTreePane() -> Element {
 }
 
 #[component]
-fn TreeRow(row: Row, active: bool, viewed: bool) -> Element {
+fn TreeRow(row: Row, active: bool, viewed: bool, summarized: bool) -> Element {
     let st = use_context::<St>();
     let mut expanded = st.expanded;
     // The guides run down the chevrons of every directory above this row, and
@@ -456,6 +479,24 @@ fn TreeRow(row: Row, active: bool, viewed: bool) -> Element {
                     // more thing on screen saying nothing new.
                     if !open && changed > 0 {
                         span { class: "dcount", "{changed}" }
+                    }
+                    if summarized {
+                        {
+                            let dir = row.path.clone();
+                            rsx! {
+                                button {
+                                    class: "dsum",
+                                    title: "Read this directory's summary",
+                                    onclick: move |e| {
+                                        // Not a fold: the row under it would
+                                        // otherwise open or shut on the way.
+                                        e.stop_propagation();
+                                        st.open_summary(summary::page_of(&dir));
+                                    },
+                                    "\u{25c8}"
+                                }
+                            }
+                        }
                     }
                 }
             }

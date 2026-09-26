@@ -275,7 +275,10 @@ pub async fn load(repo: &RepoRef, commit: &str) -> Option<Snapshot> {
     .key();
     let bytes = opfs::read(&snaps, &key).await?;
     let snapshot: Snapshot = serde_json::from_slice(&bytes).ok()?;
-    (!snapshot.is_empty()).then_some(snapshot)
+    // One kept from before directory hashes were, which summaries need to say
+    // whether they are current. Read again, once, and kept with them.
+    let dated = snapshot.dirs.is_empty() && !snapshot.truncated;
+    (!snapshot.is_empty() && !dated).then_some(snapshot)
 }
 
 // ------------------------------------------------------------------ tidying

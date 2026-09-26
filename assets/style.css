@@ -4571,3 +4571,142 @@ button.refsep:hover {
   font-size: 10px;
   font-variant-numeric: tabular-nums;
 }
+
+/* ---------- summaries ---------- */
+
+/* The pages an agent keeps about the repository in .pullspace/ — see
+   `ui::summary`. The header is the viewer's, with the way back up the tree
+   where the path would be. */
+.sumkind {
+  flex: none;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--accent);
+}
+
+.crumbs { display: flex; align-items: center; gap: 2px; min-width: 0; overflow: hidden; }
+.crumbsep { color: var(--fg-faint); font-family: var(--mono); font-size: 12px; }
+.crumb {
+  flex: none;
+  background: none;
+  border: none;
+  border-radius: var(--r-sm);
+  padding: 2px 4px;
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--accent);
+  cursor: pointer;
+}
+.crumb:hover:enabled { background: var(--bg-3); }
+.crumb.here { color: var(--fg); cursor: default; }
+.crumb.bare { color: var(--fg-faint); cursor: default; }
+
+.sumpill {
+  flex: none;
+  font-size: 10.5px;
+  line-height: 16px;
+  padding: 0 7px;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  color: var(--fg-dim);
+  cursor: default;
+  white-space: nowrap;
+}
+.sumpill.current { color: var(--added); border-color: rgba(79, 191, 122, 0.45); }
+.sumpill.stale { color: var(--modified); border-color: color-mix(in srgb, var(--modified) 50%, transparent); }
+.sumpill.added { color: var(--added); background: var(--add-bg); border-color: transparent; }
+.sumpill.changed { color: var(--modified); background: color-mix(in srgb, var(--modified) 14%, transparent); border-color: transparent; }
+.sumpill.removed { color: var(--deleted); background: var(--del-bg); border-color: transparent; }
+
+.modebtn.sumsrc { border: 1px solid var(--line); height: 22px; }
+
+/* What sits between the header and the page: the guide the pull request
+   brings, what it did under here, and the pages one level down. */
+.sumstrip {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 12px;
+  border-bottom: 1px solid var(--border-soft);
+  background: var(--bg-1);
+  flex: none;
+  max-height: 30vh;
+  overflow-y: auto;
+}
+.sumlabel {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--fg-faint);
+  margin-right: 2px;
+}
+.sumchip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 22px;
+  padding: 0 9px;
+  border: 1px solid var(--line);
+  border-radius: 11px;
+  background: var(--bg-2);
+  color: var(--fg);
+  font-family: var(--mono);
+  font-size: 11.5px;
+  cursor: pointer;
+  transition: background-color var(--quick) var(--ease), border-color var(--quick) var(--ease);
+}
+.sumchip:hover { background: var(--bg-3); border-color: var(--accent-line); }
+.sumchip.guide { font-family: var(--sans); color: var(--accent); border-color: var(--accent-line); background: var(--accent-soft); }
+.sumchip.ask { font-family: var(--sans); color: var(--modified); }
+.sumchip.file .badge { margin-left: 0; }
+.sumdot { width: 6px; height: 6px; border-radius: 50%; background: var(--modified); }
+.sumnote { font-size: 11.5px; color: var(--fg-dim); }
+.sumnote.warn { color: var(--modified); }
+
+/* The page, or the two sides of a page the pull request rewrote. */
+.sumframes { display: flex; flex: 1; min-height: 0; }
+.sumside { display: flex; flex-direction: column; flex: 1; min-width: 0; }
+.sumside.base + .sumside.head { border-left: 1px solid var(--border); }
+.sumsidehdr {
+  flex: none;
+  padding: 4px 12px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--fg-faint);
+  background: var(--bg-1);
+  border-bottom: 1px solid var(--border-soft);
+}
+.sumside.base .sumsidehdr { color: var(--deleted); }
+.sumside.head .sumsidehdr { color: var(--added); }
+.summaryframe { flex: 1; width: 100%; min-height: 0; border: 0; background: var(--bg); }
+
+.tab.sum .tname::before { content: "\25c8"; color: var(--accent); }
+
+/* The way into a summary from the explorer: the header's, and one on each
+   directory that has a page. */
+.iconbtn.sumbtn { color: var(--accent); }
+.iconbtn.sumbtn.on { background: var(--bg-3); border-color: var(--accent-line); }
+.dsum {
+  margin-left: auto;
+  flex: none;
+  background: none;
+  border: none;
+  padding: 0 3px;
+  font-size: 11px;
+  line-height: 16px;
+  border-radius: var(--r-sm);
+  color: var(--fg-faint);
+  opacity: 0.55;
+  cursor: pointer;
+}
+.dcount + .dsum { margin-left: 4px; }
+.row:hover .dsum { opacity: 1; }
+.dsum:hover { color: var(--accent); background: var(--bg-3); }
+
+.welcome-read.sum { margin-top: 8px; color: var(--accent); border-color: var(--accent-line); }

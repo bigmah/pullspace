@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Summaries: a map of the repository and a guide to every PR</title>
+</head>
+<body>
+<header>
+  <h1>Summaries: a map of the repository and a guide to every PR</h1>
+  <p class="lede">pullspace learns to read a <code>.pullspace/</code> directory of agent-written HTML pages (one per important directory, plus a guide per pull request), shows them beside the code in a sandboxed frame, says whether each is still true by its git tree hash, and on a PR shows a rewritten page before and after; the two agent skills that write those pages, and this repository's own map, come with it.</p>
+</header>
+
+<section class="why">
+  <h2>Why</h2>
+  <p>Coding agents write code faster than anyone can review it. A diff shows which lines moved, not what the change is for, how it fits the system, or what it quietly makes untrue. The agent that made the change knows all three, so this PR asks it to write them down in the repository, next to the code, in a form pullspace can show at the moment of review: a guide to the PR, and a map of the repository whose pages the PR has to keep true. The user-facing account is <a href="/SUMMARIES.md">SUMMARIES.md</a>.</p>
+  <p>Two constraints shaped it. pullspace has no server, so everything (freshness included) has to come from the repository and GitHub's API. And a page is somebody else's HTML rendered in the tab that holds the GitHub token, so it has to be drawn somewhere it can reach nothing.</p>
+</section>
+
+<section class="tour">
+  <h2>Reading order</h2>
+  <ol class="tour">
+    <li><a href="/skills/pullspace-map/FORMAT.md#L1-L52">FORMAT.md — the contract</a>: the layout, the stamp, and the rules every page follows. Everything in the app reads this format, so start here; the root is stamped with <code>.pullspace</code> left out, which the next two steps depend on.</li>
+    <li><a href="/src/backend/github.rs#L1214-L1223">github.rs — <code>Snapshot::dirs</code></a>, then <a href="/src/backend/github.rs#L1298-L1346"><code>snapshot_of</code></a>: the tree read the app already made now keeps each directory's hash instead of throwing the <code>tree</code> entries away, and adds a root entry computed without <code>.pullspace</code>, only for an untruncated tree. <a href="/src/backend/blobs.rs#L278-L281"><code>blobs::load</code></a> re-reads a cached snapshot that predates <code>dirs</code>.</li>
+    <li><a href="/src/backend/summary.rs#L155-L352">backend/summary.rs — the stamp</a>: <code>meta</code> scans a page's head for its stamp, <code>freshness</code> compares it with <code>dir_sha</code>, <code>drift</code> lists what moved since, and <code>root_stamp</code> rebuilds the root tree object byte for byte, as <code>git mktree</code> does. Check the sort order and mode trimming against git's.</li>
+    <li><a href="/src/backend/summary.rs#L425-L554">backend/summary.rs — the frame document</a>: the CSP, the one nonce'd script (the link bridge, plus <code>COMPARE_JS</code> on a rewritten page), <code>script_string</code> so the other side can't close that script, and the stripped <code>meta refresh</code>. This is the security boundary; read it most carefully.</li>
+    <li><a href="/src/ui/summary.rs#L160-L234">ui/summary.rs — the other end of the bridge</a>: the per-load nonce and token, <code>LISTEN_JS</code> (the token must match <em>and</em> the source must be one of our frames), and <code>follow</code>, which maps a link to a page, a file at a line, or the browser. Then <a href="/src/ui/summary.rs#L648-L682"><code>frame</code></a>: <code>sandbox="allow-scripts"</code> and never <code>allow-same-origin</code>.</li>
+    <li><a href="/src/ui/summary.rs#L287-L587">ui/summary.rs — <code>SummaryPane</code></a>: loading both sides through <code>ensure_path</code> like any file, the current/out-of-date pills, Before/Both/After on a rewritten page, the "this PR changes files under here and leaves this page" warning, and the on-click drift request.</li>
+    <li><a href="/src/ui/app.rs#L2041-L2080">app.rs — <code>open_summary</code> … <code>close_summary</code></a> and the two new signals, registered in <a href="/src/ui/spaces.rs#L127-L131"><code>held!</code></a>: how a summary shares the middle pane with files and descriptions and keeps its tab. The entry points are small: the ◈ buttons in <a href="/src/ui/filetree.rs#L281-L286">filetree.rs</a>, the tab in <a href="/src/ui/tabs.rs#L251-L310">tabs.rs</a>, the welcome button in <a href="/src/ui/viewer.rs#L1227-L1239">viewer.rs</a>, and a palette command.</li>
+    <li><a href="/skills/pullspace-change/SKILL.md">pullspace-change</a> and <a href="/skills/pullspace-map/SKILL.md">pullspace-map</a> with their <a href="/skills/pullspace-map/scripts/">scripts</a>: the writing half. Then the map this PR adds, starting at the <a href="/">root page</a>, which is also the best test of whether the format works.</li>
+  </ol>
+  <p>The map pages are all new in this PR, so pullspace shows them as added, not as before/after. Four of them describe code this PR adds and were brought up to date as it changed: <a href="/src/backend/">src/backend</a>, <a href="/src/ui/">src/ui</a>, <a href="/skills/">skills</a> and the <a href="/">root</a>; <a href="/src/">src</a> had two stale line anchors and a sentence about the frame's script fixed.</p>
+</section>
+
+<section class="decisions">
+  <h2>Decisions</h2>
+  <aside class="decision"><p><strong>Freshness is git's tree hash, stamped in the page</strong>, over a date, a commit id, or a record kept anywhere. The hash changes exactly when something under the directory does, GitHub's tree read already returns it, and <code>git diff &lt;old-stamp&gt; &lt;new-stamp&gt;</code> tells the agent what moved. A commit id would go stale on every unrelated commit.</p></aside>
+  <aside class="decision"><p><strong>The root is stamped without <code>.pullspace</code>, and the app rebuilds that tree itself</strong> (<code>sha1_smol</code>, no dependencies). Otherwise writing any page would make the root page out of date. GitHub has never seen that tree, so there is nothing to ask it for. On a truncated tree the root gets no hash and shows as unstamped, because a wrong stamp is worse than none.</p></aside>
+  <aside class="decision"><p><strong>A frame with <code>allow-scripts</code> and a nonce'd script, instead of the empty <code>sandbox</code> the HTML Preview uses.</strong> Links into the code and between pages are the point of a map, and without a script a click either does nothing or navigates the frame. The frame still has an opaque origin, so even a script that got in could not reach the app's storage. The CSP (<code>default-src 'none'</code>, scripts by nonce only) keeps the page's own scripts, handlers and network requests out.</p></aside>
+  <aside class="decision"><p><strong>Link messages are checked twice</strong>: the random token must match, and <code>e.source</code> must be one of the <code>iframe.summaryframe</code> windows. Any page can post a message to the app, and a followed link opens things.</p></aside>
+  <aside class="decision"><p><strong>Before/after is lit by passage, not by word.</strong> <code>COMPARE_JS</code> marks the innermost paragraphs, list items and headings whose text the other side lacks. What changes in an explanation is a claim, and a claim is a sentence or a bullet. It runs in the frame over an inert <code>DOMParser</code> copy of the other side, so the app never parses page HTML itself.</p></aside>
+  <aside class="decision"><p><strong>"What changed since it was written?" is fetched on click only.</strong> It is one tree request, and signed-out users get 60 an hour.</p></aside>
+  <aside class="decision"><p><strong>Cached snapshots without <code>dirs</code> are re-read once</strong> rather than bumping <code>blobs::VERSION</code>, which would throw away every stored blob to fix one small JSON file per commit.</p></aside>
+  <aside class="decision"><p><strong>Relative links resolve against the directory a page describes</strong>, not against where the page sits under <code>.pullspace/map/</code>. That is the only reading under which <code>store.rs</code> in the summary of <code>src/backend</code> means what its author meant. The format still asks for <code>/</code>-rooted links.</p></aside>
+  <aside class="decision"><p><strong>The skills ship in this repository</strong> (<code>skills/</code>, symlinked from <code>.claude/skills/</code>) as plain directories with shell scripts that need only <code>git</code>, <code>sh</code> and <code>awk</code>, so any agent harness can use them and no service is involved.</p></aside>
+</section>
+
+<section class="risks">
+  <h2>Risks</h2>
+  <aside class="risk"><p><strong>The root stamp must equal <code>git mktree</code>'s output byte for byte.</strong> If GitHub ever reports modes or names differently from what <a href="/src/backend/summary.rs#L309-L342"><code>root_stamp</code></a> expects, every root page shows "out of date" in the app while <code>plan.sh</code> says current. The test checks it against real <code>git mktree</code> output, including a <code>040000</code> mode, a symlink, an executable and the <code>src.txt</code>/<code>src</code> ordering case.</p></aside>
+  <aside class="risk"><p><strong>One extra tree request per cached commit, once.</strong> Every snapshot cached before this change is read again on its first open (<a href="/src/backend/blobs.rs#L278-L281"><code>blobs::load</code></a>). That is harmless, but a signed-out user reopening many cached commits spends rate budget on it.</p></aside>
+  <aside class="risk"><p><strong>The frame is a security boundary that now runs a script.</strong> Adding <code>allow-same-origin</code> to <a href="/src/ui/summary.rs#L648-L682"><code>frame</code></a>, loosening the CSP in <code>frame_doc</code>, or putting page text into the script without <code>script_string</code> would each give a page the token's origin or a way to run code. The nonce and token come from <code>Math.random</code>, once per app load. They only need to be unguessable to the page's author, who cannot run a script to read them.</p></aside>
+  <aside class="risk"><p><strong>A large rewritten page is carried twice</strong>: each side's <code>srcdoc</code> embeds the other side as a string for the comparison. That is fine at the sizes the format asks for, but a very long page doubles.</p></aside>
+  <aside class="risk"><p><strong>The two new per-space signals</strong> (<code>summary</code>, <code>summary_on</code>) are registered in <code>held!</code>. If they were dropped from it, a summary open in one review would appear in the next.</p></aside>
+  <aside class="risk"><p><strong>Which guide opens.</strong> <code>summary::home</code> takes the first change page the PR itself touches. A PR that edits another branch's guide as well could open on the wrong one; a PR without a guide opens on the map's root.</p></aside>
+</section>
+
+<section class="unchanged">
+  <h2>Not changed</h2>
+  <p>The app never writes <code>.pullspace/</code>: pages come only from the agent skills, and writing to GitHub is still a README plan. The HTML Preview keeps its empty <code>sandbox</code>. <code>blobs::VERSION</code> is not bumped (see Decisions). CI is untouched: the skills' shell scripts have no tests in it, and <code>check.sh</code> is run by the agents, not by CI. The browser extension is untouched.</p>
+</section>
+
+<section class="verify">
+  <h2>How it was checked</h2>
+  <ul>
+    <li><code>cargo test</code>: 322 passing. New tests in <a href="/src/backend/summary.rs#L601-L885">backend/summary.rs</a> cover path mapping, children, stamp parsing, freshness, drift, the root stamp (<a href="/src/backend/summary.rs#L757">checked against real <code>git mktree</code> output</a>), link resolution, the frame document, and the other side not breaking out of the script. A tree-parsing test in <a href="/src/backend/github.rs#L4320">github.rs</a> covers directory hashes and the root stamp.</li>
+    <li><code>cargo clippy -- -D warnings</code>, <code>cargo fmt --check</code>, and <code>cargo check --target wasm32-unknown-unknown</code> in debug and release: clean.</li>
+    <li>The sandboxed frame was probed in headless Chrome and in WebKit (WKWebView). Page scripts, <code>on…</code> handlers and remote images are blocked. Only real link clicks reach the app, spoofed <code>postMessage</code>s are ignored, the frame's document is opaque to the parent, and the theme applies.</li>
+    <li>The real <code>App</code> was mounted headlessly (in a scratch copy, not in the repo) and walked through welcome → guide → before/after → root → a stale page → following a link out and back → closing, with SSR screenshots.</li>
+    <li>The skills were dogfooded by sub-agents writing this repository's own map, and this guide was written with pullspace-change. <code>check.sh</code> is clean and <code>plan.sh</code> reports every page current.</li>
+    <li><strong>Not verified:</strong> clicking through in a real browser against live GitHub. Nobody has yet opened a real PR with summaries in pullspace, so the GitHub tree's modes and the root stamp have only been checked against fixtures and local git.</li>
+  </ul>
+</section>
+</body>
+</html>

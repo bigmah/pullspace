@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="pullspace:tree" content="10a73ea0ffe372eadc5d9f9ff5cdfe92d2f231a3">
+<meta name="pullspace:written" content="2026-09-26">
+<title>skills</title>
+</head>
+<body>
+<header>
+  <h1>skills</h1>
+  <p class="lede">The coding-agent half of pullspace's summaries: two agent skills, with the format contract, scripts and templates they share, that write the <code>.pullspace/</code> pages the app shows beside the code.</p>
+</header>
+
+<section class="how">
+  <h2>How it works</h2>
+  <p>pullspace only reads summaries. It never writes them. Pages are written by a coding agent
+  following one of these skills and are committed to the repository like any other file. The
+  reading half of the contract is <a href="/src/backend/summary.rs">src/backend/summary.rs</a>
+  (paths, stamps, the sandboxed frame) and <a href="/src/ui/summary.rs">src/ui/summary.rs</a>
+  (the pane). This directory is the writing half. <a href="/.claude/">.claude/skills</a> holds
+  symlinks back here, so Claude Code picks the skills up from the repository.</p>
+  <ul>
+    <li><strong><a href="/skills/pullspace-map/SKILL.md">pullspace-map</a></strong> builds or refreshes
+    <code>.pullspace/map/</code>, one page per directory that matters. It reads
+    <code>seed.md</code> for steering (creating it from a template if it is missing), runs
+    <code>plan.sh</code> to see which pages are current, stale, unstamped or orphaned, writes
+    pages <a href="/skills/pullspace-map/SKILL.md#L53-L117">bottom-up</a> so each parent summarizes
+    its children's pages rather than their source, stamps each page, and runs
+    <code>check.sh</code>.</li>
+    <li><strong><a href="/skills/pullspace-change/SKILL.md">pullspace-change</a></strong> runs before a
+    PR is opened. It writes <code>.pullspace/changes/&lt;branch&gt;.html</code> (why, a line-anchored
+    reading order, decisions, risks, what was checked) and rewrites or restamps the map pages
+    that <code>affected.sh</code> names as nearest to the changed files, leaving pages that are
+    only ancestors alone. It has no files of its own beyond SKILL.md, and uses
+    pullspace-map's FORMAT.md, scripts and <code>change.html</code> template through
+    <code>&lt;map&gt;/</code> paths, <code>&lt;map&gt;</code> being the sibling
+    <code>pullspace-map/</code> directory.</li>
+  </ul>
+
+  <h3>The stamp is git's tree hash</h3>
+  <p>Freshness needs no state outside the repository. A map page records
+  <code>git rev-parse &lt;tree&gt;:&lt;dir&gt;</code> for the directory it describes, and that hash
+  changes exactly when something under the directory does. The root is the special case: its tree
+  contains <code>.pullspace/</code>, so writing any page would make the root page stale. The root is
+  therefore stamped with a tree rebuilt without that entry
+  (<a href="/skills/pullspace-map/scripts/stamp.sh#L52-L53">stamp.sh</a>, <code>git mktree</code>), and the
+  app rebuilds it the same way in <a href="/src/backend/summary.rs#L309"><code>root_stamp</code></a>.</p>
+  <p><code>stamp.sh</code> and <code>plan.sh</code> take <code>--worktree</code> (the default),
+  <code>--index</code> or <code>--head</code>; <code>affected.sh</code> reads page states from
+  <code>plan.sh</code> in its default mode. Worktree mode copies the real index to a temp file,
+  runs <code>git add -A</code> into it under <code>GIT_INDEX_FILE</code>, and calls
+  <code>write-tree</code>
+  (<a href="/skills/pullspace-map/scripts/stamp.sh#L40-L48">stamp.sh</a>). That lets it hash
+  untracked, not-ignored files without touching the user's staging area. With
+  <code>--write</code>, <code>stamp.sh</code> also writes the stamp and today's date into the
+  directory's page, replacing the two tags already there.</p>
+</section>
+
+<section class="parts">
+  <h2>What's in here</h2>
+  <dl class="parts">
+    <dt><a href="/skills/pullspace-map/SKILL.md">pullspace-map/SKILL.md</a></dt><dd>The map workflow: seed, plan, write bottom-up, stamp, check.</dd>
+    <dt><a href="/skills/pullspace-map/FORMAT.md">pullspace-map/FORMAT.md</a></dt><dd>The contract: layout, stamp syntax, sandbox rules, link rules, section order, and the CSS class vocabulary pullspace styles.</dd>
+    <dt><a href="/skills/pullspace-map/scripts/stamp.sh">scripts/stamp.sh</a></dt><dd>Prints a directory's tree hash (<code>""</code> for the root, without <code>.pullspace</code>).</dd>
+    <dt><a href="/skills/pullspace-map/scripts/plan.sh">scripts/plan.sh</a></dt><dd>Tab-separated status: each page current/stale/unstamped/orphan, then each directory without a page with its file counts (total and direct).</dd>
+    <dt><a href="/skills/pullspace-map/scripts/affected.sh">scripts/affected.sh</a></dt><dd>For a base commit, which pages the changed files fall under: for each, how many changed files it is the nearest page to, how many are under it, and its state; then changed directories only the root covers.</dd>
+    <dt><a href="/skills/pullspace-map/scripts/check.sh">scripts/check.sh</a></dt><dd>A grep-based lint over each page's tags: title, lede, stamp, nothing the sandbox refuses, every link <code>/</code>-rooted and present in the working tree, and every <code>#L</code> anchor inside its file.</dd>
+    <dt><a href="/skills/pullspace-map/templates/">templates/</a></dt><dd>Skeletons for <a href="/skills/pullspace-map/templates/dir.html">dir.html</a>, <a href="/skills/pullspace-map/templates/change.html">change.html</a> and <a href="/skills/pullspace-map/templates/seed.md">seed.md</a>.</dd>
+    <dt><a href="/skills/pullspace-change/SKILL.md">pullspace-change/SKILL.md</a></dt><dd>The per-PR workflow: find the diff against the merge base, update the affected map pages, write the guide.</dd>
+  </dl>
+</section>
+
+<section class="invariants">
+  <h2>Invariants</h2>
+  <ul>
+    <li><strong>The stamp is written exactly as FORMAT.md shows:</strong> double quotes,
+    <code>name</code> before <code>content</code>, 40 lowercase hex characters. The app's parser
+    accepts any attribute order or quoting (<a href="/src/backend/summary.rs#L193">summary.rs</a>),
+    but plan.sh and check.sh use a literal <code>sed</code>/<code>grep</code> pattern
+    (<a href="/skills/pullspace-map/scripts/check.sh#L27">check.sh</a>,
+    <a href="/skills/pullspace-map/scripts/plan.sh#L41">plan.sh</a>). A variant the app accepts
+    will show as unstamped to the scripts.</li>
+    <li><strong>The root stamp must leave out <code>.pullspace</code> in the scripts and the app
+    alike.</strong> If <a href="/skills/pullspace-map/scripts/stamp.sh#L53">stamp.sh</a> and
+    <a href="/src/backend/summary.rs#L309"><code>root_stamp</code></a> ever disagree, the root page
+    will always show as out of date. plan.sh repeats the same <code>awk | git mktree</code> line
+    rather than calling stamp.sh.</li>
+    <li><strong>Pages are the sandbox's input, so they have no scripts, event handlers, external
+    resources or CSS of their own.</strong> The app draws them in a sandboxed, opaque-origin frame
+    that must never reach the GitHub token (<code>seed.md</code>'s security boundary). check.sh
+    enforces this. The rule is not cosmetic.</li>
+    <li><strong>A current stamp is a promise.</strong> pullspace-map forbids restamping a page nobody
+    re-verified (<a href="/skills/pullspace-map/SKILL.md#L132-L133">SKILL.md</a>). pullspace-change
+    also says to leave ancestors alone while their text is still true, because restamping them
+    would conflict with every other open PR
+    (<a href="/skills/pullspace-change/SKILL.md#L68-L72">pullspace-change</a>).</li>
+    <li><strong>Keep the section order fixed</strong> (<code>how</code>, <code>parts</code>,
+    <code>invariants</code>, <code>gotchas</code>, <code>plans</code>). pullspace shows a rewritten
+    page before and after, side by side, and that comparison only works when the structure holds
+    still.</li>
+  </ul>
+</section>
+
+<section class="gotchas">
+  <h2>Gotchas</h2>
+  <aside class="warn"><p><strong>Editing anything here makes this page stale.</strong> These
+  pages are stamped like any other directory, so a change to a skill's wording moves the tree hash
+  of <code>skills</code>.</p></aside>
+  <aside class="warn"><p><strong>check.sh lints tags, not parsed HTML, and cannot tell a right line
+  from a wrong one.</strong> It pulls every <code>&lt;…&gt;</code> tag out with a regex and checks
+  only those (<a href="/skills/pullspace-map/scripts/check.sh#L35-L41">check.sh</a>), so markup shown
+  escaped inside <code>&lt;pre&gt;&lt;code&gt;</code> is fine. A <code>#L</code> anchor passes as
+  long as the file is that long: when code moves, an anchor that now points at the wrong lines is
+  not reported, and has to be re-checked by hand.</p></aside>
+  <aside class="warn"><p><strong>Worktree stamps include uncommitted and untracked files.</strong>
+  A page stamped this way is only current if the commit contains exactly what was on disk. If the
+  code is already committed and the tree has unrelated edits, use <code>--head</code>. The same
+  goes for plan.sh's default mode.</p></aside>
+  <aside class="warn"><p><strong>pullspace-change's <code>&lt;map&gt;</code> is a placeholder, not a
+  path.</strong> It stands for the sibling <code>pullspace-map/</code> of wherever the skill is
+  installed (<code>skills/</code> here, <code>.claude/skills/</code> in a repository that copied
+  them), and is defined once near the top
+  (<a href="/skills/pullspace-change/SKILL.md#L17-L22">SKILL.md</a>). Its command blocks use it
+  without repeating that.</p></aside>
+</section>
+</body>
+</html>

@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="pullspace:tree" content="23a3188a1ca8593232bf8de2d6d49abb7dbb278b">
+<meta name="pullspace:written" content="2026-09-26">
+<title>pullspace</title>
+</head>
+<body>
+<header>
+  <h1>pullspace</h1>
+  <p class="lede">An IDE-style GitHub code reviewer that is a static page: Rust compiled to wasm, calling api.github.com straight from the browser tab, with no server anywhere and the code never leaving the browser.</p>
+</header>
+
+<section class="start">
+  <h2>Where to start</h2>
+  <ol class="tour">
+    <li><a href="/src/main.rs">src/main.rs</a>: thirteen lines, and its doc comment is the whole deployment model.</li>
+    <li><a href="/src/">src/</a>: how the crate splits into <code>ui</code> and <code>backend</code>, and one review traced end to end.</li>
+    <li><a href="/src/ui/">src/ui/</a>: the <code>St</code> signal store, workspaces and spaces. Most changes land here, and most of the traps (unregistered per-space signals, <code>peek()</code> across a write) are here.</li>
+    <li><a href="/src/backend/">src/backend/</a>: the GitHub client, the clone into OPFS keyed by blob SHA, and where untrusted content is made safe.</li>
+  </ol>
+  <p>Then, as needed: <a href="/extension/">extension/</a> (the Chrome extension's <code>?url=</code> hand-off) and <a href="/skills/">skills/</a> (the agent skills that write these summary pages).</p>
+</section>
+
+<section class="how">
+  <h2>How it works</h2>
+  <p><code>dx build --platform web --release</code> turns the crate into an <code>index.html</code>, a <code>.wasm</code> and a <code>.js</code>; any static host serves them (<a href="/src/main.rs#L4-L9">main.rs</a>, <a href="/Cargo.toml#L15-L26">Cargo.toml</a>). The app reads pull requests, commits, branches and compares over GitHub's REST API from the tab, clones each commit's files into the browser's Origin Private File System under their git blob SHA, and gives them an explorer, a diffing code viewer, search and Go to Definition. Several reviews ("spaces") can be open in one tab. Signing in is optional: a pasted token, kept in <code>localStorage</code>, is needed only for private repositories and higher rate limits.</p>
+
+  <p><strong>Two consequences shape the whole codebase.</strong> First, the token shares an origin with every untrusted file shown, so repository content never becomes markup in the app's document: Markdown is parsed into the app's own elements, and HTML only renders in sandboxed frames (details on the <a href="/src/">src</a> page). Second, a panic in wasm stops the tab, so the known panic traps (<code>std::time</code>, byte-slicing <code>&amp;str</code>, <code>peek()</code> held across a write, unbounded recursion on untrusted input) are treated as bugs on sight.</p>
+
+  <h3>The <code>.pullspace/</code> summaries</h3>
+  <p>These pages are a pullspace feature. A repository can commit a <code>.pullspace/</code> directory holding a map (one static HTML page per important directory) and per-PR change pages. pullspace shows the page beside the code, walks the tree through its links, and marks a page <em>current</em> or <em>out of date</em> by comparing the git tree hash stamped in it with the directory's hash in the snapshot. On a PR that rewrote a page, it shows the page before and after, side by side, with the passages only one side has lit. <a href="/SUMMARIES.md">SUMMARIES.md</a> is the user-facing account of the feature. The root is stamped with its tree minus <code>.pullspace/</code>, so writing a page doesn't outdate the root. Pages are written by a coding agent following the skills in <a href="/skills/">skills/</a>, steered by <code>.pullspace/seed.md</code>; the app only reads them (<a href="/src/backend/summary.rs">backend::summary</a> for paths, stamps and the sandboxed frame document, <a href="/src/ui/summary.rs">ui::summary</a> for the pane). They render in a sandboxed frame with no network, styled by <a href="/assets/summary.css">assets/summary.css</a>, which follows the app's theme.</p>
+
+  <h3>Building, checking, shipping</h3>
+  <p>The toolchain is pinned exactly (<a href="/rust-toolchain.toml">rust-toolchain.toml</a>, with the wasm target) because CI denies clippy warnings, and a floating channel would turn a green repository red when a new lint ships. <a href="/.github/workflows/ci.yml">CI</a> runs <code>cargo fmt --check</code>, clippy with <code>-D warnings</code>, host <code>cargo test</code>, <code>cargo check --target wasm32-unknown-unknown</code> (the target that ships, which the tests never build), and the extension's <code>node --test</code>. <a href="/deploy/Caddyfile">deploy/Caddyfile</a> is a worked self-hosting config whose comments explain its four load-bearing parts: immutable caching for hashed assets, <code>no-cache</code> on <code>index.html</code>, a <code>connect-src</code> CSP that confines the token to GitHub's two hosts, and HTTPS, without which the browser withholds OPFS and the local copy silently degrades.</p>
+</section>
+
+<section class="parts">
+  <h2>What's in here</h2>
+  <dl class="parts">
+    <dt><a href="/src/">src/</a></dt><dd>The app: <code>backend</code> (GitHub, clone, blob store, parsing) and <code>ui</code> (Dioxus components over one signal store).</dd>
+    <dt><a href="/extension/">extension/</a></dt><dd>Manifest V3 Chrome extension that hands the github.com page you are on to pullspace as a <code>?url=</code> field, reusing an open pullspace tab.</dd>
+    <dt><a href="/skills/">skills/</a></dt><dd>The agent skills that write <code>.pullspace/</code> pages: the format contract, stamp/plan/check scripts, and templates. <code>.claude/skills</code> symlinks here.</dd>
+    <dt><a href="/assets/style.css">assets/style.css</a></dt><dd>The app's stylesheet, compiled in with <code>include_str!</code> (<a href="/src/ui/app.rs#L45">app.rs</a>); its <code>:root</code> variables are the theme defaults that <code>backend::prefs</code> overrides.</dd>
+    <dt><a href="/assets/summary.css">assets/summary.css</a></dt><dd>The stylesheet handed to summary pages in their frame (<a href="/src/backend/summary.rs#L507">summary.rs</a>); it defines the class vocabulary pages are written in.</dd>
+    <dt><a href="/index.html">index.html</a></dt><dd>The page template <code>dx</code> fills in. It carries the tab icon, percent-encoded, because Safari only reads an icon from the page as served, before the wasm runs.</dd>
+    <dt><a href="/Cargo.toml">Cargo.toml</a></dt><dd>Dependencies, each commented with why it is there (notably <code>similar</code>'s <code>wasm32_web_time</code> and <code>web-time</code>, both to avoid <code>std::time</code> panics; <code>sha1_smol</code> for the root summary stamp). The dead <code>server-dev</code>/<code>android-dev</code> profiles are rewritten by <code>dx</code> on every build, so they stay.</dd>
+    <dt><a href="/Dioxus.toml">Dioxus.toml</a></dt><dd>The app name and title for <code>dx</code>, and a commented-out <code>base_path</code> for a GitHub Pages project site.</dd>
+    <dt><a href="/rust-toolchain.toml">rust-toolchain.toml</a></dt><dd>Exact toolchain 1.93.0 with rustfmt, clippy and the wasm target.</dd>
+    <dt><a href="/.github/workflows/ci.yml">.github/workflows/ci.yml</a></dt><dd>Format, clippy, host tests, the wasm check, the extension tests.</dd>
+    <dt><a href="/deploy/Caddyfile">deploy/Caddyfile</a></dt><dd>Self-hosting on Caddy, with the reasons for each header.</dd>
+    <dt><a href="/demo/preview.html">demo/preview.html</a></dt><dd>A hostile fixture for the HTML Preview: open it in pullspace and everything in it that tries to run or load is inert.</dd>
+    <dt><a href="/README.md">README.md</a></dt><dd>The pitch, features, plans, and the build command. <a href="/diff.png">diff.png</a> is its screenshot.</dd>
+    <dt><a href="/SUMMARIES.md">SUMMARIES.md</a></dt><dd>Summaries for users: what the map and the guides are, installing the two skills, reading pages in pullspace, and the scripts.</dd>
+  </dl>
+</section>
+
+<section class="invariants">
+  <h2>Invariants</h2>
+  <ul>
+    <li><strong>No server.</strong> Anything that sounds like it needs one is done in the tab. The deployment is a directory of static files (<a href="/deploy/Caddyfile#L1-L11">Caddyfile</a>).</li>
+    <li><strong>The token only goes to GitHub.</strong> The code sends it nowhere else, and the Caddyfile's <a href="/deploy/Caddyfile#L29-L39"><code>connect-src</code></a> makes the browser enforce it on a self-hosted copy.</li>
+    <li><strong>CI must stay green on the wasm target, not just the host.</strong> <code>cargo test</code> never builds wasm, so the separate <a href="/.github/workflows/ci.yml#L44-L47">wasm check</a> is what catches a wasm-only break.</li>
+    <li><strong>The extension's escaping and <code>backend::route</code>'s decoding are one contract</strong>, pinned by a test on each side; CI runs both (<a href="/.github/workflows/ci.yml#L49-L56">ci.yml</a>).</li>
+  </ul>
+</section>
+
+<section class="gotchas">
+  <h2>Gotchas</h2>
+  <aside class="warn"><p><strong>Plain http hides a broken cache.</strong> OPFS is only given to a secure context, and <code>localhost</code> counts as one, so a copy served over plain http elsewhere quietly falls back to memory and nobody sees it in development (<a href="/deploy/Caddyfile#L44-L50">Caddyfile</a>).</p></aside>
+  <aside class="warn"><p><strong>A cached <code>index.html</code> ships an update nobody receives.</strong> It is the one file that names the new hashed <code>.wasm</code>/<code>.js</code> (<a href="/deploy/Caddyfile#L24-L27">Caddyfile</a>).</p></aside>
+  <aside class="warn"><p><strong>Bumping <a href="/rust-toolchain.toml">rust-toolchain.toml</a> is a deliberate commit</strong>: fix whatever the new clippy flags in the same change, or CI goes red.</p></aside>
+</section>
+
+<section class="plans">
+  <h2>Plans</h2>
+  <p>From the README: write support (approving PRs, commenting) and a smoother browser-extension hand-off (one click on a PR to open pullspace).</p>
+</section>
+</body>
+</html>

@@ -12,14 +12,14 @@
 
 <section class="why">
   <h2>Why</h2>
-  <p><code>app.rs</code> is the most-changed file in the repository (42 commits) and was 2,960 lines long. Most of it was one <code>impl St</code> with about 65 methods, grouped only by comment headers that had drifted: the "opening a diff back up" section also held <code>has_file</code>, <code>forget_contents</code> and <code>open_at</code>, and "reading a summary" also held closing tabs. Finding the code for Back, or for what happens when a PR opens, meant knowing roughly which thousand lines to look in.</p>
+  <p><code>app.rs</code> is the most-changed file in the repository (43 commits) and was 3,000 lines long. Most of it was one <code>impl St</code> with about 65 methods, grouped only by comment headers that had drifted: the "opening a diff back up" section also held <code>has_file</code>, <code>forget_contents</code> and <code>open_at</code>, and "reading a summary" also held closing tabs. Finding the code for Back, or for what happens when a PR opens, meant knowing roughly which thousand lines to look in.</p>
 </section>
 
 <section class="tour">
   <h2>Reading order</h2>
   <ol class="tour">
-    <li><a href="/src/ui/app/mod.rs#L45-L49">mod.rs: the new submodules</a>. Everything else in <code>mod.rs</code> (the state types, <code>St</code>, <code>App</code>, the tests) is the old file unchanged. The only other edit is the <code>include_str!</code> path for the stylesheet, which gained a <code>../</code>.</li>
-    <li><a href="/src/ui/app/mod.rs#L975-L1039">mod.rs: what stayed in <code>impl St</code></a>: the small accessors (token, viewer, <code>bump_tick</code>, prefs, <code>generation</code>). They are what every other file leans on.</li>
+    <li><a href="/src/ui/app/mod.rs#L47-L51">mod.rs: the new submodules</a>. Everything else in <code>mod.rs</code> (the state types, <code>St</code>, <code>App</code>, the tests) is the old file unchanged. The only other edit is the <code>include_str!</code> path for the stylesheet, which gained a <code>../</code>.</li>
+    <li><a href="/src/ui/app/mod.rs#L989-L1053">mod.rs: what stayed in <code>impl St</code></a>: the small accessors (token, viewer, <code>bump_tick</code>, prefs, <code>generation</code>). They are what every other file leans on.</li>
     <li><a href="/src/ui/app/workspace.rs#L190-L304">workspace.rs: <code>enter</code></a>: entering, clearing and closing a workspace, routes and places, and forgetting what a closed one held. It also takes <code>collapse_tree</code>, which sits next to <code>reset_tree_folds</code>.</li>
     <li><a href="/src/ui/app/history.rs#L46-L149">history.rs: the trail and the tabs</a>: open file, Back/Forward, the tab strip, reopen and close, then the reader and summary panes. This is the one file whose method order changed. Tab methods that had drifted under other headers now sit under "the tabs".</li>
     <li><a href="/src/ui/app/stepping.rs">stepping.rs</a>, <a href="/src/ui/app/gaps.rs">gaps.rs</a> and <a href="/src/ui/app/marks.rs">marks.rs</a>: next file, change or find hit; diff expansions; files marked read. Each is a straight move.</li>
@@ -41,15 +41,16 @@
 
 <section class="unchanged">
   <h2>Not changed</h2>
-  <p>The <code>St</code> struct, <code>held!</code> and the <code>App</code> component. <code>App</code> is still about 550 lines in <code>mod.rs</code>, and splitting its effects out is a separate job. The old guide <code>feat-summaries.html</code> links a line in <code>app.rs</code> and is left as written for its own PR.</p>
+  <p>The <code>St</code> struct, <code>held!</code> and the <code>App</code> component. <code>App</code> is still about 580 lines in <code>mod.rs</code>, and splitting its effects out is a separate job. The old guide <code>feat-summaries.html</code> links a line in <code>app.rs</code> and is left as written for its own PR.</p>
 </section>
 
 <section class="verify">
   <h2>How it was checked</h2>
   <ul>
-    <li><code>cargo test</code>: 322 passed, the same as <code>main</code>.</li>
-    <li><code>cargo clippy --all-targets</code>: no warnings.</li>
-    <li><code>cargo build --target wasm32-unknown-unknown --release</code>: builds. This is the build that catches the rsx key/clone trap.</li>
+    <li><code>cargo test</code>: 328 passed, the same as <code>main</code>.</li>
+    <li>After #5 (write support) landed, <code>main</code> was merged in and the split regenerated from <code>main</code>'s <code>app.rs</code>. #5 didn't touch any <code>St</code> method; its new fields and effects stay in <code>mod.rs</code>.</li>
+    <li><code>cargo fmt --check</code> and <code>cargo clippy --all-targets -- -D warnings</code>, as CI runs them: clean.</li>
+        <li><code>cargo build --target wasm32-unknown-unknown --release</code>: builds. This is the build that catches the rsx key/clone trap.</li>
     <li><code>cargo doc</code>: no new warnings.</li>
     <li>The app itself wasn't run in a browser.</li>
   </ul>

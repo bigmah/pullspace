@@ -10,6 +10,7 @@ use dioxus::prelude::*;
 use crate::backend::auth::Token;
 use crate::backend::clone::Progress;
 use crate::backend::difftool::Expansion;
+use crate::backend::drafts::Pending;
 use crate::backend::github::{
     Annotation, Branches, Checks, CommitFrom, CommitView, Commits, CompareView, FetchJob, PrDetail,
     PrHeader, PrMore, PrState, PrSummary, RepoRef, RepoView, Snapshot, Thread, statuses_of,
@@ -37,6 +38,7 @@ use super::palette::Picker;
 use super::panes::{self, Drag, DragMask, Edge};
 use super::prboard::PrBoard;
 use super::prefs::PrefsPanel;
+use super::review::{Composing, Writing};
 use super::spaces::{self, Card, Held, Space};
 use super::tabs;
 use super::topbar::TopBar;
@@ -970,6 +972,18 @@ pub struct St {
     /// everything fetching on a reader's behalf checks before it writes what
     /// it fetched — see [`spaces::Claim`].
     pub space: Signal<u32>,
+
+    // --- writing back ---
+    /// Reviews being written, by pull request ([`viewed::pr_key`]) — a copy of
+    /// what [`drafts`](crate::backend::drafts) keeps, filled in as each pull
+    /// request is opened. Keyed rather than per space, so it is global: two
+    /// spaces on one pull request are writing one review.
+    pub drafts: Signal<HashMap<String, Pending>>,
+    /// The line a comment is being written on, if one is — see
+    /// [`super::review`].
+    pub composing: Signal<Option<Composing>>,
+    /// The one write to GitHub in flight, or the last one that failed.
+    pub writing: Signal<Writing>,
 }
 
 impl St {
@@ -1196,6 +1210,9 @@ pub fn App() -> Element {
 
             spaces: root(spaces),
             space: root(on),
+            drafts: root(HashMap::new()),
+            composing: root(None),
+            writing: root(Writing::Idle),
         }
     });
 
@@ -1417,6 +1434,9 @@ pub fn App() -> Element {
     // And the other thing listened for on the document: a click on a line
     // number, which is how a line gets picked out to link to.
     use_future(move || super::viewer::lines(st));
+    // And the `+` beside a line of a pull request's diff, which starts a comment
+    // on it — see `review::NOTE_JS`.
+    use_future(move || super::review::adds(st));
     // A summary's links, which come out of its frame as messages — see
     // `super::summary`.
     use_future(move || super::summary::links(st));
@@ -1467,6 +1487,22 @@ pub fn App() -> Element {
             return;
         }
         spawn_forever(super::conversation::load(st, repo, number));
+    });
+
+    // The review being written on whichever pull request is open, off disk the
+    // first time it is — so a reload, or coming back to it tomorrow, finds the
+    // line comments where they were left.
+    use_effect(move || {
+        let Some((repo, number)) = st.workspace.read().review_key() else {
+            return;
+        };
+        let key = viewed::pr_key(&repo, number);
+        if st.drafts.peek().contains_key(&key) {
+            return;
+        }
+        let saved = crate::backend::drafts::load(&key);
+        let mut drafts = st.drafts;
+        drafts.write().insert(key, saved);
     });
 
     // The pull requests of whatever repository is open, kept alongside it —

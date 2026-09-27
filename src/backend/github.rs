@@ -1595,6 +1595,29 @@ pub struct Comment {
     /// The file a line comment hangs off, and the line in the head commit.
     pub path: Option<PathBuf>,
     pub line: Option<usize>,
+    /// GitHub's id for it — what a reply is addressed to. Zero where GitHub
+    /// sent none, which nothing can be addressed by.
+    #[serde(default)]
+    pub id: u64,
+    /// Line comments only: the comment this one answers, which is always the
+    /// first of its thread — GitHub files every reply under the root.
+    #[serde(default)]
+    pub reply_to: Option<u64>,
+    /// Line comments only: which side of the diff `line` counts on.
+    #[serde(default)]
+    pub side: Option<Side>,
+    /// Line comments only: the lines it was left on have since been rewritten,
+    /// so `line` is where it *was*, in a diff that no longer exists.
+    #[serde(default)]
+    pub outdated: bool,
+}
+
+impl Comment {
+    /// The comment a thread of line comments is filed under: this one, unless
+    /// it is a reply.
+    pub fn thread_root(&self) -> u64 {
+        self.reply_to.unwrap_or(self.id)
+    }
 }
 
 /// Everything written on a pull request, oldest first.
@@ -1633,6 +1656,14 @@ struct RawComment {
     /// `line`.
     #[serde(default)]
     original_line: Option<usize>,
+    #[serde(default)]
+    id: u64,
+    /// Line comments only: the root of the thread a reply belongs to.
+    #[serde(default)]
+    in_reply_to_id: Option<u64>,
+    /// Line comments only: `LEFT` or `RIGHT`.
+    #[serde(default)]
+    side: Option<String>,
 }
 
 /// GitHub's review states, in the words the pane uses.
@@ -1656,8 +1687,12 @@ fn comment_of(raw: RawComment, kind: CommentKind) -> Comment {
         body: raw.body.unwrap_or_default().trim_end().to_string(),
         html_url: raw.html_url,
         verdict: raw.state.as_deref().map(verdict_label).unwrap_or_default(),
+        outdated: raw.path.is_some() && raw.line.is_none(),
         path: raw.path.map(PathBuf::from),
         line: raw.line.or(raw.original_line),
+        id: raw.id,
+        reply_to: raw.in_reply_to_id,
+        side: raw.side.as_deref().and_then(Side::parse),
     }
 }
 
@@ -1779,6 +1814,250 @@ pub async fn pr_comments(token: &str, repo: &RepoRef, number: u64) -> Result<Thr
         comments,
         truncated,
     })
+}
+
+// ----------------------------------------------------------------- writing
+//
+// Everything pullspace says back to GitHub. Four requests, all of them a POST
+// of a small JSON body, and all of them on behalf of whoever pasted the token:
+// there is no server here to say anything as anybody else.
+
+/// Which side of a diff a line is counted on — the base's numbering or the
+/// head's. A removed line only exists on the left; an added one only on the
+/// right; an unchanged one is on both, and GitHub files it under whichever the
+/// reviewer pointed at.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+pub enum Side {
+    Left,
+    Right,
+}
+
+impl Side {
+    fn parse(s: &str) -> Option<Side> {
+        match s.to_ascii_uppercase().as_str() {
+            "LEFT" => Some(Side::Left),
+            "RIGHT" => Some(Side::Right),
+            _ => None,
+        }
+    }
+
+    /// As GitHub spells it.
+    pub fn wire(self) -> &'static str {
+        match self {
+            Side::Left => "LEFT",
+            Side::Right => "RIGHT",
+        }
+    }
+}
+
+/// What a review says about the pull request as a whole.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Verdict {
+    Comment,
+    Approve,
+    RequestChanges,
+}
+
+impl Verdict {
+    fn wire(self) -> &'static str {
+        match self {
+            Verdict::Comment => "COMMENT",
+            Verdict::Approve => "APPROVE",
+            Verdict::RequestChanges => "REQUEST_CHANGES",
+        }
+    }
+}
+
+/// A comment on one line of the diff, as it is sent.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct LineNote {
+    pub path: String,
+    pub line: usize,
+    pub side: Side,
+    pub body: String,
+}
+
+impl LineNote {
+    fn json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "path": self.path,
+            "line": self.line,
+            "side": self.side.wire(),
+            "body": self.body,
+        })
+    }
+}
+
+/// What GitHub says when it will not do something: a sentence, and sometimes a
+/// list of the particular things wrong with what was asked.
+#[derive(Deserialize, Default)]
+struct RawError {
+    #[serde(default)]
+    message: String,
+    #[serde(default)]
+    errors: Vec<serde_json::Value>,
+}
+
+/// Why a write came back refused, in GitHub's words where it has any.
+///
+/// Worth the care because the refusals are specific and the reader can act on
+/// them — "Can not approve your own pull request", "Line could not be
+/// resolved", "pull request review thread line must be part of the diff" — and
+/// the status alone says none of that.
+fn write_error(status: u16, body: &[u8]) -> anyhow::Error {
+    let raw: RawError = serde_json::from_slice(body).unwrap_or_default();
+    // `errors` is a list of strings on some endpoints and of objects with a
+    // `message` on others.
+    let details: Vec<String> = raw
+        .errors
+        .iter()
+        .filter_map(|e| match e {
+            serde_json::Value::String(s) => Some(s.clone()),
+            other => other.get("message")?.as_str().map(str::to_string),
+        })
+        .filter(|d| !d.is_empty() && *d != raw.message)
+        .collect();
+    let said = match (raw.message.is_empty(), details.is_empty()) {
+        (true, true) => String::new(),
+        (false, true) => raw.message,
+        (true, false) => details.join("; "),
+        (false, false) => format!("{}: {}", raw.message, details.join("; ")),
+    };
+    match status {
+        // A token that can read a repository but not write to it gets a 404
+        // from the write endpoints, not a 403 — GitHub will not confirm what
+        // it will not let you touch.
+        404 => anyhow::anyhow!(
+            "GitHub would not take this (404). The token can read this pull \
+             request but may not be allowed to write to it — a classic token \
+             needs the `repo` scope (or `public_repo`), a fine-grained one \
+             needs \"Pull requests: Read and write\" on this repository."
+        ),
+        _ if said.is_empty() => anyhow::anyhow!("GitHub refused this (HTTP {status})."),
+        _ => anyhow::anyhow!("GitHub refused this: {said}"),
+    }
+}
+
+/// POST `body` as JSON to `url`, as the signed-in account.
+async fn post_json(token: &str, url: &str, body: serde_json::Value) -> Result<()> {
+    if token.is_empty() {
+        bail!("Sign in to GitHub first — writing needs a token.");
+    }
+    let auth = format!("Bearer {token}");
+    let headers = [
+        ("Accept", "application/vnd.github+json"),
+        ("Content-Type", "application/json"),
+        ("X-GitHub-Api-Version", API_VERSION),
+        ("Authorization", auth.as_str()),
+    ];
+    let reply = http::post(url, &headers, body.to_string()).await?;
+    if reply.status == 403 {
+        // Not `refused`'s "may lack the repo scope" for every 403: a write is
+        // refused for reasons of its own (a locked conversation, an archived
+        // repository), and GitHub names them.
+        let spent = reply.rate_remaining.as_deref() == Some("0");
+        if !spent {
+            return Err(write_error(403, &reply.body));
+        }
+    }
+    refused(token, &reply)?;
+    if !(200..300).contains(&reply.status) {
+        return Err(write_error(reply.status, &reply.body));
+    }
+    Ok(())
+}
+
+fn pulls_url(repo: &RepoRef, number: u64) -> String {
+    format!(
+        "{API}/repos/{}/{}/pulls/{number}",
+        encode_segment(&repo.owner),
+        encode_segment(&repo.name)
+    )
+}
+
+/// Add to the pull request's discussion — the box at the foot of the
+/// conversation on github.com.
+pub async fn post_comment(token: &str, repo: &RepoRef, number: u64, body: &str) -> Result<()> {
+    let url = format!(
+        "{API}/repos/{}/{}/issues/{number}/comments",
+        encode_segment(&repo.owner),
+        encode_segment(&repo.name)
+    );
+    post_json(token, &url, serde_json::json!({ "body": body }))
+        .await
+        .with_context(|| format!("commenting on #{number}"))
+}
+
+/// Answer a thread of line comments. `to` is any comment in it; GitHub files
+/// the reply under the thread's root either way.
+pub async fn reply_to(token: &str, repo: &RepoRef, number: u64, to: u64, body: &str) -> Result<()> {
+    let url = format!("{}/comments/{to}/replies", pulls_url(repo, number));
+    post_json(token, &url, serde_json::json!({ "body": body }))
+        .await
+        .with_context(|| format!("replying on #{number}"))
+}
+
+/// One line comment, on its own and at once — GitHub's "Add single comment".
+///
+/// `commit` is the head the line was read at. A line number means nothing
+/// without the diff it was counted in, and the head may have moved since.
+pub async fn post_line_comment(
+    token: &str,
+    repo: &RepoRef,
+    number: u64,
+    commit: &str,
+    note: &LineNote,
+) -> Result<()> {
+    let mut body = note.json();
+    body["commit_id"] = serde_json::Value::String(commit.to_string());
+    post_json(
+        token,
+        &format!("{}/comments", pulls_url(repo, number)),
+        body,
+    )
+    .await
+    .with_context(|| format!("commenting on {}:{}", note.path, note.line))
+}
+
+/// The JSON a review goes as. Apart from [`submit_review`] so that its shape
+/// can be checked without a network.
+fn review_body(
+    commit: Option<&str>,
+    verdict: Verdict,
+    body: &str,
+    notes: &[LineNote],
+) -> serde_json::Value {
+    let mut out = serde_json::json!({ "event": verdict.wire() });
+    // An empty body is left out rather than sent: GitHub reads `""` on an
+    // approval as a summary somebody wrote, and shows an empty one.
+    if !body.trim().is_empty() {
+        out["body"] = serde_json::Value::String(body.to_string());
+    }
+    if let Some(commit) = commit {
+        out["commit_id"] = serde_json::Value::String(commit.to_string());
+    }
+    if !notes.is_empty() {
+        out["comments"] = notes.iter().map(LineNote::json).collect();
+    }
+    out
+}
+
+/// Submit a review: a verdict, a summary, and the line comments that were
+/// being held for it, all in one request — so they arrive together, as one
+/// review, the way they do on github.com.
+pub async fn submit_review(
+    token: &str,
+    repo: &RepoRef,
+    number: u64,
+    commit: Option<&str>,
+    verdict: Verdict,
+    body: &str,
+    notes: &[LineNote],
+) -> Result<()> {
+    let ask = review_body(commit, verdict, body, notes);
+    post_json(token, &format!("{}/reviews", pulls_url(repo, number)), ask)
+        .await
+        .with_context(|| format!("reviewing #{number}"))
 }
 
 // ----------------------------------------------------------------- commits
@@ -4225,6 +4504,78 @@ mod tests {
         .unwrap();
         let c = comment_of(stale, CommentKind::Inline);
         assert_eq!(c.line, Some(7));
+        assert!(c.outdated);
+    }
+
+    #[test]
+    fn a_reply_knows_its_thread_and_its_side() {
+        let root: RawComment =
+            serde_json::from_str(r#"{"id":10,"body":"why?","path":"a.rs","line":3,"side":"LEFT"}"#)
+                .unwrap();
+        let reply: RawComment = serde_json::from_str(
+            r#"{"id":11,"in_reply_to_id":10,"body":"because","path":"a.rs","line":3,"side":"LEFT"}"#,
+        )
+        .unwrap();
+        let root = comment_of(root, CommentKind::Inline);
+        let reply = comment_of(reply, CommentKind::Inline);
+        assert_eq!(root.side, Some(Side::Left));
+        assert!(!root.outdated);
+        assert_eq!(root.thread_root(), 10);
+        assert_eq!(reply.thread_root(), 10);
+    }
+
+    #[test]
+    fn a_review_sends_only_what_was_written() {
+        let bare = review_body(None, Verdict::Approve, "  ", &[]);
+        assert_eq!(bare, serde_json::json!({ "event": "APPROVE" }));
+
+        let note = LineNote {
+            path: "src/lib.rs".to_string(),
+            line: 12,
+            side: Side::Right,
+            body: "off by one?".to_string(),
+        };
+        let full = review_body(Some("abc"), Verdict::RequestChanges, "see notes", &[note]);
+        assert_eq!(
+            full,
+            serde_json::json!({
+                "event": "REQUEST_CHANGES",
+                "body": "see notes",
+                "commit_id": "abc",
+                "comments": [
+                    { "path": "src/lib.rs", "line": 12, "side": "RIGHT", "body": "off by one?" }
+                ],
+            })
+        );
+    }
+
+    #[test]
+    fn a_refused_write_says_what_github_said() {
+        let e = write_error(
+            422,
+            br#"{"message":"Unprocessable Entity","errors":["Can not approve your own pull request"]}"#,
+        );
+        let said = format!("{e}");
+        assert!(
+            said.contains("Can not approve your own pull request"),
+            "{said}"
+        );
+
+        // The other shape `errors` comes in.
+        let e = write_error(
+            422,
+            br#"{"message":"Validation Failed","errors":[{"resource":"PullRequestReviewComment","message":"line could not be resolved"}]}"#,
+        );
+        assert!(format!("{e}").contains("line could not be resolved"));
+
+        // And a 404 on a write is a permission, not a missing pull request.
+        let e = format!("{}", write_error(404, b"{}"));
+        assert!(e.contains("Read and write"), "{e}");
+
+        assert_eq!(
+            format!("{}", write_error(500, b"not json")),
+            "GitHub refused this (HTTP 500)."
+        );
     }
 
     #[test]

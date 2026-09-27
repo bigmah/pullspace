@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Split impl St across files by concern</title>
+</head>
+<body>
+<header>
+  <h1>Split impl St across files by concern</h1>
+  <p class="lede">This turns <code>ui/app.rs</code> into <code>ui/app/</code> and moves the 1,200-line <code>impl St</code> block out into five files, one per thing the methods do, without changing a method or a call site.</p>
+</header>
+
+<section class="why">
+  <h2>Why</h2>
+  <p><code>app.rs</code> is the most-changed file in the repository (42 commits) and was 2,960 lines long. Most of it was one <code>impl St</code> with about 65 methods, grouped only by comment headers that had drifted: the "opening a diff back up" section also held <code>has_file</code>, <code>forget_contents</code> and <code>open_at</code>, and "reading a summary" also held closing tabs. Finding the code for Back, or for what happens when a PR opens, meant knowing roughly which thousand lines to look in.</p>
+</section>
+
+<section class="tour">
+  <h2>Reading order</h2>
+  <ol class="tour">
+    <li><a href="/src/ui/app/mod.rs#L45-L49">mod.rs: the new submodules</a>. Everything else in <code>mod.rs</code> (the state types, <code>St</code>, <code>App</code>, the tests) is the old file unchanged. The only other edit is the <code>include_str!</code> path for the stylesheet, which gained a <code>../</code>.</li>
+    <li><a href="/src/ui/app/mod.rs#L975-L1039">mod.rs: what stayed in <code>impl St</code></a>: the small accessors (token, viewer, <code>bump_tick</code>, prefs, <code>generation</code>). They are what every other file leans on.</li>
+    <li><a href="/src/ui/app/workspace.rs#L190-L304">workspace.rs: <code>enter</code></a>: entering, clearing and closing a workspace, routes and places, and forgetting what a closed one held. It also takes <code>collapse_tree</code>, which sits next to <code>reset_tree_folds</code>.</li>
+    <li><a href="/src/ui/app/history.rs#L46-L149">history.rs: the trail and the tabs</a>: open file, Back/Forward, the tab strip, reopen and close, then the reader and summary panes. This is the one file whose method order changed. Tab methods that had drifted under other headers now sit under "the tabs".</li>
+    <li><a href="/src/ui/app/stepping.rs">stepping.rs</a>, <a href="/src/ui/app/gaps.rs">gaps.rs</a> and <a href="/src/ui/app/marks.rs">marks.rs</a>: next file, change or find hit; diff expansions; files marked read. Each is a straight move.</li>
+  </ol>
+</section>
+
+<section class="decisions">
+  <h2>Decisions</h2>
+  <aside class="decision"><p><strong>Several <code>impl St</code> blocks, not sub-structs of signals.</strong> Grouping the ~80 signals into <code>St.nav</code>, <code>St.find</code> and so on would also organise the state, but it would touch the <code>held!</code> list in <a href="/src/ui/spaces.rs">spaces.rs</a> and every <code>st.foo</code> read across <code>ui/</code>. Extra <code>impl</code> blocks change no call site.</p></aside>
+  <aside class="decision"><p><strong>Visibility is kept as tight as it was.</strong> Private methods become <code>pub(super)</code>, which reaches <code>app</code> and its children and nothing more. <a href="/src/ui/app/history.rs#L142"><code>stow</code></a> was <code>pub(super)</code>, reachable from all of <code>ui</code>, and is now <code>pub(in crate::ui)</code> so it keeps that reach from one level deeper.</p></aside>
+  <aside class="decision"><p><strong><code>marks.rs</code>, not <code>viewed.rs</code>.</strong> <code>mod.rs</code> already imports <code>backend::viewed</code>, and a child module with the same name would clash with that import.</p></aside>
+</section>
+
+<section class="risks">
+  <h2>Risks</h2>
+  <aside class="risk"><p>Low: the moved code compiles to the same items. A normalised comparison of the old file against the new files (whitespace, <code>pub(…)</code> and section headers stripped, lines sorted) differs only in the path fixes listed above and one line <code>rustfmt</code> wrapped.</p></aside>
+  <aside class="risk"><p>A new method now needs a home. Adding it to <code>mod.rs</code> out of habit would slowly grow the old file back. The <a href="/src/ui/">src/ui/</a> page lists what each file is for.</p></aside>
+</section>
+
+<section class="unchanged">
+  <h2>Not changed</h2>
+  <p>The <code>St</code> struct, <code>held!</code> and the <code>App</code> component. <code>App</code> is still about 550 lines in <code>mod.rs</code>, and splitting its effects out is a separate job. The old guide <code>feat-summaries.html</code> links a line in <code>app.rs</code> and is left as written for its own PR.</p>
+</section>
+
+<section class="verify">
+  <h2>How it was checked</h2>
+  <ul>
+    <li><code>cargo test</code>: 322 passed, the same as <code>main</code>.</li>
+    <li><code>cargo clippy --all-targets</code>: no warnings.</li>
+    <li><code>cargo build --target wasm32-unknown-unknown --release</code>: builds. This is the build that catches the rsx key/clone trap.</li>
+    <li><code>cargo doc</code>: no new warnings.</li>
+    <li>The app itself wasn't run in a browser.</li>
+  </ul>
+</section>
+</body>
+</html>

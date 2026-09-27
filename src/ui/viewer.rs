@@ -33,7 +33,7 @@ use super::tabs::{self, TabStrip};
 
 /// Files offered in Preview. The browser lays HTML out itself, so this is the
 /// whole test — there is no renderer here with opinions of its own.
-fn is_html(path: &Path) -> bool {
+pub(super) fn is_html(path: &Path) -> bool {
     path.extension()
         .and_then(|e| e.to_str())
         .is_some_and(|e| e.eq_ignore_ascii_case("html") || e.eq_ignore_ascii_case("htm"))

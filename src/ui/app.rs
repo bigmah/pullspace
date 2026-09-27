@@ -1466,8 +1466,8 @@ impl St {
     }
 
     /// Open a file from the tree: changed files land in split-diff view, and
-    /// prose lands rendered — markdown is written to be read, and the source of
-    /// it is one button away.
+    /// prose and pages land rendered — markdown is written to be read, a page
+    /// to be looked at, and the source of either is one button away.
     ///
     /// All of which is about a file being opened for the first time. One that
     /// is already in the strip above the code opens as its tab has it, because
@@ -1482,7 +1482,7 @@ impl St {
         let changed = self.statuses.peek().get(&rel).is_some();
         let mode = match () {
             _ if changed => ViewMode::Split,
-            _ if markdown::is_markdown(&rel) => ViewMode::Preview,
+            _ if markdown::is_markdown(&rel) || super::viewer::is_html(&rel) => ViewMode::Preview,
             _ => ViewMode::Source,
         };
         self.go(Spot {

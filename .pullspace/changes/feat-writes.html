@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Review from pullspace: comments, replies and verdicts</title>
+</head>
+<body>
+<header>
+  <h1>Review from pullspace: comments, replies and verdicts</h1>
+  <p class="lede">pullspace can now write back to a pull request: comment on a line of the diff, reply to a thread, comment on the discussion, and submit a review that approves, requests changes or just comments, with its held line comments sent in the same request.</p>
+</header>
+
+<section class="why">
+  <h2>Why</h2>
+  <p>Until now pullspace could only read. A reviewer read the diff here and then went to github.com to say anything, which put the most important step of a review back in the tool pullspace exists to replace. Write support was the first item under "Upcoming" in the README.</p>
+  <p>Two constraints shaped it. There is no server, so every write is the browser calling <code>api.github.com</code> with the pasted token, and a token that is read-only has to be explained rather than failed on. And a line comment is only a place in a particular diff, so the app has to offer comments only where GitHub will take them.</p>
+</section>
+
+<section class="tour">
+  <h2>Reading order</h2>
+  <ol class="tour">
+    <li><a href="/src/backend/github.rs#L1819-L2061">github.rs — the writing section</a>: <code>Side</code>, <code>Verdict</code>, <code>LineNote</code>, and the four calls. Start with <code>post_json</code> and <code>write_error</code>, which every write goes through: no token means no request, a 403 that isn't an empty budget is GitHub's own reason, and a 404 is explained as missing write access. <code>review_body</code> is split out so its JSON is tested without a network.</li>
+    <li><a href="/src/backend/github.rs#L1596-L1621">github.rs — the new <code>Comment</code> fields</a>: <code>id</code>, <code>reply_to</code>, <code>side</code> and <code>outdated</code>, which are what a reply is addressed to and what places a thread under the right line. <code>outdated</code> is "has a path but GitHub sent a null <code>line</code>".</li>
+    <li><a href="/src/backend/drafts.rs#L50-L80">drafts.rs — <code>Pending</code></a>: a review being written, kept per pull request in <code>localStorage</code> like the viewed marks. Note <code>commit()</code>: notes written across a push leave <code>commit_id</code> to GitHub rather than guessing.</li>
+    <li><a href="/src/ui/review.rs#L81-L131">ui/review.rs — <code>Talk</code></a>, then <a href="/src/ui/review.rs#L176-L212"><code>talk</code></a>: which lines get a <code>+</code> (anything not in a contracted gap, which is GitHub's own diff with 3 lines of context) and which have something hanging under them. <code>talk</code> runs in a memo in the viewer, so typing into the review box does not redraw the diff.</li>
+    <li><a href="/src/ui/viewer.rs#L1798-L1820">viewer.rs — <code>split_add</code></a> and the <code>t: &amp;Talk</code> parameter threaded through <code>render_inline</code>/<code>render_split</code>: the <code>+</code> and the threads go into rows that are plain functions, not components, so a 6,000-line file still pays nothing for lines with nothing under them.</li>
+    <li><a href="/src/ui/review.rs#L223-L251">ui/review.rs — <code>NOTE_JS</code> and <code>adds</code></a>: one page-side click listener for every <code>+</code>, like the line-number one in <code>viewer.rs</code>, reporting the side and line; the file is whichever is open.</li>
+    <li><a href="/src/ui/review.rs#L288-L396">ui/review.rs — <code>hold</code>, <code>send_line</code>, <code>send_review</code></a>: holding a note, sending one now or as a reply, and submitting the review. On success a review removes only the notes it actually sent, and <a href="/src/ui/conversation.rs#L63-L81"><code>conversation::reload</code></a> refetches without the <code>Loading</code> blink.</li>
+    <li><a href="/src/ui/review.rs#L403-L478"><code>LineThread</code></a> and <a href="/src/ui/review.rs#L674-L774"><code>ReviewBox</code></a>: the two places a reader writes: under a line, and at the foot of the conversation. Then the three new signals on <a href="/src/ui/app.rs#L970-L981"><code>St</code></a>, the effect that loads drafts as a PR opens, and the listener in <a href="/src/ui/app.rs#L2574-L2577"><code>App</code></a>.</li>
+  </ol>
+  <p>The map pages for <a href="/src/backend/">src/backend</a> and <a href="/src/ui/">src/ui</a> were rewritten where they described pullspace as read-only (the ui page gains a "Writing back" paragraph and a gotcha about keyed components in release builds). The root and <a href="/src/">src</a> pages only lose "write support" from their plans.</p>
+</section>
+
+<section class="decisions">
+  <h2>Decisions</h2>
+  <aside class="decision"><p><strong>Held notes live in the browser, not in a pending review on GitHub.</strong> The REST API can only create a pending review whole; adding a comment to one afterwards is a GraphQL mutation per comment, and a pending review left on GitHub by a closed tab is litter on somebody else's pull request. Kept in <code>localStorage</code>, a half-written review survives a reload and goes out as one request, the way github.com sends one.</p></aside>
+  <aside class="decision"><p><strong>The review state is global and keyed by pull request, not per space.</strong> <code>drafts</code>, <code>composing</code> and <code>writing</code> are seeded with literals, not registered in <code>held!</code>. Two spaces on one pull request are writing one review, and <code>composing</code> carries its pull request and path, so a box opened on one never shows on another.</p></aside>
+  <aside class="decision"><p><strong>One write in flight, app-wide.</strong> <code>Writing</code> is a single signal and every send button is disabled while it is <code>Busy</code>. A second press during a write is far more likely a double click than a second thought, and a doubled review is visible to everyone on the PR.</p></aside>
+  <aside class="decision"><p><strong>Comments are offered only on lines GitHub's diff has.</strong> Lines opened out of a gap are real code but GitHub answers a comment on them with a 422. <code>difftool::CONTEXT</code> is 3, the same as GitHub's, so "not in a gap" matches GitHub's hunks without asking it.</p></aside>
+  <aside class="decision"><p><strong>Replies and "Comment now" post immediately; new line comments are held by default.</strong> A reply only makes sense in the thread it answers, and the REST review endpoint cannot carry replies. A new comment is usually part of a review, so ⌘Enter holds it.</p></aside>
+  <aside class="decision"><p><strong>Approve and Request changes are disabled on your own pull request</strong> instead of letting GitHub refuse with a 422, since that refusal would come after somebody wrote the summary.</p></aside>
+</section>
+
+<section class="risks">
+  <h2>Risks</h2>
+  <aside class="risk"><p><strong>No write has been sent to GitHub from this branch.</strong> The request bodies and error parsing are unit-tested, and the UI was mounted headlessly, but the first real comment, reply and review will be the first proof that the endpoints, headers and CORS behave. Try it on a scratch PR first. A wrong body shows as a red box under the button with GitHub's message; nothing is lost, because held notes and the typed text stay until a send succeeds.</p></aside>
+  <aside class="risk"><p><strong>Our diff and GitHub's can disagree about hunks.</strong> The diff is computed locally (<code>similar</code>) and GitHub uses git's. Where they place a change differently, a <code>+</code> can appear on a line GitHub will not take. That comment fails with "line could not be resolved", and because a review is one request, the whole review fails with it until that note is deleted. The same goes for notes whose lines a later push rewrote.</p></aside>
+  <aside class="risk"><p><strong>Read-only tokens.</strong> Existing users may have fine-grained tokens with read-only pull requests. They will see a 404 explained as missing write access; the sign-in hint now says what to grant.</p></aside>
+  <aside class="risk"><p><strong>Two windows on one pull request.</strong> Drafts are saved read-modify-write, so two windows on different PRs don't clobber each other, but two windows on the <em>same</em> PR hold separate in-memory copies, and the last to save wins.</p></aside>
+</section>
+
+<section class="unchanged">
+  <h2>Not changed</h2>
+  <p>No merging, no editing or deleting comments already on GitHub, no multi-line comments (<code>start_line</code>), and no commenting from a single commit of a PR: its line numbers are that commit's diff, which GitHub would not map onto the PR. Line comments in the conversation list still jump to the file in Source view, as before. <code>refused</code> and <code>get_json</code> are untouched: reads keep their messages, and writes have their own.</p>
+</section>
+
+<section class="verify">
+  <h2>How it was checked</h2>
+  <ul>
+    <li><code>cargo fmt --check</code>, <code>cargo clippy --all-targets -- -D warnings</code>, <code>cargo test</code> (328 pass, including new tests for the review JSON, both shapes of GitHub's <code>errors</code> list, the 404 explanation, reply/side/outdated parsing, and the drafts book), and <code>cargo check --target wasm32-unknown-unknown</code> in both debug and <code>--release</code>. Release caught three keyed components moving what their keys read.</li>
+    <li><code>NOTE_JS</code> extracted and driven under node with DOM stubs: sends <code>[side, line]</code> for a <code>+</code>, ignores bad sides, bad numbers and other clicks, and does not stack listeners when re-run.</li>
+    <li>The real <code>App</code> mounted headlessly in a scratch copy (not in the repo) on a fixture PR: 15 <code>+</code>s on a file with two changes (exactly the two hunks), an existing thread with its reply under line 10, an outdated comment kept out of the diff, a held note under a deleted line in both inline and split views, a reply box opening inside its thread, verdicts disabled on the author's own PR, and nothing to click when signed out. Inline and split views were screenshotted from its output.</li>
+    <li>Not checked: any request against the real API, and the app in a real browser.</li>
+  </ul>
+</section>
+</body>
+</html>

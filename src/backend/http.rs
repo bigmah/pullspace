@@ -3,10 +3,11 @@
 //! fetch brings its own connection pool, cache and timeouts, so there is
 //! nothing to configure here — which is most of why this module is short.
 //!
-//! Reading is all pullspace does: it shows you pull requests, it does not write
-//! them. The POST is not an exception to that. GraphQL is asked by POST whatever
-//! the question is, and the one question put to it here — see
-//! [`pr_more`](super::github::pr_more) — is a read like every other.
+//! Two things go out by POST. GraphQL is asked by POST whatever the question
+//! is, and the one question put to it here — see
+//! [`pr_more`](super::github::pr_more) — is a read like every other. The rest
+//! are writes: comments, replies and reviews, each a small JSON body — see the
+//! writing section of [`github`](super::github).
 
 use anyhow::{Result, anyhow};
 use gloo_net::http::{Request, Response};
@@ -53,8 +54,8 @@ pub async fn get(url: &str, headers: &[(&str, &str)]) -> Result<Reply> {
     reply_of(res, "GET", url).await
 }
 
-/// POST `body` to `url` with `headers` — a question too long for an address
-/// bar, which is the only thing a POST is ever used for here.
+/// POST `body` to `url` with `headers` — a GraphQL question, or something to
+/// add to a pull request.
 pub async fn post(url: &str, headers: &[(&str, &str)], body: String) -> Result<Reply> {
     let mut req = Request::post(url);
     for (name, value) in headers {

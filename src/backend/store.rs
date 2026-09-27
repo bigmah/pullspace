@@ -18,6 +18,9 @@ pub const LAYOUT: &str = "layout";
 pub const PREFS: &str = "prefs";
 /// Which files of which pull requests have been marked read, as JSON.
 pub const VIEWED: &str = "viewed";
+/// Reviews being written and not yet submitted, as JSON — see
+/// [`crate::backend::drafts`].
+pub const DRAFTS: &str = "drafts";
 /// The spaces this browser tab has open, as JSON — see [`crate::ui::spaces`].
 /// Session-scoped, unlike everything above it: spaces belong to the window
 /// they were opened in, and a second window is a second set of them.

@@ -25,6 +25,7 @@ use super::app::{
 };
 use super::github::GithubMark;
 use super::panes::{Edge, Splitter};
+use super::review::ReviewBox;
 
 /// A comment's links are written from the root of the repository — there is no
 /// file they are relative to, the way a README's are.
@@ -57,6 +58,26 @@ pub(super) async fn load(st: St, repo: RepoRef, number: u64) {
         Ok(thread) => Conversation::Ready(Box::new(thread)),
         Err(e) => Conversation::Failed(format!("{e:#}")),
     });
+}
+
+/// Fetch the conversation again after something was added to it, leaving what
+/// is on screen up until the answer is in.
+///
+/// [`load`] puts `Loading` up first, which is right for `⟳` and wrong here: the
+/// comment just sent, and every thread in the diff, would blink out and back.
+/// A failure leaves the old list — the write went through, and `⟳` is there.
+pub(super) async fn reload(st: St, repo: RepoRef, number: u64) {
+    let token = st.api_token();
+    let got = github::pr_comments(&token, &repo, number).await;
+    let still_open = st
+        .workspace
+        .peek()
+        .review_key()
+        .is_some_and(|(r, n)| r == repo && n == number);
+    if let (true, Ok(thread)) = (still_open, got) {
+        let mut conv = st.conv;
+        conv.set(Conversation::Ready(Box::new(thread)));
+    }
 }
 
 /// Fetch the commits beside what is open — everything on a pull request, or the
@@ -296,7 +317,7 @@ pub(super) async fn load_annotations(st: St, check: u64) {
 
 /// The date alone. The time of day is not what anyone is reading a comment
 /// list for, and it costs the width of the author's name.
-fn day_of(timestamp: &str) -> String {
+pub(super) fn day_of(timestamp: &str) -> String {
     timestamp.chars().take(10).collect()
 }
 
@@ -582,6 +603,16 @@ pub fn ConvPane() -> Element {
                             Description { desc }
                         }
                         {talk}
+                        if let Some(desc) = desc.clone() {
+                            // Keyed by the pull request, so nothing typed on
+                            // one is left in the box on the next.
+                            ReviewBox {
+                                key: "{repo}#{desc.number}",
+                                repo: repo.clone(),
+                                number: desc.number,
+                                author: desc.author.clone(),
+                            }
+                        }
                     },
                     ConvTab::Branches => rsx! {
                         BranchesBody {
@@ -1420,7 +1451,7 @@ fn AnnotationRow(a: Annotation) -> Element {
 /// Parsed here rather than memoised: a comment is a few hundred bytes, and the
 /// row it is in only re-renders when the comment itself changes.
 #[component]
-fn Body(text: String) -> Element {
+pub(super) fn Body(text: String) -> Element {
     let st = use_context::<St>();
     // `#123` and `@name` in a review are references, and this is the
     // repository they refer to.

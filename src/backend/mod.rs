@@ -4,6 +4,7 @@ pub mod clip;
 pub mod clone;
 pub mod crash;
 pub mod difftool;
+pub mod drafts;
 pub mod fuzzy;
 pub mod github;
 pub mod highlight;

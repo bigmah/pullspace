@@ -1175,6 +1175,8 @@ struct RawTree {
 #[derive(Deserialize)]
 struct RawTreeEntry {
     path: String,
+    #[serde(default)]
+    mode: String,
     #[serde(rename = "type")]
     kind: String,
     #[serde(default)]
@@ -1209,6 +1211,16 @@ pub struct Snapshot {
     pub repo: RepoRef,
     pub commit: String,
     pub files: Vec<TreeEntry>,
+    /// Every directory and the tree hash it has at this commit, sorted by path
+    /// like `files`. The root is the entry with an empty path, and its hash is
+    /// the root's tree with `.pullspace` left out — see
+    /// [`summary::root_stamp`](super::summary::root_stamp) for why. What a
+    /// summary is held up to, to say whether it is still true.
+    ///
+    /// Empty in a snapshot kept from before this was, which
+    /// [`blobs::load`](super::blobs::load) takes as a reason to read it again.
+    #[serde(default)]
+    pub dirs: Vec<TreeEntry>,
     /// GitHub returned only part of the tree — past about 100k entries / 7 MB.
     pub truncated: bool,
 }
@@ -1221,6 +1233,7 @@ impl Snapshot {
             repo: repo.clone(),
             commit: commit.to_string(),
             files: Vec::new(),
+            dirs: Vec::new(),
             truncated: false,
         }
     }
@@ -1251,6 +1264,15 @@ impl Snapshot {
             .map(|i| &self.files[i])
     }
 
+    /// The tree hash of a directory at this commit — `""` for the root, as a
+    /// summary stamps it.
+    pub fn dir_sha(&self, dir: &std::path::Path) -> Option<&str> {
+        self.dirs
+            .binary_search_by(|d| d.path.as_path().cmp(dir))
+            .ok()
+            .map(|i| self.dirs[i].sha.as_str())
+    }
+
     /// Where the files are kept on disk, and how it is found again.
     pub fn key(&self) -> String {
         format!(
@@ -1270,27 +1292,56 @@ pub async fn repo_tree(token: &str, repo: &RepoRef, sha: &str) -> Result<Snapsho
         encode_segment(sha),
     );
     let raw: RawTree = get_json(token, &url).await?;
-    let mut files: Vec<TreeEntry> = raw
-        .tree
-        .into_iter()
-        // "tree" entries are directories and "commit" entries are submodules;
-        // the file tree is rebuilt from the blob paths alone.
-        .filter(|e| e.kind == "blob")
-        .map(|e| TreeEntry {
+    Ok(snapshot_of(repo, sha, raw))
+}
+
+fn snapshot_of(repo: &RepoRef, sha: &str, raw: RawTree) -> Snapshot {
+    // The root's own entries, for the one tree hash GitHub cannot give: the
+    // root without `.pullspace`. Only from a whole tree — a truncated one may
+    // be missing some of them, and a wrong stamp is worse than none.
+    let root = (!raw.truncated).then(|| {
+        super::summary::root_stamp(
+            raw.tree
+                .iter()
+                .filter(|e| !e.path.contains('/'))
+                .map(|e| (e.mode.as_str(), e.path.as_str(), e.sha.as_str())),
+        )
+    });
+    let mut files = Vec::new();
+    let mut dirs = Vec::new();
+    for e in raw.tree {
+        // "commit" entries are submodules, which have nothing to read. The
+        // file tree is rebuilt from the blob paths alone; the "tree" entries
+        // are kept only for their hashes.
+        let list = match e.kind.as_str() {
+            "blob" => &mut files,
+            "tree" => &mut dirs,
+            _ => continue,
+        };
+        list.push(TreeEntry {
             path: PathBuf::from(e.path),
             sha: e.sha,
             size: e.size,
-        })
-        .collect();
+        });
+    }
+    if let Some(root) = root {
+        dirs.push(TreeEntry {
+            path: PathBuf::new(),
+            sha: root,
+            size: 0,
+        });
+    }
     // Git writes trees in its own order, which is nearly but not quite this
     // one. Sorting here is what makes `entry` a binary search.
     files.sort_by(|a, b| a.path.cmp(&b.path));
-    Ok(Snapshot {
+    dirs.sort_by(|a, b| a.path.cmp(&b.path));
+    Snapshot {
         repo: repo.clone(),
         commit: sha.to_string(),
         files,
+        dirs,
         truncated: raw.truncated,
-    })
+    }
 }
 
 #[derive(Deserialize)]
@@ -4246,6 +4297,7 @@ mod tests {
             repo: RepoRef::default(),
             commit: "c".into(),
             files,
+            dirs: Vec::new(),
             truncated: false,
         };
 
@@ -4259,6 +4311,40 @@ mod tests {
                 .entry(std::path::Path::new("crates/gguf/src/nope.rs"))
                 .is_none()
         );
+    }
+
+    /// A tree as GitHub sends it: the directories come back with their hashes
+    /// and the root is stamped without `.pullspace`, while the file list is
+    /// what it always was.
+    #[test]
+    fn a_tree_keeps_its_directory_hashes_and_stamps_the_root() {
+        let raw: RawTree = serde_json::from_str(
+            r#"{"tree":[
+              {"path":".pullspace","mode":"040000","type":"tree","sha":"86c336d99951499a894e80724f2d1a7d78b7edc6"},
+              {"path":".pullspace/map","mode":"040000","type":"tree","sha":"1111111111111111111111111111111111111111"},
+              {"path":".pullspace/map/index.html","mode":"100644","type":"blob","sha":"2222222222222222222222222222222222222222","size":2},
+              {"path":"README.md","mode":"100644","type":"blob","sha":"d00491fd7e5bb6fa28c517a0bb32b8b506539d4d","size":2},
+              {"path":"a-b","mode":"040000","type":"tree","sha":"7cafae9f1b71ea42ad1c9db8ef5969f9b4a9f11a"},
+              {"path":"a.c","mode":"100644","type":"blob","sha":"4286f428e3b19fe84de503916ce0e7dc8deefea1","size":2},
+              {"path":"link","mode":"120000","type":"blob","sha":"42061c01a1c70097d1e4579f29a5adf40abdec95","size":9},
+              {"path":"run.sh","mode":"100755","type":"blob","sha":"f5bdd214e01603ecd6c83be9f66d88579c588ec6","size":4},
+              {"path":"src","mode":"040000","type":"tree","sha":"f26db84cb30cbba9a8ec0c6fb839c78b1a7f64f8"},
+              {"path":"src/a","mode":"040000","type":"tree","sha":"b6e218aa4186392584086d14f778bd0b81311882"},
+              {"path":"src.txt","mode":"100644","type":"blob","sha":"718f4d2ff533cf8ead8d3556cf43912bd245fbc4","size":2}
+            ],"truncated":false}"#,
+        )
+        .unwrap();
+        let snap = snapshot_of(&RepoRef::default(), "c", raw);
+        assert_eq!(snap.files.len(), 6);
+        assert_eq!(
+            snap.dir_sha(std::path::Path::new("")),
+            Some("0d31c502bcaa70cb7e6b7ef80009bd7e09a0e645")
+        );
+        assert_eq!(
+            snap.dir_sha(std::path::Path::new("src/a")),
+            Some("b6e218aa4186392584086d14f778bd0b81311882")
+        );
+        assert_eq!(snap.dir_sha(std::path::Path::new("nope")), None);
     }
 
     #[test]

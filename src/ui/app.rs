@@ -704,6 +704,13 @@ pub struct St {
     /// from is still open, still in the strip, and comes back as it was the
     /// moment its tab is clicked.
     pub reading: Signal<Option<Reading>>,
+    /// The summary page last opened — a `.pullspace/` page, see
+    /// [`crate::backend::summary`] — which keeps a tab at the head of the strip
+    /// until it is closed, so following a link out of it into the code is one
+    /// click from coming back.
+    pub summary: Signal<Option<PathBuf>>,
+    /// Whether that page has the pane, rather than the file underneath it.
+    pub summary_on: Signal<bool>,
     /// Whether the reader is set to the full width of the pane rather than to
     /// a measure. A fact about how somebody likes to read, so it outlives the
     /// document it was set on.
@@ -1030,6 +1037,7 @@ impl St {
         let mut open = self.open;
         open.set(None);
         self.stop_reading();
+        self.close_summary();
         let mut ps = self.scroll_to;
         ps.set(None);
         self.reset_tree_folds();
@@ -1458,8 +1466,8 @@ impl St {
     }
 
     /// Open a file from the tree: changed files land in split-diff view, and
-    /// prose lands rendered — markdown is written to be read, and the source of
-    /// it is one button away.
+    /// prose and pages land rendered — markdown is written to be read, a page
+    /// to be looked at, and the source of either is one button away.
     ///
     /// All of which is about a file being opened for the first time. One that
     /// is already in the strip above the code opens as its tab has it, because
@@ -1474,7 +1482,7 @@ impl St {
         let changed = self.statuses.peek().get(&rel).is_some();
         let mode = match () {
             _ if changed => ViewMode::Split,
-            _ if markdown::is_markdown(&rel) => ViewMode::Preview,
+            _ if markdown::is_markdown(&rel) || super::viewer::is_html(&rel) => ViewMode::Preview,
             _ => ViewMode::Source,
         };
         self.go(Spot {
@@ -2011,8 +2019,10 @@ impl St {
         open.set(Some(spot.path));
         // The middle pane shows one thing. Opening a file is asking for it to
         // be that file — and whatever was being read there is still in the
-        // conversation, one click from being picked up again.
+        // conversation, one click from being picked up again. A summary keeps
+        // its tab for the same reason.
         self.stop_reading();
+        self.hide_summary();
     }
 
     // ------------------------------------------------------- reading a body
@@ -2023,8 +2033,50 @@ impl St {
     /// and its place in it, and clicking that tab is what comes back.
     pub fn read_doc(&self, doc: Reading) {
         self.stow();
+        self.hide_summary();
         let mut reading = self.reading;
         reading.set(Some(doc));
+    }
+
+    // ------------------------------------------------------ reading a summary
+
+    /// Hand the middle pane to a summary page — a directory's, or a pull
+    /// request's guide to itself. See [`super::summary`].
+    pub fn open_summary(&self, page: PathBuf) {
+        self.stow();
+        self.stop_reading();
+        let mut summary = self.summary;
+        if summary.peek().as_ref() != Some(&page) {
+            summary.set(Some(page));
+        }
+        let mut on = self.summary_on;
+        if !*on.peek() {
+            on.set(true);
+        }
+    }
+
+    /// Bring the last summary back, from its tab.
+    pub fn show_summary(&self) {
+        if let Some(page) = self.summary.peek().clone() {
+            self.open_summary(page);
+        }
+    }
+
+    /// Let the file underneath have the pane, keeping the summary's tab.
+    pub fn hide_summary(&self) {
+        let mut on = self.summary_on;
+        if *on.peek() {
+            on.set(false);
+        }
+    }
+
+    /// Put the summary down altogether, tab and all.
+    pub fn close_summary(&self) {
+        self.hide_summary();
+        let mut summary = self.summary;
+        if summary.peek().is_some() {
+            summary.set(None);
+        }
     }
 
     /// Put it down, and let the file underneath have the pane back.
@@ -2114,6 +2166,9 @@ impl St {
         if self.reading.peek().is_some() {
             return self.stop_reading();
         }
+        if *self.summary_on.peek() {
+            return self.close_summary();
+        }
         let Some(rel) = self.open.peek().clone() else {
             return;
         };
@@ -2186,6 +2241,8 @@ pub fn App() -> Element {
             statuses: root(h.statuses),
             open: root(h.open),
             reading: root(h.reading),
+            summary: root(h.summary),
+            summary_on: root(h.summary_on),
             read_wide: root(false),
             read_toc: root(true),
             view_mode: root(h.view_mode),
@@ -2498,6 +2555,9 @@ pub fn App() -> Element {
     // And the other thing listened for on the document: a click on a line
     // number, which is how a line gets picked out to link to.
     use_future(move || super::viewer::lines(st));
+    // A summary's links, which come out of its frame as messages — see
+    // `super::summary`.
+    use_future(move || super::summary::links(st));
 
     // And which line is at the top of the code pane, for the header pinned
     // over it.

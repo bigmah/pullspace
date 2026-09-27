@@ -28,11 +28,12 @@ use super::markdown::Target;
 use super::panes::{Edge, Splitter};
 use super::prcache::ensure_path;
 use super::reader::Reader;
+use super::summary::{self, SummaryPane};
 use super::tabs::{self, TabStrip};
 
 /// Files offered in Preview. The browser lays HTML out itself, so this is the
 /// whole test — there is no renderer here with opinions of its own.
-fn is_html(path: &Path) -> bool {
+pub(super) fn is_html(path: &Path) -> bool {
     path.extension()
         .and_then(|e| e.to_str())
         .is_some_and(|e| e.eq_ignore_ascii_case("html") || e.eq_ignore_ascii_case("htm"))
@@ -407,6 +408,21 @@ pub fn Viewer() -> Element {
         }))
     });
 
+    // A summary page asked for as a page — the Preview button, the palette,
+    // a tab left in Preview — is shown in the summary pane instead. The
+    // generic preview's frame denies everything, links included, and a
+    // summary is mostly links. The file's own tab goes back to its source,
+    // which is what it is for from here on.
+    use_effect(move || {
+        let wanted = *st.view_mode.read() == ViewMode::Preview;
+        let open = st.open.read().clone();
+        if let Some(page) = open.filter(|p| wanted && crate::backend::summary::is_page(p)) {
+            let mut vm = st.view_mode;
+            vm.set(ViewMode::Source);
+            st.open_summary(page);
+        }
+    });
+
     // A file arrives where it was left — and, the first time, at the top of
     // itself. The scroll container outlives the file in it, so without this,
     // opening something short after reading deep into something long lands you
@@ -433,6 +449,13 @@ pub fn Viewer() -> Element {
     // pane has to be redrawn when the theme moves — the memo above only covers
     // the source view.
     let _ = st.prefs.read().theme;
+
+    // A summary has the pane when it is up, over a description as over a
+    // file: opening either one puts the other down, so both are never asked
+    // for at once — see `St::open_summary`.
+    if *st.summary_on.read() && st.summary.read().is_some() {
+        return rsx! { SummaryPane {} };
+    }
 
     // A description being read has the pane. The file it took it from is
     // untouched underneath — still open, still in the strip, and one click on
@@ -1216,6 +1239,19 @@ fn Welcome() -> Element {
         )),
         _ => None,
     };
+    // A repository that keeps summaries has a better first page than an
+    // empty pane: the pull request's own guide when it brings one, the map
+    // of the repository otherwise.
+    let sum_home = match summary::available(&st.workspace.read()) {
+        true => summary::home(&st),
+        false => None,
+    };
+    let sum_label = sum_home
+        .as_deref()
+        .map(|p| match crate::backend::summary::is_change(p) {
+            true => "Read the review guide",
+            false => "Open the summary map",
+        });
     let Some((title, hint)) = showing else {
         // Unreachable while the landing page owns the empty workspace, and
         // nothing worth drawing if that ever changes.
@@ -1241,6 +1277,14 @@ fn Welcome() -> Element {
                             })
                         },
                         "Read the description"
+                    }
+                }
+                if let (Some(page), Some(label)) = (sum_home, sum_label) {
+                    button {
+                        class: "welcome-read sum",
+                        title: "Summaries this repository keeps under .pullspace/, written by an agent and read here beside the code",
+                        onclick: move |_| st.open_summary(page.clone()),
+                        "{label}"
                     }
                 }
             }

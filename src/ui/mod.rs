@@ -20,6 +20,7 @@ mod prefs;
 mod reader;
 mod refbar;
 mod spaces;
+mod summary;
 mod tabs;
 mod topbar;
 mod viewer;

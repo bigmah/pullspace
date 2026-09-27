@@ -73,6 +73,10 @@ pulldown-cmark = { version = "0.13.4", default-features = false }
 regex = "1.13"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
+# Git's own hash, for the one tree object pullspace has to build itself: the
+# repository root with `.pullspace/` left out, which is what a root summary is
+# stamped with — see `backend::summary`. No dependencies of its own.
+sha1_smol = "1.0.1"
 # `wasm32_web_time` is not optional here, whatever its name suggests. The
 # word-level emphasis in `inline` gives its own diff a 500ms deadline, and it
 # reads the clock to do it — which on wasm32-unknown-unknown is

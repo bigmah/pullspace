@@ -25,6 +25,11 @@ Features:
 * Native HTML rendering 
 * No sign-in needed (PAT required for private repos)
 * Source code never leaves the browser. Like a local IDE but compiled to WASM. 
+* Summaries: your coding agent keeps a map of the repository in `.pullspace/`,
+  one page per directory explaining how it works, and writes a reviewer's guide
+  for every PR. pullspace shows each page next to the code, flags pages that
+  are out of date, and shows how a PR changed the explanation. See
+  [SUMMARIES.md](SUMMARIES.md).
 
 Upcoming:
 

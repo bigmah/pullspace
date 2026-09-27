@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="pullspace:tree" content="51fb183d102bcb11cc287cfd80727bf3e0583146">
+<meta name="pullspace:written" content="2026-09-26">
+<title>src</title>
+</head>
+<body>
+<header>
+  <h1>src</h1>
+  <p class="lede">The whole app: one Rust crate, compiled to wasm, that is the code reviewer in the browser tab, with nothing behind it but api.github.com.</p>
+</header>
+
+<section class="how">
+  <h2>How it works</h2>
+  <p>The crate is split in two, and the split is the thing to hold on to. <a href="/src/backend/">backend</a> is everything that isn't drawing: the GitHub client, the clone into the browser's file system, the content-addressed blob store, diffing, highlighting, search, and the parsers that turn untrusted files into data. <a href="/src/ui/">ui</a> is the Dioxus app: one store of signals (<a href="/src/ui/app.rs#L694-L967"><code>St</code></a>) and the components that read and write it. <code>ui</code> calls into <code>backend</code>; <code>backend</code> never calls back (its only mention of <code>ui</code> is a doc link in <code>store.rs</code>).</p>
+
+  <figure class="diagram">
+    <svg viewBox="0 0 560 110" width="560" height="110" role="img" aria-label="main launches ui::App; ui drives backend; backend talks to GitHub and OPFS">
+      <defs><marker id="src-arrow" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="8" markerHeight="8" orient="auto"><path class="arrow" d="M0,0 L8,4 L0,8 z"/></marker></defs>
+      <rect class="box" x="1" y="35" width="100" height="40" rx="5"/><text class="mono" x="51" y="59" text-anchor="middle">main.rs</text>
+      <line class="edge" x1="101" y1="55" x2="146" y2="55" marker-end="url(#src-arrow)"/>
+      <rect class="box accent" x="148" y="35" width="120" height="40" rx="5"/><text class="mono" x="208" y="53" text-anchor="middle">ui</text><text class="dim" x="208" y="68" text-anchor="middle">St + components</text>
+      <line class="edge" x1="268" y1="55" x2="313" y2="55" marker-end="url(#src-arrow)"/>
+      <rect class="box accent" x="315" y="35" width="120" height="40" rx="5"/><text class="mono" x="375" y="53" text-anchor="middle">backend</text><text class="dim" x="375" y="68" text-anchor="middle">data, no drawing</text>
+      <line class="edge" x1="435" y1="45" x2="467" y2="25" marker-end="url(#src-arrow)"/>
+      <line class="edge" x1="435" y1="65" x2="467" y2="85" marker-end="url(#src-arrow)"/>
+      <rect class="box" x="469" y="5" width="90" height="35" rx="5"/><text x="514" y="27" text-anchor="middle">GitHub</text>
+      <rect class="box" x="469" y="70" width="90" height="35" rx="5"/><text x="514" y="92" text-anchor="middle">OPFS</text>
+    </svg>
+    <figcaption>Dependencies run one way. The only ways out of the tab are the network (through <code>backend::http</code>) and the browser's private file system.</figcaption>
+  </figure>
+
+  <p><a href="/src/main.rs">main.rs</a> is the whole entry point: it launches <code>ui::App</code> and then installs the crash screen (<a href="/src/backend/crash.rs#L32"><code>crash::catch</code></a>). Its doc comment is the deployment story: <code>dx build --platform web</code> leaves an <code>index.html</code>, a <code>.wasm</code> and a <code>.js</code>, any static host serves them, and "that is the whole deployment".</p>
+
+  <p>A review, end to end: an address (typed, linked, or handed over by the <a href="/extension/">extension</a>) becomes a <code>Route</code>; <code>ui</code>'s loaders fetch a <strong>snapshot</strong> of the commit through <a href="/src/backend/github.rs"><code>backend::github</code></a> and land it with <code>St::enter</code>; an effect starts <a href="/src/backend/clone.rs"><code>backend::clone</code></a>, which pulls every blob into OPFS under its git SHA (<a href="/src/backend/blobs.rs"><code>backend::blobs</code></a>), so a second PR on the same repository only downloads what differs; the viewer then decodes only the files somebody opens, and search and Go to Definition read the rest back off disk. Several such workspaces ("spaces") share one tab by swapping every per-space signal in and out of <code>St</code> (<a href="/src/ui/spaces.rs"><code>ui::spaces</code></a>).</p>
+
+  <p><strong>The security boundary is drawn across both halves.</strong> The GitHub token sits in <code>localStorage</code> (<a href="/src/backend/auth.rs"><code>backend::auth</code></a>) in the same origin as every file shown, so nothing from a repository becomes markup in the app's document. Markdown is parsed into a tree by <a href="/src/backend/markdown.rs"><code>backend::markdown</code></a> and built into elements by <a href="/src/ui/markdown.rs"><code>ui::markdown</code></a>. HTML only renders in a sandboxed frame without <code>allow-same-origin</code>: an empty <code>sandbox</code> for a file's Preview (<a href="/src/ui/viewer.rs#L1435-L1461"><code>viewer::render_preview</code></a>), and for <code>.pullspace/</code> summaries a CSP-wrapped document from <a href="/src/backend/summary.rs#L509-L554"><code>backend::summary::frame_doc</code></a>, shown by <a href="/src/ui/summary.rs#L648-L682"><code>ui::summary::frame</code></a>, whose one script is nonce'd: a link bridge, plus the before/after marking on a page a PR rewrote. Off-site images are never loaded (<a href="/src/backend/images.rs#L1-L23"><code>backend::images</code></a>).</p>
+</section>
+
+<section class="parts">
+  <h2>What's in here</h2>
+  <dl class="parts">
+    <dt><a href="/src/main.rs">main.rs</a></dt><dd>Launches <code>ui::App</code>, then installs the crash screen. Order is deliberate; the reason is in <code>crash::catch</code>.</dd>
+    <dt><a href="/src/backend/">backend/</a></dt><dd>Transport, clone, blob store, and pure data work (diff, highlight, search, symbols, markdown, summaries). Everything testable with plain <code>cargo test</code>.</dd>
+    <dt><a href="/src/ui/">ui/</a></dt><dd>The Dioxus components, the <code>St</code> signal store, workspaces and spaces, routing, and the sandboxed frames.</dd>
+  </dl>
+</section>
+
+<section class="invariants">
+  <h2>Invariants</h2>
+  <ul>
+    <li><strong><code>backend</code> doesn't depend on <code>ui</code>, and only <a href="/src/backend/http.rs">http.rs</a> touches the network.</strong> That is what lets the diff, markdown, search, symbol and summary code run under host <code>cargo test</code> in CI. Browser calls leaking into those modules cost their tests.</li>
+    <li><strong>Repository content never becomes markup in the app's document.</strong> Each half holds one side of this: <code>backend</code> never emits HTML from Markdown and builds the frame document; <code>ui</code> builds elements from the tree and never grants a frame <code>allow-same-origin</code>.</li>
+    <li><strong>Every per-space signal is registered in <a href="/src/ui/spaces.rs#L109-L190"><code>held!</code></a>.</strong> A signal added to <code>St</code> without it leaks from one review into the next.</li>
+    <li><strong>Storage failures are never fatal.</strong> OPFS and both web storages may be missing or full; a miss costs speed, not correctness (see <a href="/src/backend/">backend</a>).</li>
+  </ul>
+</section>
+
+<section class="gotchas">
+  <h2>Gotchas</h2>
+  <aside class="warn"><p><strong>A panic ends the tab.</strong> wasm doesn't unwind; <code>crash.rs</code> can only paint a screen with the file and line afterwards. The recurring traps on both sides: <code>std::time::Instant</code>/<code>SystemTime</code> (use <code>web_time</code>), byte-slicing a <code>&amp;str</code> off a char boundary, unbounded recursion on untrusted input (Markdown nesting is capped), and in <code>ui</code>, a signal's <code>peek()</code> held across a call that writes the same signal (<a href="/src/ui/app.rs#L998-L1002"><code>bump_tick</code></a> shows the safe form).</p></aside>
+  <aside class="warn"><p><strong><code>cargo test</code> passing says nothing about the wasm build.</strong> Tests build for the host. Check <code>cargo check --target wasm32-unknown-unknown</code> too, as <a href="/.github/workflows/ci.yml#L44-L47">CI does</a>.</p></aside>
+</section>
+
+<section class="plans">
+  <h2>Plans</h2>
+  <p>From the README: write support (approving, commenting) and a smoother hand-off from the browser extension.</p>
+</section>
+</body>
+</html>

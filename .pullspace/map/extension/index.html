@@ -1,0 +1,135 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="pullspace:tree" content="d188e62550d4862903fc41ce449e6055a8792784">
+<meta name="pullspace:written" content="2026-09-26">
+<title>extension</title>
+</head>
+<body>
+<header>
+  <h1>extension</h1>
+  <p class="lede">A Manifest V3 Chrome extension that hands the github.com page you are reading to pullspace, as a single escaped <code>?url=</code> field, in the pullspace tab you already have open if there is one.</p>
+</header>
+
+<section class="how">
+  <h2>How it works</h2>
+  <p>Three entry points, one action. The toolbar button, the <kbd>Alt+Shift+P</kbd>
+  shortcut (the manifest's <code>_execute_action</code> command) and two right-click
+  items all end in <a href="/extension/background.js#L58-L87"><code>open(target, tab)</code></a>
+  in the service worker. It reads the configured base from
+  <code>chrome.storage.sync</code>, builds the address with
+  <a href="/extension/handoff.js#L78-L87"><code>handoffUrl</code></a>, and then picks a tab:</p>
+  <ol>
+    <li>A pullspace tab that is already open, chosen by
+    <a href="/extension/handoff.js#L116-L121"><code>pullspaceTab</code></a>: one in the
+    clicking window first, then the most recently viewed. It is navigated to the new URL
+    and focused. If the target is not GitHub, the tab is only focused, so it keeps what it
+    had open.</li>
+    <li>Otherwise a new tab right beside the source tab, with <code>openerTabId</code> set so
+    closing it returns to GitHub. With the <em>new tab</em> option off, the current tab is
+    navigated instead.</li>
+  </ol>
+  <p>The whole contract with the app is that one query field. The field, not the fragment,
+  because GitHub already puts <code>#L58</code> in the fragment and a URL only has one;
+  <code>searchParams</code> form-encodes it, and
+  <a href="/src/backend/route.rs#L589"><code>param</code></a> in route.rs decodes exactly that.
+  The app reads it in <a href="/src/backend/route.rs#L652"><code>take_handoff</code></a>,
+  removes it from the address bar, and puts the link into its own space with
+  <a href="/src/ui/spaces.rs#L767"><code>make_room</code></a>. That is why reusing one tab
+  loses nothing that was open there.</p>
+  <p>Everything that decides the URL lives in <a href="/extension/handoff.js">handoff.js</a>,
+  which uses no <code>chrome.*</code> API so that <code>node --test</code> can run it
+  directly (<a href="/extension/test.js">test.js</a>). background.js and options.js are thin
+  glue around it.</p>
+
+  <h3>Permissions, and why each is there</h3>
+  <p><code>activeTab</code> puts <code>url</code> on the tab object, but only at the moment the
+  extension is invoked. There is no content script and no page access.
+  <a href="/extension/background.js#L36-L42"><code>addressOf</code></a> falls back to
+  <code>tabs.query</code> for paths that hand over a tab without a URL. Finding an existing
+  pullspace tab needs its address, and Chrome only shows tab addresses on granted hosts. So
+  <code>host_permissions</code> covers <code>https://pullspace.dev/*</code> (the default),
+  and <code>optional_host_permissions</code> lets the options page request the host of a
+  self-hosted copy (<a href="/extension/options.js#L46-L53">options.js</a>). If that request
+  is refused, the extension still works, but every click opens a new tab.</p>
+</section>
+
+<section class="parts">
+  <h2>What's in here</h2>
+  <dl class="parts">
+    <dt><a href="/extension/manifest.json">manifest.json</a></dt><dd>MV3 manifest: module service worker, options panel, permissions, the shortcut.</dd>
+    <dt><a href="/extension/background.js">background.js</a></dt><dd>The service worker: listeners for the button and the menus, and the choice between reusing a tab and opening one.</dd>
+    <dt><a href="/extension/handoff.js">handoff.js</a></dt><dd>Pure functions: <code>isGithub</code>, <code>normalizeBase</code>, <code>handoffUrl</code>, <code>isPullspace</code>, <code>pullspaceTab</code>, <code>originPattern</code>, and <code>DEFAULT_BASE</code>.</dd>
+    <dt><a href="/extension/options.html">options.html</a> / <a href="/extension/options.js">options.js</a></dt><dd>The one setting (where pullspace is served), a live preview of the exact URL a click would open, and the new-tab toggle.</dd>
+    <dt><a href="/extension/test.js">test.js</a></dt><dd>node:test over handoff.js. Run it with <code>npm test</code> or <code>node --test extension/</code>.</dd>
+    <dt><a href="/extension/package.json">package.json</a></dt><dd>Only there so node reads the <code>.js</code> files as ES modules. Not shipped.</dd>
+    <dt><a href="/extension/make.sh">make.sh</a></dt><dd>Builds the Web Store zip from inside the directory, leaving out the dev-only files.</dd>
+    <dt><a href="/extension/icons/">icons/</a></dt><dd>PNGs at 16/32/48/128, drawn from <a href="/extension/icons/icon.svg">icon.svg</a> (a tiny diff). The SVG is not shipped.</dd>
+    <dt><a href="/extension/README.md">README.md</a></dt><dd>Install, hosting, and the Chrome Web Store submission checklist, including the permission justifications.</dd>
+  </dl>
+</section>
+
+<section class="invariants">
+  <h2>Invariants</h2>
+  <ul>
+    <li><strong>The escaping must be what route.rs decodes.</strong> The test
+    <a href="/extension/test.js#L24-L40">"the escaping is what route.rs undoes"</a> and
+    <a href="/src/backend/route.rs#L1284"><code>what_a_browser_escapes_is_what_this_reads_back</code></a>
+    in Rust are the two halves of one contract. A change to either one should show up in both.</li>
+    <li><strong><code>DEFAULT_BASE</code> and <code>host_permissions</code> move together</strong>
+    (<a href="/extension/handoff.js#L20-L29">handoff.js</a>,
+    <a href="/extension/manifest.json#L31">manifest.json</a>). If the default host is not granted,
+    a fresh install can't see an open pullspace tab, so every click opens a new one.</li>
+    <li><strong>Only github.com is handed over.</strong> The
+    <a href="/extension/handoff.js#L33">regex</a> is anchored to the host, so
+    <code>notgithub.com</code>, <code>github.com.evil.test</code> and <code>gist.github.com</code>
+    are all refused. Anything else goes to the bare base (the front page) with no <code>?url=</code>.</li>
+    <li><strong>A pullspace tab is matched by origin and page path</strong>, not by host alone
+    (<a href="/extension/handoff.js#L100-L108"><code>isPullspace</code></a>). <code>…/</code> and
+    <code>…/index.html</code> count as the same page, and so does any <code>#</code> route. A copy in
+    a subdirectory doesn't claim the rest of its host.</li>
+    <li><strong>Plain <code>http</code> is only assumed for this machine</strong>
+    (<code>localhost</code>, <code>127.0.0.1</code>, <code>[::1]</code>). Any other bare host gets
+    https. <code>localhost.evil.test</code> is not treated as local.</li>
+  </ul>
+</section>
+
+<section class="gotchas">
+  <h2>Gotchas</h2>
+  <aside class="warn"><p><strong>Register listeners at the top level of background.js.</strong>
+  An MV3 service worker is stopped when it is idle and restarted by the next event. A listener
+  added inside a callback exists only in the run that reached that callback
+  (<a href="/extension/background.js#L4-L7">the file's own header</a>).</p></aside>
+  <aside class="warn"><p><strong>Context menus are created in <code>onInstalled</code>, not on
+  wake-up.</strong> Chrome stores them, and creating a menu that already exists is an error.
+  <code>removeAll</code> runs first so that renaming one in an update is safe
+  (<a href="/extension/background.js#L98-L116">background.js</a>).</p></aside>
+  <aside class="warn"><p><strong>The permission request in options.js is made before any
+  <code>await</code>.</strong> Chrome only shows a permission prompt for a request made while
+  handling the user's click. Moving it after the storage write would silently deny it
+  (<a href="/extension/options.js#L46-L53">options.js</a>).</p></aside>
+  <aside class="warn"><p><strong>An old deployment looks exactly like a broken extension.</strong>
+  A pullspace build from before <code>take_handoff</code> existed leaves <code>?url=</code> in the
+  address bar and shows the front page. The fix is to redeploy the app
+  (<a href="/extension/README.md#L92-L102">README</a>).</p></aside>
+  <aside class="warn"><p><strong>New files need adding to make.sh's exclusions if they are
+  dev-only.</strong> make.sh ships everything except a fixed list
+  (<a href="/extension/make.sh#L24-L34">make.sh</a>), so a new dev-only file goes into the zip
+  unless you exclude it. Bump <code>"version"</code> in the manifest for each store upload.</p></aside>
+  <aside><p>The Rust side of the contract has two tests.
+  <a href="/src/backend/route.rs#L1284"><code>what_a_browser_escapes_is_what_this_reads_back</code></a>
+  holds strings produced by this extension's <code>URLSearchParams</code>: a space as
+  <code>+</code>, a literal plus as <code>%2B</code>, and <code>&amp;</code> and
+  <code>=</code> escaped. <a href="/src/backend/route.rs#L1417"><code>a_handed_over_url_is_read_out_of_the_query</code></a>
+  follows one handoff through <code>param</code> and <code>github_link</code>. test.js's header
+  names only the second one, and the README names only the first.</p></aside>
+</section>
+
+<section class="plans">
+  <h2>Plans</h2>
+  <p>The README's plans include a smoother browser extension handoff (per
+  <code>seed.md</code>). The code doesn't say what that means yet.</p>
+</section>
+</body>
+</html>

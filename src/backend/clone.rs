@@ -583,6 +583,7 @@ mod tests {
             },
             commit: "head".into(),
             files,
+            dirs: Vec::new(),
             truncated: false,
         }
     }

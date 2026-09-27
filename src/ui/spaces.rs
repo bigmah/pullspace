@@ -127,6 +127,8 @@ held! {
     // --- the middle pane ---
     open: Option<PathBuf> = None,
     reading: Option<Reading> = None,
+    summary: Option<PathBuf> = None,
+    summary_on: bool = false,
     view_mode: ViewMode = ViewMode::Source,
     at_line: Option<usize> = None,
     /// A jump asked for, kept with the space that asked: coming back to a file

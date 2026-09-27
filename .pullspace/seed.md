@@ -36,5 +36,5 @@ Dioxus, wasm, or the browser APIs this leans on (OPFS, sandboxed frames,
 `.github`, `.claude` (symlinks to `skills/`), `dist`, `target`.
 
 ## Plans
-From the README: write support (approving, commenting) and a smoother browser
-extension handoff. Nothing else unless the code says so.
+From the README: a smoother browser extension handoff. Nothing else unless the
+code says so.

@@ -407,7 +407,9 @@ fn SignIn(form: Signal<Option<bool>>, busy: bool, error: Option<String>) -> Elem
                 b { "Pull requests" }
                 " and "
                 b { "Metadata" }
-                ". A classic token needs "
+                " — and write access to "
+                b { "Pull requests" }
+                " to comment and review from here. A classic token needs "
                 code { "repo" }
                 "."
             }

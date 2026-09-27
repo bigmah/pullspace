@@ -30,6 +30,29 @@ pub struct Comment {
     /// The file a line comment hangs off, and the line in the head commit.
     pub path: Option<PathBuf>,
     pub line: Option<usize>,
+    /// GitHub's id for it — what a reply is addressed to. Zero where GitHub
+    /// sent none, which nothing can be addressed by.
+    #[serde(default)]
+    pub id: u64,
+    /// Line comments only: the comment this one answers, which is always the
+    /// first of its thread — GitHub files every reply under the root.
+    #[serde(default)]
+    pub reply_to: Option<u64>,
+    /// Line comments only: which side of the diff `line` counts on.
+    #[serde(default)]
+    pub side: Option<Side>,
+    /// Line comments only: the lines it was left on have since been rewritten,
+    /// so `line` is where it *was*, in a diff that no longer exists.
+    #[serde(default)]
+    pub outdated: bool,
+}
+
+impl Comment {
+    /// The comment a thread of line comments is filed under: this one, unless
+    /// it is a reply.
+    pub fn thread_root(&self) -> u64 {
+        self.reply_to.unwrap_or(self.id)
+    }
 }
 
 /// Everything written on a pull request, oldest first.
@@ -68,6 +91,14 @@ pub(super) struct RawComment {
     /// `line`.
     #[serde(default)]
     original_line: Option<usize>,
+    #[serde(default)]
+    id: u64,
+    /// Line comments only: the root of the thread a reply belongs to.
+    #[serde(default)]
+    in_reply_to_id: Option<u64>,
+    /// Line comments only: `LEFT` or `RIGHT`.
+    #[serde(default)]
+    side: Option<String>,
 }
 
 /// GitHub's review states, in the words the pane uses.
@@ -91,8 +122,12 @@ pub(super) fn comment_of(raw: RawComment, kind: CommentKind) -> Comment {
         body: raw.body.unwrap_or_default().trim_end().to_string(),
         html_url: raw.html_url,
         verdict: raw.state.as_deref().map(verdict_label).unwrap_or_default(),
+        outdated: raw.path.is_some() && raw.line.is_none(),
         path: raw.path.map(PathBuf::from),
         line: raw.line.or(raw.original_line),
+        id: raw.id,
+        reply_to: raw.in_reply_to_id,
+        side: raw.side.as_deref().and_then(Side::parse),
     }
 }
 

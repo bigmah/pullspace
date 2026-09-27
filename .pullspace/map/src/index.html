@@ -2,8 +2,8 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="pullspace:tree" content="51fb183d102bcb11cc287cfd80727bf3e0583146">
-<meta name="pullspace:written" content="2026-09-26">
+<meta name="pullspace:tree" content="1e9f87d8811e90e3d30ee4a4c3875ddd0331fade">
+<meta name="pullspace:written" content="2026-09-27">
 <title>src</title>
 </head>
 <body>
@@ -14,7 +14,7 @@
 
 <section class="how">
   <h2>How it works</h2>
-  <p>The crate is split in two, and the split is the thing to hold on to. <a href="/src/backend/">backend</a> is everything that isn't drawing: the GitHub client, the clone into the browser's file system, the content-addressed blob store, diffing, highlighting, search, and the parsers that turn untrusted files into data. <a href="/src/ui/">ui</a> is the Dioxus app: one store of signals (<a href="/src/ui/app.rs#L694-L967"><code>St</code></a>) and the components that read and write it. <code>ui</code> calls into <code>backend</code>; <code>backend</code> never calls back (its only mention of <code>ui</code> is a doc link in <code>store.rs</code>).</p>
+  <p>The crate is split in two, and the split is the thing to hold on to. <a href="/src/backend/">backend</a> is everything that isn't drawing: the GitHub client, the clone into the browser's file system, the content-addressed blob store, diffing, highlighting, search, and the parsers that turn untrusted files into data. <a href="/src/ui/">ui</a> is the Dioxus app: one store of signals (<a href="/src/ui/app.rs#L696-L981"><code>St</code></a>) and the components that read and write it. <code>ui</code> calls into <code>backend</code>; <code>backend</code> never calls back (its only mention of <code>ui</code> is a doc link in <code>store.rs</code>).</p>
 
   <figure class="diagram">
     <svg viewBox="0 0 560 110" width="560" height="110" role="img" aria-label="main launches ui::App; ui drives backend; backend talks to GitHub and OPFS">
@@ -36,7 +36,7 @@
 
   <p>A review, end to end: an address (typed, linked, or handed over by the <a href="/extension/">extension</a>) becomes a <code>Route</code>; <code>ui</code>'s loaders fetch a <strong>snapshot</strong> of the commit through <a href="/src/backend/github/"><code>backend::github</code></a> and land it with <code>St::enter</code>; an effect starts <a href="/src/backend/clone.rs"><code>backend::clone</code></a>, which pulls every blob into OPFS under its git SHA (<a href="/src/backend/blobs.rs"><code>backend::blobs</code></a>), so a second PR on the same repository only downloads what differs; the viewer then decodes only the files somebody opens, and search and Go to Definition read the rest back off disk. Several such workspaces ("spaces") share one tab by swapping every per-space signal in and out of <code>St</code> (<a href="/src/ui/spaces.rs"><code>ui::spaces</code></a>).</p>
 
-  <p><strong>The security boundary is drawn across both halves.</strong> The GitHub token sits in <code>localStorage</code> (<a href="/src/backend/auth.rs"><code>backend::auth</code></a>) in the same origin as every file shown, so nothing from a repository becomes markup in the app's document. Markdown is parsed into a tree by <a href="/src/backend/markdown.rs"><code>backend::markdown</code></a> and built into elements by <a href="/src/ui/markdown.rs"><code>ui::markdown</code></a>. HTML only renders in a sandboxed frame without <code>allow-same-origin</code>: an empty <code>sandbox</code> for a file's Preview (<a href="/src/ui/viewer.rs#L1435-L1461"><code>viewer::render_preview</code></a>), and for <code>.pullspace/</code> summaries a CSP-wrapped document from <a href="/src/backend/summary.rs#L509-L554"><code>backend::summary::frame_doc</code></a>, shown by <a href="/src/ui/summary.rs#L648-L682"><code>ui::summary::frame</code></a>, whose one script is nonce'd: a link bridge, plus the before/after marking on a page a PR rewrote. Off-site images are never loaded (<a href="/src/backend/images.rs#L1-L23"><code>backend::images</code></a>).</p>
+  <p><strong>The security boundary is drawn across both halves.</strong> The GitHub token sits in <code>localStorage</code> (<a href="/src/backend/auth.rs"><code>backend::auth</code></a>) in the same origin as every file shown, so nothing from a repository becomes markup in the app's document. Markdown is parsed into a tree by <a href="/src/backend/markdown.rs"><code>backend::markdown</code></a> and built into elements by <a href="/src/ui/markdown.rs"><code>ui::markdown</code></a>. HTML only renders in a sandboxed frame without <code>allow-same-origin</code>: an empty <code>sandbox</code> for a file's Preview (<a href="/src/ui/viewer.rs#L1441-L1467"><code>viewer::render_preview</code></a>), and for <code>.pullspace/</code> summaries a CSP-wrapped document from <a href="/src/backend/summary.rs#L509-L554"><code>backend::summary::frame_doc</code></a>, shown by <a href="/src/ui/summary.rs#L648-L682"><code>ui::summary::frame</code></a>, whose one script is nonce'd: a link bridge, plus the before/after marking on a page a PR rewrote. Off-site images are never loaded (<a href="/src/backend/images.rs#L1-L23"><code>backend::images</code></a>).</p>
 </section>
 
 <section class="parts">
@@ -60,13 +60,13 @@
 
 <section class="gotchas">
   <h2>Gotchas</h2>
-  <aside class="warn"><p><strong>A panic ends the tab.</strong> wasm doesn't unwind; <code>crash.rs</code> can only paint a screen with the file and line afterwards. The recurring traps on both sides: <code>std::time::Instant</code>/<code>SystemTime</code> (use <code>web_time</code>), byte-slicing a <code>&amp;str</code> off a char boundary, unbounded recursion on untrusted input (Markdown nesting is capped), and in <code>ui</code>, a signal's <code>peek()</code> held across a call that writes the same signal (<a href="/src/ui/app.rs#L998-L1002"><code>bump_tick</code></a> shows the safe form).</p></aside>
+  <aside class="warn"><p><strong>A panic ends the tab.</strong> wasm doesn't unwind; <code>crash.rs</code> can only paint a screen with the file and line afterwards. The recurring traps on both sides: <code>std::time::Instant</code>/<code>SystemTime</code> (use <code>web_time</code>), byte-slicing a <code>&amp;str</code> off a char boundary, unbounded recursion on untrusted input (Markdown nesting is capped), and in <code>ui</code>, a signal's <code>peek()</code> held across a call that writes the same signal (<a href="/src/ui/app.rs#L1012-L1016"><code>bump_tick</code></a> shows the safe form).</p></aside>
   <aside class="warn"><p><strong><code>cargo test</code> passing says nothing about the wasm build.</strong> Tests build for the host. Check <code>cargo check --target wasm32-unknown-unknown</code> too, as <a href="/.github/workflows/ci.yml#L44-L47">CI does</a>.</p></aside>
 </section>
 
 <section class="plans">
   <h2>Plans</h2>
-  <p>From the README: write support (approving, commenting) and a smoother hand-off from the browser extension.</p>
+  <p>From the README: a smoother hand-off from the browser extension.</p>
 </section>
 </body>
 </html>

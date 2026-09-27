@@ -80,6 +80,7 @@ mod target;
 #[cfg(test)]
 mod tests;
 mod time;
+mod writes;
 
 pub use checks::*;
 pub use commits::*;
@@ -93,3 +94,4 @@ pub use request::*;
 pub use snapshot::*;
 pub use target::*;
 pub use time::*;
+pub use writes::*;

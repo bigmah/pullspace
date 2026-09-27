@@ -19,6 +19,7 @@ mod prcache;
 mod prefs;
 mod reader;
 mod refbar;
+mod review;
 mod spaces;
 mod summary;
 mod tabs;

@@ -7,23 +7,23 @@
 <body>
 <header>
   <h1>Split the GitHub client into a module per concern</h1>
-  <p class="lede">This moves the 4,800-line <code>backend/github.rs</code> into <code>backend/github/</code>, one file per area of the API, without changing any behaviour or any path outside the module.</p>
+  <p class="lede">This moves the 5,150-line <code>backend/github.rs</code> into <code>backend/github/</code>, one file per area of the API, without changing any behaviour or any path outside the module.</p>
 </header>
 
 <section class="why">
   <h2>Why</h2>
-  <p><code>github.rs</code> held search, owners, branches, pull requests, file lists, snapshots, comments, commits, compares, CI checks, the GraphQL read, time formatting, file reads and <code>FetchJob</code>, plus 1,200 lines of tests. Finding the code for one endpoint meant scrolling past a dozen others. <code>FetchJob</code> even sat below the test module. It was the fourth most-changed file in the repository.</p>
+  <p><code>github.rs</code> held search, owners, branches, pull requests, file lists, snapshots, comments, the four writes, commits, compares, CI checks, the GraphQL read, time formatting, file reads and <code>FetchJob</code>, plus 1,270 lines of tests. Finding the code for one endpoint meant scrolling past a dozen others. <code>FetchJob</code> even sat below the test module. It was the fourth most-changed file in the repository.</p>
 </section>
 
 <section class="tour">
   <h2>Reading order</h2>
   <ol class="tour">
-    <li><a href="/src/backend/github/mod.rs#L69-L95">mod.rs: the module list and re-exports</a>. Start here. Lines 1–68 are the old file's header, uses and constants, unchanged. Every submodule is <code>pub use</code>d, so <code>github::X</code> still resolves for every caller. Children see the constants because a child module can read its parent's private items.</li>
+    <li><a href="/src/backend/github/mod.rs#L69-L97">mod.rs: the module list and re-exports</a>. Start here. Lines 1–68 are the old file's header, uses and constants, unchanged. Every submodule is <code>pub use</code>d, so <code>github::X</code> still resolves for every caller. Children see the constants because a child module can read its parent's private items.</li>
     <li><a href="/src/backend/github/request.rs#L103-L147">request.rs</a>: the shared plumbing (path encoding, <code>get_raw</code>, <code>refused</code>, <code>get_json</code>, rate-limit messages, the <code>User</code> model). Each other file starts with <code>use super::*;</code> and gets these from here.</li>
-    <li><a href="/src/backend/github/pulls.rs#L298-L319">pulls.rs: <code>RawCompare</code></a>: the one kind of real edit in the move. Items that were private are now <code>pub(super)</code>. So are the fields of the raw wire structs that a sibling file or the tests read (<code>RawPr</code>, <code>RawCompare</code>, <code>RawCommit</code>, <code>RawRef</code>, <code>RawRefRepo</code>, <code>RawRepo</code>, <code>User</code>, and the three commit structs the tests construct).</li>
+    <li><a href="/src/backend/github/pulls.rs#L298-L319">pulls.rs: <code>RawCompare</code></a>: the one kind of real edit in the move. Items that were private are now <code>pub(super)</code>. So are the fields of the raw wire structs that a sibling file or the tests read (<code>RawPr</code>, <code>RawCompare</code>, <code>RawCommit</code>, <code>RawRef</code>, <code>RawRefRepo</code>, <code>RawRepo</code>, <code>User</code>, and the three commit structs the tests construct). One method is widened too: <a href="/src/backend/github/writes.rs#L20"><code>Side::parse</code></a>, because <code>conversation.rs</code> reads a comment's side with it.</li>
     <li><a href="/src/backend/github/snapshot.rs#L135-L146">snapshot.rs: <code>snapshot_of</code></a>: the only path that had to change. <code>super::summary</code> is now <code>crate::backend::summary</code>, because <code>super</code> is one level deeper. Three doc links got the same fix.</li>
     <li><a href="/src/backend/github/tests.rs#L177-L190">tests.rs</a>: the old test module moved whole and de-indented one level. Some JSON fixtures are multi-line raw strings, so their inner whitespace shifted. JSON ignores that, and every test still passes.</li>
-    <li>The rest (<a href="/src/backend/github/target.rs">target.rs</a>, <a href="/src/backend/github/find.rs">find.rs</a>, <a href="/src/backend/github/repo.rs">repo.rs</a>, <a href="/src/backend/github/conversation.rs">conversation.rs</a>, <a href="/src/backend/github/commits.rs">commits.rs</a>, <a href="/src/backend/github/checks.rs">checks.rs</a>, <a href="/src/backend/github/time.rs">time.rs</a>, <a href="/src/backend/github/more.rs">more.rs</a>, <a href="/src/backend/github/fetch.rs">fetch.rs</a>) is text moved verbatim, then run through <code>cargo fmt</code>. <code>git diff -M</code> won't pair them with the old file, so compare the moved blocks by eye, or skim them.</li>
+    <li>The rest (<a href="/src/backend/github/target.rs">target.rs</a>, <a href="/src/backend/github/find.rs">find.rs</a>, <a href="/src/backend/github/repo.rs">repo.rs</a>, <a href="/src/backend/github/conversation.rs">conversation.rs</a>, <a href="/src/backend/github/writes.rs">writes.rs</a>, <a href="/src/backend/github/commits.rs">commits.rs</a>, <a href="/src/backend/github/checks.rs">checks.rs</a>, <a href="/src/backend/github/time.rs">time.rs</a>, <a href="/src/backend/github/more.rs">more.rs</a>, <a href="/src/backend/github/fetch.rs">fetch.rs</a>) is text moved verbatim, then run through <code>cargo fmt</code>. <code>git diff -M</code> won't pair them with the old file, so compare the moved blocks by eye, or skim them.</li>
   </ol>
 </section>
 
@@ -43,15 +43,16 @@
 
 <section class="unchanged">
   <h2>Not changed</h2>
-  <p>No logic, no signatures, no public names, no dependencies. <a href="/src/ui/github.rs">ui/github.rs</a> is a different module (the GitHub panel) and is untouched. The old guide <code>feat-summaries.html</code> still links to line numbers in <code>github.rs</code>. That page describes its own PR's head, so its links are left as they were.</p>
+  <p>No logic, no signatures, no public names, no dependencies. <a href="/src/ui/github.rs">ui/github.rs</a> is a different module (the GitHub panel) and is untouched. The old guides <code>feat-summaries.html</code> and <code>feat-writes.html</code> still link to line numbers in <code>github.rs</code>. Each page describes its own PR's head, so their links are left as they were.</p>
 </section>
 
 <section class="verify">
   <h2>How it was checked</h2>
   <ul>
-    <li><code>cargo test</code>: 322 passed, the same count as on <code>main</code>.</li>
+    <li><code>cargo test</code>: 328 passed, the same count as on <code>main</code>.</li>
+    <li>The split was regenerated from <code>main</code>'s <code>github.rs</code> after #5 (write support) landed. A normalised comparison (whitespace and <code>pub(super)</code> stripped, lines sorted) differs from <code>main</code>'s file only where rustfmt re-wrapped a signature and at the path fixes above.</li>
     <li><code>cargo clippy --all-targets</code>: no warnings.</li>
-    <li><code>cargo check --target wasm32-unknown-unknown --release</code>: builds.</li>
+    <li><code>cargo build --target wasm32-unknown-unknown --release</code>: builds.</li>
     <li><code>cargo doc</code>: no new warnings. The redundant-link warning on <code>mod.rs</code> line 5 was already there in <code>github.rs</code>.</li>
     <li>The app itself wasn't run. Nothing a browser does differently could change: the moved code compiles to the same items.</li>
   </ul>

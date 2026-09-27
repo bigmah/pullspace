@@ -771,6 +771,78 @@ fn line_comments_keep_a_line_to_jump_to() {
             .unwrap();
     let c = comment_of(stale, CommentKind::Inline);
     assert_eq!(c.line, Some(7));
+    assert!(c.outdated);
+}
+
+#[test]
+fn a_reply_knows_its_thread_and_its_side() {
+    let root: RawComment =
+        serde_json::from_str(r#"{"id":10,"body":"why?","path":"a.rs","line":3,"side":"LEFT"}"#)
+            .unwrap();
+    let reply: RawComment = serde_json::from_str(
+        r#"{"id":11,"in_reply_to_id":10,"body":"because","path":"a.rs","line":3,"side":"LEFT"}"#,
+    )
+    .unwrap();
+    let root = comment_of(root, CommentKind::Inline);
+    let reply = comment_of(reply, CommentKind::Inline);
+    assert_eq!(root.side, Some(Side::Left));
+    assert!(!root.outdated);
+    assert_eq!(root.thread_root(), 10);
+    assert_eq!(reply.thread_root(), 10);
+}
+
+#[test]
+fn a_review_sends_only_what_was_written() {
+    let bare = review_body(None, Verdict::Approve, "  ", &[]);
+    assert_eq!(bare, serde_json::json!({ "event": "APPROVE" }));
+
+    let note = LineNote {
+        path: "src/lib.rs".to_string(),
+        line: 12,
+        side: Side::Right,
+        body: "off by one?".to_string(),
+    };
+    let full = review_body(Some("abc"), Verdict::RequestChanges, "see notes", &[note]);
+    assert_eq!(
+        full,
+        serde_json::json!({
+            "event": "REQUEST_CHANGES",
+            "body": "see notes",
+            "commit_id": "abc",
+            "comments": [
+                { "path": "src/lib.rs", "line": 12, "side": "RIGHT", "body": "off by one?" }
+            ],
+        })
+    );
+}
+
+#[test]
+fn a_refused_write_says_what_github_said() {
+    let e = write_error(
+        422,
+        br#"{"message":"Unprocessable Entity","errors":["Can not approve your own pull request"]}"#,
+    );
+    let said = format!("{e}");
+    assert!(
+        said.contains("Can not approve your own pull request"),
+        "{said}"
+    );
+
+    // The other shape `errors` comes in.
+    let e = write_error(
+        422,
+        br#"{"message":"Validation Failed","errors":[{"resource":"PullRequestReviewComment","message":"line could not be resolved"}]}"#,
+    );
+    assert!(format!("{e}").contains("line could not be resolved"));
+
+    // And a 404 on a write is a permission, not a missing pull request.
+    let e = format!("{}", write_error(404, b"{}"));
+    assert!(e.contains("Read and write"), "{e}");
+
+    assert_eq!(
+        format!("{}", write_error(500, b"not json")),
+        "GitHub refused this (HTTP 500)."
+    );
 }
 
 #[test]

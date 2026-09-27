@@ -4710,3 +4710,179 @@ button.refsep:hover {
 .dsum:hover { color: var(--accent); background: var(--bg-3); }
 
 .welcome-read.sum { margin-top: 8px; color: var(--accent); border-color: var(--accent-line); }
+
+/* ---------- writing back: line comments and the review ---------- */
+
+/* Positioned so a line's `+` can sit over its gutter. */
+.code .cl, .code .scell { position: relative; }
+
+/* The `+` that starts a comment on a line of a pull request's diff: there on
+   every line GitHub's diff has, and shown only on the one under the pointer,
+   so a diff reads as a diff until somebody reaches for it. */
+.cadd {
+  position: absolute;
+  left: 2px;
+  top: 50%;
+  transform: translateY(-50%);
+  z-index: 2;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  border-radius: 4px;
+  background: var(--accent);
+  color: var(--on-accent);
+  font-family: var(--sans);
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1;
+  cursor: pointer;
+  user-select: none;
+}
+
+.cl:hover > .cadd, .scell:hover > .cadd { display: flex; }
+.cadd:hover { filter: brightness(1.15); }
+
+/* Under a line: its threads, the notes held for the review, and the box being
+   written in. Pinned to the left edge like the hunk headers, so a wide file
+   scrolled sideways does not carry the conversation out of view. */
+.lthread {
+  position: sticky;
+  left: 0;
+  width: min(720px, calc(100% - 24px));
+  box-sizing: border-box;
+  margin: 4px 12px 8px;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: var(--r);
+  font-family: var(--sans);
+  font-size: 12.5px;
+  line-height: 1.5;
+  white-space: normal;
+  overflow: hidden;
+}
+
+.lthreadgroup + .lthreadgroup,
+.lthreadgroup + .lcomment,
+.lcomment + .lcompose,
+.lthreadgroup + .lcompose { border-top: 1px solid var(--border); }
+
+.lcomment { padding: 8px 12px; }
+.lcomment + .lcomment { border-top: 1px solid var(--border-soft); }
+.lcomment.held { background: var(--accent-soft); }
+
+.lheldnote { font-size: 11px; color: var(--fg-faint); }
+
+.convkind.pending { color: var(--modified); border-color: var(--modified); }
+
+.lreplyrow { padding: 6px 12px 8px; border-top: 1px solid var(--border-soft); }
+
+/* Looks like the box it opens, which is what clicking it gets you. */
+.lreply {
+  width: 100%;
+  text-align: left;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: var(--r);
+  color: var(--fg-faint);
+  font-family: var(--sans);
+  font-size: 12px;
+  padding: 5px 9px;
+  cursor: text;
+}
+
+.lreply:hover { border-color: var(--accent); }
+
+.lcompose {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 8px 12px 10px;
+}
+
+.reviewtext {
+  width: 100%;
+  box-sizing: border-box;
+  min-height: 60px;
+  resize: vertical;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: var(--r);
+  color: var(--fg);
+  font-family: var(--sans);
+  font-size: 12.5px;
+  line-height: 1.5;
+  padding: 7px 9px;
+  outline: none;
+  transition: border-color var(--quick) var(--ease), box-shadow var(--quick) var(--ease);
+}
+
+.reviewtext::placeholder { color: var(--fg-faint); }
+.reviewtext:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+.reviewtext[readonly] { color: var(--fg-dim); }
+
+.reviewrow { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+
+.primarybtn.sm, .reviewrow .primarybtn { height: 28px; padding: 0 12px; }
+
+/* The buttons beside the primary one: the same shape, without the fill. */
+.ghostbtn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 28px;
+  background: transparent;
+  border: 1px solid var(--line);
+  border-radius: var(--r);
+  color: var(--fg);
+  cursor: pointer;
+  font-size: 12px;
+  padding: 0 11px;
+  flex: none;
+  transition: background var(--quick) var(--ease), border-color var(--quick) var(--ease);
+}
+
+.ghostbtn:hover:enabled { background: var(--bg-3); }
+.ghostbtn:disabled { opacity: 0.4; cursor: default; }
+.ghostbtn.bad { color: var(--deleted); }
+.ghostbtn.bad:hover:enabled { border-color: var(--deleted); }
+
+/* The foot of the conversation. */
+.reviewbox {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px;
+  border-top: 1px solid var(--border);
+  background: var(--bg-2);
+}
+
+.reviewhdr {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--fg-dim);
+}
+
+.reviewnotes { display: flex; flex-direction: column; gap: 2px; }
+
+.reviewnote { display: flex; align-items: center; gap: 8px; min-width: 0; min-height: 22px; }
+.reviewnote .convloc { margin-top: 0; flex: none; max-width: 55%; }
+
+.reviewnotetext {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  color: var(--fg-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.reviewsignin { font-size: 12px; color: var(--fg-dim); line-height: 1.5; }
+.lcompose .reviewsignin { padding: 2px 0; }

@@ -10,6 +10,7 @@ use crate::backend::difftool::{
     Block, Expansion, FileDiff, Line, LineKind, Mark, STEP, blocks, change_lines, diff_file,
     overview, stats, to_rows,
 };
+use crate::backend::github::Side;
 use crate::backend::highlight::{Span, highlight};
 use crate::backend::images::{self, media_type};
 use crate::backend::markdown;
@@ -28,6 +29,7 @@ use super::markdown::Target;
 use super::panes::{Edge, Splitter};
 use super::prcache::ensure_path;
 use super::reader::Reader;
+use super::review::{self, Talk};
 use super::summary::{self, SummaryPane};
 use super::tabs::{self, TabStrip};
 
@@ -212,6 +214,10 @@ pub fn Viewer() -> Element {
             document::eval(&scroll_js(line));
         }
     });
+
+    // What the diff can take a comment on, and what hangs under its lines
+    // already — see `review::talk` for why it is memoised.
+    let talk = use_memo(move || review::talk(st));
 
     let diff = use_memo(move || {
         // Read on its own rather than out of `prefs`, so that a font-size
@@ -541,12 +547,12 @@ pub fn Viewer() -> Element {
         },
         ViewMode::Inline => match diff.read().as_ref() {
             Some(d) if d.is_empty() => rsx! { div { class: "notice", "No differences." } },
-            Some(d) => render_inline(d, &open_gaps, &marks, at),
+            Some(d) => render_inline(d, &open_gaps, &marks, at, &talk.read()),
             None => rsx! { div { class: "notice", "Binary file — cannot diff." } },
         },
         ViewMode::Split => match diff.read().as_ref() {
             Some(d) if d.is_empty() => rsx! { div { class: "notice", "No differences." } },
-            Some(d) => render_split(st, d, &open_gaps, &marks, at),
+            Some(d) => render_split(st, d, &open_gaps, &marks, at, &talk.read()),
             None => rsx! { div { class: "notice", "Binary file — cannot diff." } },
         },
         ViewMode::Preview if prose => match doc.read().as_ref() {
@@ -1520,7 +1526,7 @@ fn segs_rsx(l: &Line, m: &Marks<'_>) -> Element {
     }
 }
 
-fn inline_line(l: &Line, m: &Marks<'_>, at: Option<usize>) -> Element {
+fn inline_line(l: &Line, m: &Marks<'_>, at: Option<usize>, add: Option<(Side, usize)>) -> Element {
     let (cls, sign) = match l.kind {
         LineKind::Ctx => ("cl", " "),
         LineKind::Add => ("cl dl-add", "+"),
@@ -1542,6 +1548,7 @@ fn inline_line(l: &Line, m: &Marks<'_>, at: Option<usize>) -> Element {
     rsx! {
         div { class: "{cls}", "data-line": "{line_attr}",
             {anchor(l.new_no)}
+            {review::add_button(add)}
             span { class: "ln", "{old}" }
             span { class: "{new_cls}", "{new}" }
             span { class: "dsign", "{sign}" }
@@ -1638,17 +1645,24 @@ fn render_inline(
     open: &HashMap<usize, Expansion>,
     m: &Marks<'_>,
     at: Option<usize>,
+    t: &Talk,
 ) -> Element {
     rsx! {
         div { class: "code inline",
             for block in blocks(diff, open) {
-                {inline_block(diff, block, m, at)}
+                {inline_block(diff, block, m, at, t)}
             }
         }
     }
 }
 
-fn inline_block(diff: &FileDiff, block: Block, m: &Marks<'_>, at: Option<usize>) -> Element {
+fn inline_block(
+    diff: &FileDiff,
+    block: Block,
+    m: &Marks<'_>,
+    at: Option<usize>,
+    t: &Talk,
+) -> Element {
     match block {
         Block::Gap {
             index,
@@ -1662,15 +1676,22 @@ fn inline_block(diff: &FileDiff, block: Block, m: &Marks<'_>, at: Option<usize>)
                 if let Some(h) = header {
                     {hunk_header(&h)}
                 }
-                for l in diff.lines[from..to].iter() {
-                    {inline_line(l, m, at)}
+                for (k , l) in diff.lines[from..to].iter().enumerate() {
+                    {inline_line(l, m, at, t.add_for(diff, from + k, l))}
+                    {t.under(l)}
                 }
             }
         },
     }
 }
 
-fn split_cell(l: Option<&Line>, right: bool, m: &Marks<'_>, at: Option<usize>) -> Element {
+fn split_cell(
+    l: Option<&Line>,
+    right: bool,
+    m: &Marks<'_>,
+    at: Option<usize>,
+    add: Option<(Side, usize)>,
+) -> Element {
     match l {
         None => rsx! { div { class: "scell s-empty" } },
         Some(l) => {
@@ -1692,6 +1713,7 @@ fn split_cell(l: Option<&Line>, right: bool, m: &Marks<'_>, at: Option<usize>) -
             rsx! {
                 div { class: "{cls}",
                     {anchor(anchor_no)}
+                    {review::add_button(add)}
                     span { class: "{ln_cls}", "{no}" }
                     span { class: "lc", {segs_rsx(l, m)} }
                 }
@@ -1712,6 +1734,7 @@ fn render_split(
     open: &HashMap<usize, Expansion>,
     m: &Marks<'_>,
     at: Option<usize>,
+    t: &Talk,
 ) -> Element {
     rsx! {
         div {
@@ -1725,13 +1748,19 @@ fn render_split(
             },
             Splitter { edge: Edge::Diff }
             for block in blocks(diff, open) {
-                {split_block(diff, block, m, at)}
+                {split_block(diff, block, m, at, t)}
             }
         }
     }
 }
 
-fn split_block(diff: &FileDiff, block: Block, m: &Marks<'_>, at: Option<usize>) -> Element {
+fn split_block(
+    diff: &FileDiff,
+    block: Block,
+    m: &Marks<'_>,
+    at: Option<usize>,
+    t: &Talk,
+) -> Element {
     match block {
         Block::Gap {
             index,
@@ -1753,10 +1782,57 @@ fn split_block(diff: &FileDiff, block: Block, m: &Marks<'_>, at: Option<usize>) 
                     div {
                         class: "srow",
                         "data-line": "{row.right.and_then(|l| l.new_no).map(|n| n.to_string()).unwrap_or_default()}",
-                        {split_cell(row.left, false, m, at)}
-                        {split_cell(row.right, true, m, at)}
+                        {split_cell(row.left, false, m, at, split_add(diff, from, row.left, false, t))}
+                        {split_cell(row.right, true, m, at, split_add(diff, from, row.right, true, t))}
                     }
+                    {split_under(row.left, row.right, t)}
                 }
+            }
+        },
+    }
+}
+
+/// Where a `+` on one cell of a side-by-side row would comment: a removed line
+/// on the left, anything the head has on the right. An unchanged line takes
+/// its comments on the right, as it does inline — one `+` per line of the file.
+fn split_add(
+    diff: &FileDiff,
+    from: usize,
+    l: Option<&Line>,
+    right: bool,
+    t: &Talk,
+) -> Option<(Side, usize)> {
+    let l = l?;
+    let here = match l.kind {
+        LineKind::Del => !right,
+        LineKind::Add | LineKind::Ctx => right,
+    };
+    if !here {
+        return None;
+    }
+    // Where the line is in the whole diff, which is what the gaps count in.
+    // Rows are borrowed out of `diff.lines`, so its address says — and asking
+    // that way keeps a long hunk from being searched once per row of it.
+    let base = diff.lines.as_ptr() as usize;
+    let index = (l as *const Line as usize).checked_sub(base)? / std::mem::size_of::<Line>();
+    let found = diff.lines.get(index).is_some_and(|x| std::ptr::eq(x, l));
+    (found && index >= from).then(|| t.add_for(diff, index, l))?
+}
+
+/// What hangs under a side-by-side row. An unchanged line is one line on both
+/// sides of the row, so it is asked once.
+fn split_under(left: Option<&Line>, right: Option<&Line>, t: &Talk) -> Element {
+    if t.spots.is_empty() {
+        return rsx! {};
+    }
+    match (left, right) {
+        (Some(l), Some(r)) if std::ptr::eq(l, r) => t.under(l),
+        (l, r) => rsx! {
+            if let Some(l) = l {
+                {t.under(l)}
+            }
+            if let Some(r) = r {
+                {t.under(r)}
             }
         },
     }

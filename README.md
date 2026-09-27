@@ -25,6 +25,10 @@ Features:
 * Native HTML rendering 
 * No sign-in needed (PAT required for private repos)
 * Source code never leaves the browser. Like a local IDE but compiled to WASM. 
+* Review from the diff: comment on any line GitHub's diff has, reply to
+  threads, hold comments for a review, and submit it with a comment, an
+  approval or a request for changes (needs a token with write access to pull
+  requests)
 * Summaries: your coding agent keeps a map of the repository in `.pullspace/`,
   one page per directory explaining how it works, and writes a reviewer's guide
   for every PR. pullspace shows each page next to the code, flags pages that
@@ -33,7 +37,6 @@ Features:
 
 Upcoming:
 
-* support writes (PR approval, comments, etc)
 * better support as a browser exension (one click on a PR to open pullspace)
 
 

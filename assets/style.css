@@ -3312,13 +3312,43 @@ button.refsep:hover {
 /* ---------- landing ---------- */
 
 /* The empty workspace as a page rather than an empty IDE under a modal: the
-   name, the search, and — for whoever is new here — what this is. */
+   name, one big box to paste a link into, and — for whoever is new here —
+   what this is. Searching GitHub sits one click under the box. */
 .landing {
+  position: relative;
   flex: 1;
   min-height: 0;
   overflow-y: auto;
+  overflow-x: hidden;
   display: flex;
   justify-content: center;
+}
+
+/* The backdrop: a soft bloom of the accent over a dot grid that fades out
+   towards the edges. Everything in it is the accent or --fg at low alpha, so
+   it turns over with the theme and the accent picker like the rest. */
+.landing-glow {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background:
+    radial-gradient(60% 45% at 50% 0%, color-mix(in srgb, var(--accent) 22%, transparent), transparent 70%),
+    radial-gradient(40% 35% at 85% 20%, color-mix(in srgb, var(--violet) 12%, transparent), transparent 70%);
+}
+
+.landing-glow::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background-image: radial-gradient(color-mix(in srgb, var(--fg) 14%, transparent) 1px, transparent 1px);
+  background-size: 22px 22px;
+  mask-image: radial-gradient(70% 55% at 50% 25%, #000, transparent 75%);
+  -webkit-mask-image: radial-gradient(70% 55% at 50% 25%, #000, transparent 75%);
+}
+
+@keyframes landingin {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: translateY(0); }
 }
 
 .landing-prefs { position: fixed; top: 10px; right: 12px; z-index: 10; }
@@ -3336,51 +3366,224 @@ button.refsep:hover {
 /* Stretched to the page by the flex row above, so the footer's `margin-top:
    auto` has somewhere to push against when the column runs short. */
 .landing-col {
-  width: 640px;
-  max-width: calc(100vw - 48px);
+  position: relative;
+  width: 680px;
+  max-width: calc(100vw - 32px);
   display: flex;
   flex-direction: column;
-  padding: 11vh 0 20px;
+  padding: 12vh 0 20px;
 }
 
-.landing-hero { text-align: center; margin-bottom: 16px; }
+.landing-hero { text-align: center; margin-bottom: 28px; animation: landingin 500ms var(--ease) both; }
 
 .landing-logo {
+  display: inline-block;
   font-family: var(--mono);
-  font-size: 40px;
+  font-size: 13px;
   font-weight: 700;
+  letter-spacing: 1.6px;
+  text-transform: uppercase;
   color: var(--accent);
-  letter-spacing: -1px;
+  padding: 4px 12px;
+  border-radius: 999px;
+  background: var(--accent-soft);
+  box-shadow: inset 0 0 0 1px var(--accent-line);
 }
 
-.landing-tag { color: var(--fg-dim); font-size: 14px; margin-top: 8px; }
+.landing-head {
+  margin: 18px 0 0;
+  font-family: var(--sans);
+  font-size: clamp(30px, 6vw, 48px);
+  line-height: 1.08;
+  font-weight: 800;
+  letter-spacing: -1.5px;
+  color: var(--fg-bright);
+}
 
-/* The demo, as a line rather than a second filled button: the search below is
-   still the way in for anyone who arrived knowing what to open. */
-.landing-try {
-  margin-top: 14px;
+.landing-head-dim {
+  background: linear-gradient(90deg, var(--accent), var(--violet));
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+.landing-tag {
+  color: var(--fg-dim);
+  font-size: 14.5px;
+  line-height: 1.55;
+  margin: 14px auto 0;
+  max-width: 480px;
+}
+
+/* The box. Big, and lit: it is the one thing on the page to do. The ring
+   turns green once what is in it is something that will open. */
+.landing-paste {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  height: 60px;
+  padding: 0 8px 0 18px;
+  border-radius: 14px;
+  background: var(--bg-1);
+  border: 1px solid var(--border);
+  box-shadow:
+    0 0 0 4px color-mix(in srgb, var(--accent) 8%, transparent),
+    0 18px 50px -18px color-mix(in srgb, var(--accent) 45%, transparent);
+  transition: border-color 160ms var(--ease), box-shadow 160ms var(--ease);
+  animation: landingin 500ms var(--ease) 80ms both;
+}
+
+.landing-paste:focus-within {
+  border-color: var(--accent);
+  box-shadow:
+    0 0 0 4px var(--accent-soft),
+    0 22px 60px -16px color-mix(in srgb, var(--accent) 60%, transparent);
+}
+
+.landing-paste.ok { border-color: var(--added); }
+.landing-paste.ok:focus-within {
+  box-shadow:
+    0 0 0 4px color-mix(in srgb, var(--added) 18%, transparent),
+    0 22px 60px -16px color-mix(in srgb, var(--added) 50%, transparent);
+}
+
+.landing-paste .ghmark { width: 20px; height: 20px; flex: none; color: var(--fg-dim); }
+.landing-paste.ok .ghmark { color: var(--added); }
+
+.landing-paste-input {
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+  background: transparent;
+  border: none;
+  outline: none;
+  color: var(--fg-bright);
+  font-family: var(--mono);
+  font-size: 15px;
+}
+
+.landing-paste-input::placeholder { color: var(--fg-faint); }
+/* The ring on the box is the focus ring; a second one on the field inside it
+   would be a box in a box. */
+.landing-paste-input:focus-visible { outline: none; }
+
+.landing-paste-go {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 44px;
+  padding: 0 18px;
+  border: none;
+  border-radius: 10px;
+  background: var(--accent);
+  color: var(--on-accent);
+  font-size: 14px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: transform 120ms var(--ease), opacity 120ms var(--ease);
+}
+
+.landing-paste-go:hover:enabled { transform: translateY(-1px); }
+.landing-paste-go:active:enabled { transform: translateY(0); }
+.landing-paste-go:disabled { opacity: 0.45; cursor: default; }
+
+.landing-kbd {
+  font-family: var(--mono);
+  font-size: 11px;
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--on-accent) 16%, transparent);
+}
+
+/* What the box makes of what is in it — or, empty, links to try. */
+.landing-seen {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-height: 30px;
+  margin-top: 12px;
+  padding: 0 4px;
+  font-size: 12.5px;
+  animation: landingin 500ms var(--ease) 160ms both;
+}
+
+.landing-chip {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  color: var(--added);
+  padding: 3px 8px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--added) 14%, transparent);
+  animation: fadein 160ms var(--ease);
+}
+
+.landing-seen-what {
+  font-family: var(--mono);
+  color: var(--fg-bright);
+  overflow-wrap: anywhere;
+}
+
+.landing-seen-hint { color: var(--fg-faint); }
+.landing-seen-what + .landing-seen-hint { margin-left: auto; }
+
+.landing-example {
+  font-size: 12px;
+  color: var(--fg-dim);
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 4px 12px;
+  cursor: pointer;
+  transition: color 120ms, border-color 120ms, background 120ms;
+}
+
+.landing-example:hover { color: var(--accent); border-color: var(--accent-line); background: var(--accent-soft); }
+
+/* The way out to search, and back. A line of text, because the box above is
+   still the way in for anyone with a link. */
+.landing-or {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 18px;
+  font-size: 12.5px;
+  color: var(--fg-faint);
+}
+
+.landing-or-dot { color: var(--fg-faint); }
+
+.landing-switch {
   background: none;
   border: none;
+  padding: 0;
   color: var(--accent);
   font-size: 12.5px;
   cursor: pointer;
 }
 
-.landing-try:hover { text-decoration: underline; }
+.landing-switch:hover { text-decoration: underline; }
+.landing-search + .landing-switch { align-self: center; margin-top: 10px; }
 
-/* The picker at page scale. The section chrome is the panel's; here the page
-   is the panel, so the ruled lines go and the box grows into a marquee. */
+/* The picker at page scale, when search is asked for. The section chrome is
+   the panel's; here the page is the panel, so the ruled lines go and the box
+   grows into a marquee. */
 .landing-col .ghsection { border-bottom: none; padding: 10px 0; }
 
 .landing-col .ghinput {
-  height: 40px;
+  height: 44px;
   font-size: 13px;
   padding: 0 14px;
   border-radius: var(--r-lg);
 }
 
 .landing-col .ghrow > .primarybtn {
-  height: 40px;
+  height: 44px;
   padding: 0 20px;
   border-radius: var(--r-lg);
   font-size: 12.5px;
@@ -3389,18 +3592,37 @@ button.refsep:hover {
 .landing-points {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
-  gap: 20px;
-  margin: 22px 0 28px;
-  padding-top: 22px;
-  border-top: 1px solid var(--border-soft);
+  gap: 14px;
+  margin: 44px 0 28px;
+}
+
+.landing-point {
+  padding: 16px;
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--bg-1) 70%, transparent);
+  border: 1px solid var(--border-soft);
+  transition: transform 160ms var(--ease), border-color 160ms var(--ease);
+  animation: landingin 500ms var(--ease) 240ms both;
+}
+
+.landing-point:hover { transform: translateY(-2px); border-color: var(--accent-line); }
+
+.landing-point-icon {
+  width: 28px;
+  height: 28px;
+  display: grid;
+  place-items: center;
+  border-radius: 8px;
+  margin-bottom: 10px;
+  font-size: 14px;
+  color: var(--accent);
+  background: var(--accent-soft);
 }
 
 .landing-point-title {
-  font-size: 10px;
+  font-size: 13px;
   font-weight: 700;
-  letter-spacing: 1.1px;
-  text-transform: uppercase;
-  color: var(--fg-faint);
+  color: var(--fg-bright);
   margin-bottom: 6px;
 }
 
@@ -3408,7 +3630,14 @@ button.refsep:hover {
 
 /* Three abreast needs the width of three. Stacked, the points read fine. */
 @media (max-width: 720px) {
-  .landing-points { grid-template-columns: 1fr; gap: 14px; }
+  .landing-points { grid-template-columns: 1fr; gap: 10px; }
+  .landing-paste { height: 54px; padding-left: 14px; }
+  .landing-paste-input { font-size: 13px; }
+  .landing-kbd { display: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .landing-hero, .landing-paste, .landing-seen, .landing-point, .landing-chip { animation: none; }
 }
 
 /* On the page the footer keeps its rows but loses the panel's inset: the page

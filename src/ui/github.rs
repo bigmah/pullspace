@@ -505,7 +505,7 @@ fn SignedIn(login: String) -> Element {
 /// Signed in or not: a public repository lists its pull requests to anyone, and
 /// this pane is the same one either way.
 #[component]
-fn PrSection() -> Element {
+pub(super) fn PrSection() -> Element {
     let st = use_context::<St>();
     let held = st.prs.read().clone();
     // What is on screen already, so the row for it is marked rather than
@@ -1335,7 +1335,7 @@ fn do_sign_out(st: St) {
 /// Load whatever the user typed: a repo lists its PRs, a PR link opens it, a
 /// link to a branch browses it, and a link to a commit opens that commit's
 /// diff.
-async fn open_target(st: St) {
+pub(super) async fn open_target(st: St) {
     // Claimed here rather than inside the fetches below: reading a link can
     // itself cost a request, and this is the one path with a wait in front of
     // the work that follows it. See `spaces::Claim`.

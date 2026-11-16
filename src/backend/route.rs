@@ -746,7 +746,8 @@ pub fn href() -> Option<String> {
 /// open. It compares routes rather than text, so a link typed by hand — a
 /// trailing slash, a pasted github.com URL — is left as the reader wrote it.
 pub fn show(route: &Route) {
-    if current() == *route {
+    // Embedded, the address bar is the host's to keep.
+    if super::host::embedded() || current() == *route {
         return;
     }
     if let Some(l) = location() {
@@ -762,7 +763,7 @@ pub fn show(route: &Route) {
 /// eleven presses to leave one of them is a browser nobody presses Back in.
 /// This also raises no `hashchange`, so the watcher never sees our own writing.
 pub fn replace(route: &Route) {
-    if current() == *route {
+    if super::host::embedded() || current() == *route {
         return;
     }
     if let Some(win) = web_sys::window()

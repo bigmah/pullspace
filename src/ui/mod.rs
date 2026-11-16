@@ -2,6 +2,7 @@ mod app;
 mod bottom;
 mod compat;
 mod conversation;
+mod embed;
 mod filetree;
 mod full;
 mod github;

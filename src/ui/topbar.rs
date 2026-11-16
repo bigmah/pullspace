@@ -4,6 +4,7 @@ use crate::backend::auth::open_browser;
 use crate::backend::github::{PR_PAGE, PrState};
 
 use super::app::{Account, Fetch, St, Workspace};
+use super::embed;
 use super::full;
 use super::github::GithubMark;
 use super::ide;
@@ -22,6 +23,9 @@ pub fn size_label(bytes: u64) -> String {
 
 #[component]
 pub fn TopBar() -> Element {
+    if crate::backend::host::embedded() {
+        return rsx! { EmbedBar {} };
+    }
     let st = use_context::<St>();
     let mut gh_open = st.gh_open;
     let mut prefs_open = st.prefs_open;
@@ -490,6 +494,84 @@ fn RefreshButton(reload: Option<Go>, reloading: bool, refresh_title: &'static st
             // The glyph turns, not the button: a spinning hover square is not
             // what anyone means by "it is working".
             span { class: "glyph", "⟳" }
+        }
+    }
+}
+
+/// The bar, for pullspace embedded in a page that hands it the files: what is
+/// being compared, the search box, and the few buttons that mean anything
+/// without GitHub.
+#[component]
+fn EmbedBar() -> Element {
+    let st = use_context::<St>();
+    let mut prefs_open = st.prefs_open;
+    let full_on = *st.full.read();
+    let workspace = st.workspace.read();
+    let (repo, label, count) = match workspace.compare() {
+        Some(view) => (
+            view.repo.name.clone(),
+            format!("{} → {}", view.base, view.head),
+            view.files.len(),
+        ),
+        None => (String::new(), String::new(), 0),
+    };
+    drop(workspace);
+    let changed = match count {
+        0 => "no changes".to_string(),
+        1 => "1 file changed".to_string(),
+        n => format!("{n} files changed"),
+    };
+    let (busy, failed) = match &*st.fetch.read() {
+        Fetch::Working(_) => (true, None),
+        Fetch::Failed(e) => (false, Some(e.clone())),
+        Fetch::Idle => (false, None),
+    };
+    let cloning = (*st.cloning.read())
+        .filter(|at| !at.finished())
+        .map(|at| format!("reading {}/{}", at.done, at.total));
+    let can_ask = st.open.read().is_some() && st.at_line.read().is_some();
+    rsx! {
+        div { class: if busy { "topbar busy" } else { "topbar" },
+            span { class: "wschip cmp", title: "Your working tree against its last commit", "local" }
+            span { class: "refrepo", title: "{repo}", "{repo}" }
+            span { class: "prsrc", "{label}" }
+            span { class: "prsrc", "{changed}" }
+            if let Some(note) = cloning {
+                span { class: "prwarm", "{note}" }
+            }
+            if let Some(e) = failed {
+                span { class: "prwarn", title: "{e}", "reload failed" }
+            }
+            SearchBox {}
+            if can_ask {
+                button {
+                    class: "barbtn",
+                    title: "Quote the picked line into the prompt",
+                    onclick: move |_| embed::quote(&st),
+                    "Ask"
+                }
+            }
+            button {
+                class: "iconbtn lg",
+                title: "Appearance — theme, accent, font  (⌘,)",
+                onclick: move |_| prefs_open.set(true),
+                span { class: "glyph", "◐" }
+            }
+            button {
+                class: if full_on { "iconbtn lg on" } else { "iconbtn lg" },
+                title: "Fullscreen",
+                onclick: move |_| full::toggle(),
+                span { class: "glyph", "\u{26f6}" }
+            }
+            button {
+                class: if busy { "iconbtn lg spin" } else { "iconbtn lg" },
+                title: "Read the workspace again",
+                disabled: busy,
+                onclick: move |_| {
+                    spawn(embed::load(st));
+                },
+                span { class: "glyph", "⟳" }
+            }
         }
     }
 }

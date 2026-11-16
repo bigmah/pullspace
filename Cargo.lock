@@ -1384,6 +1384,7 @@ dependencies = [
  "gloo-timers",
  "js-sys",
  "pulldown-cmark",
+ "pullspace-embed",
  "regex",
  "serde",
  "serde_json",
@@ -1394,6 +1395,14 @@ dependencies = [
  "wasm-bindgen-futures",
  "web-sys",
  "web-time",
+]
+
+[[package]]
+name = "pullspace-embed"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

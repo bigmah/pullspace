@@ -40,6 +40,19 @@ Upcoming:
 * better support as a browser exension (one click on a PR to open pullspace)
 
 
+## Embedded
+
+pullspace can also review files that a host page hands it instead of GitHub: a local
+checkout's working tree against `HEAD`, say. Opened in a same-origin frame as
+`/pullspace/?embed`, it asks its parent for each side's files (as git blob hashes) and for
+blob contents over `postMessage`, and hides everything GitHub-specific.
+
+A host depends on the `pullspace-embed` crate (`crates/embed`): it carries the built bundle
+(checked in under `crates/embed/dist`, so the host needs no wasm toolchain), the files to
+serve and how, and the protocol's message types. After changing pullspace, run
+`crates/embed/build.sh` and commit `dist/` with the change.
+[tamale](https://github.com/bigmah/tamale)'s web UI uses it for its review panel.
+
 ## Running it
 ```sh
 cargo install dioxus-cli --version 0.6.3 --locked   # once, for `dx`

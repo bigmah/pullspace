@@ -25,7 +25,13 @@ rust-version = "1.88"
 # even though their calls only work in a browser, and everything with tests —
 # diffing, highlighting, markdown, the tree model, URL parsing — is pure.
 
+[workspace]
+members = [".", "crates/embed"]
+
 [dependencies]
+# The host protocol's types, shared with the pages pullspace is embedded in. Without the
+# built bundle, which would be this crate's own last build.
+pullspace-embed = { path = "crates/embed", default-features = false }
 anyhow = "1.0.104"
 dioxus = { version = "0.6", features = ["web"] }
 futures-util = { version = "0.3", default-features = false }

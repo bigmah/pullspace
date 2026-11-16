@@ -30,6 +30,7 @@ use futures_util::stream::{self, StreamExt};
 use super::FileContent;
 use super::blobs;
 use super::github::{self, FetchJob, RepoRef, Snapshot, TreeEntry};
+use super::host;
 
 /// How many files to fetch at once. The CDN is HTTP/2 and does not mind, but a
 /// browser tab has other things to do with its connection and its main thread.
@@ -65,6 +66,15 @@ const YIELD_MS: u32 = 20;
 /// files it does spend it on are the ones the pull request changes, which is
 /// what [`plan`] puts first.
 const MAX_API_BLOBS: usize = 1_500;
+
+/// How many files to ask an embedding host for at once, and how many bytes.
+/// One message each way per batch, rather than one per file: the host is a
+/// page away and, through a relay, a network away.
+const HOST_BATCH_FILES: usize = 256;
+const HOST_BATCH_BYTES: u64 = 2 << 20;
+
+/// And how many of those batches may be out at once.
+const HOST_CONCURRENCY: usize = 2;
 
 /// Give up on a clone once this many files have failed and failures are the
 /// majority of what has come back. GitHub refusing, or an allowance spent, is
@@ -349,6 +359,10 @@ pub async fn hydrate(
     }
     API_SPENT.with(|s| s.set(0));
 
+    if host::embedded() {
+        return from_host(files, at, progress, wanted).await;
+    }
+
     let token = &token;
     let repo = &repo;
     let mut stream = stream::iter(
@@ -403,6 +417,86 @@ pub async fn hydrate(
     }
 }
 
+/// Split what is wanted into batches for the host.
+fn host_batches(files: Vec<Want>) -> Vec<Vec<Want>> {
+    let mut batches = Vec::new();
+    let mut batch: Vec<Want> = Vec::new();
+    let mut bytes = 0;
+    for want in files {
+        if !batch.is_empty()
+            && (batch.len() >= HOST_BATCH_FILES || bytes + want.size > HOST_BATCH_BYTES)
+        {
+            batches.push(std::mem::take(&mut batch));
+            bytes = 0;
+        }
+        bytes += want.size;
+        batch.push(want);
+    }
+    if !batch.is_empty() {
+        batches.push(batch);
+    }
+    batches
+}
+
+/// Ask the host for one batch and keep what comes back. Answers how many were
+/// asked for, how many were kept, and how many bytes they came to.
+async fn host_batch(batch: Vec<Want>) -> (usize, usize, u64) {
+    let asked = batch.len();
+    let wants: Vec<(String, PathBuf)> = batch
+        .iter()
+        .map(|w| (w.sha.clone(), w.path.clone()))
+        .collect();
+    let Ok(got) = host::blobs(&wants).await else {
+        return (asked, 0, 0);
+    };
+    let sizes: std::collections::HashMap<&str, u64> =
+        batch.iter().map(|w| (w.sha.as_str(), w.size)).collect();
+    let (mut kept, mut bytes) = (0, 0);
+    for (sha, body) in got {
+        let Some(&size) = sizes.get(sha.as_str()) else {
+            continue;
+        };
+        if blobs::write(&sha, &body, size).await {
+            kept += 1;
+            bytes += body.len() as u64;
+        }
+    }
+    (asked, kept, bytes)
+}
+
+/// [`hydrate`], for a page embedded in a host that has the files: the same
+/// plan, the same store, a batch of files per message instead of a request per
+/// file.
+async fn from_host(
+    files: Vec<Want>,
+    mut at: Progress,
+    mut progress: impl FnMut(Progress),
+    wanted: impl Fn() -> bool,
+) {
+    let mut stream = stream::iter(host_batches(files).into_iter().map(host_batch))
+        .buffer_unordered(HOST_CONCURRENCY);
+    while let Some((asked, kept, bytes)) = stream.next().await {
+        at.done += asked;
+        at.failed += asked - kept;
+        at.bytes += bytes;
+        progress(at);
+        if !wanted() {
+            return;
+        }
+        while WAITING.with(|w| w.get()) > 0 {
+            super::breathe(YIELD_MS).await;
+            if !wanted() {
+                return;
+            }
+        }
+        super::breathe(0).await;
+    }
+    if at.bytes > 0 {
+        blobs::keep().await;
+        blobs::tidy(blobs::CACHE_BYTES).await;
+    }
+}
+
 // -------------------------------------------------------------------- read
 
 /// One side of a file as it stands on disk or on GitHub, undecoded.
@@ -419,6 +513,15 @@ async fn side_bytes(
     let sha = blob.sha.as_str();
     if let Some(bytes) = blobs::read(sha, blob.size).await {
         return Ok(Some(bytes));
+    }
+
+    if host::embedded() {
+        let got = host::blobs(&[(sha.to_string(), path.to_path_buf())]).await?;
+        let Some((_, body)) = got.into_iter().find(|(s, _)| s == sha) else {
+            return Ok(None);
+        };
+        blobs::write(sha, &body, blob.size).await;
+        return Ok(Some(body));
     }
 
     let mut reply = None;
@@ -460,6 +563,11 @@ async fn side(
     blob: Option<&TreeEntry>,
 ) -> Result<FileContent> {
     let Some(blob) = blob else {
+        // An embedding host's trees are whole: a path not in one is a file
+        // that side does not have.
+        if host::embedded() {
+            return Ok(FileContent::Absent);
+        }
         // No tree to say what this hashes to, so there is nothing to file a
         // copy under. Read it and let it go.
         return github::file_at(token, repo, commit, path).await;
@@ -509,6 +617,7 @@ pub async fn read_bytes(token: &str, job: &FetchJob) -> Result<Vec<u8>> {
             Some(blob) => side_bytes(token, &job.repo, commit, path, blob).await?,
             // No tree to say what this hashes to, so there is nothing to file a
             // copy under: read it by name and let it go.
+            None if host::embedded() => None,
             None => {
                 let (status, body) = github::bytes_at(token, &job.repo, commit, path).await?;
                 match status {
@@ -624,6 +733,31 @@ mod tests {
         assert_eq!(plan.wanted.len(), 1);
         assert_eq!(plan.wanted[0].path, PathBuf::from("src/lib.rs"));
         assert_eq!(plan.skipped, 2);
+    }
+
+    #[test]
+    fn host_batches_are_bounded_by_count_and_bytes() {
+        let want = |i: usize, size: u64| Want {
+            path: PathBuf::from(format!("f{i}")),
+            sha: format!("{i:040}"),
+            commit: Rc::from("c"),
+            size,
+        };
+        let many: Vec<Want> = (0..HOST_BATCH_FILES + 1).map(|i| want(i, 1)).collect();
+        let sizes: Vec<usize> = host_batches(many).iter().map(Vec::len).collect();
+        assert_eq!(sizes, vec![HOST_BATCH_FILES, 1]);
+
+        let big = vec![
+            want(0, HOST_BATCH_BYTES),
+            want(1, 1),
+            want(2, HOST_BATCH_BYTES * 2),
+        ];
+        let sizes: Vec<usize> = host_batches(big).iter().map(Vec::len).collect();
+        assert_eq!(
+            sizes,
+            vec![1, 1, 1],
+            "a file bigger than a batch goes on its own"
+        );
     }
 
     #[test]

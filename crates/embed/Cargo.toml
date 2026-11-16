@@ -1,0 +1,23 @@
+[package]
+name = "pullspace-embed"
+version = "0.1.0"
+edition = "2024"
+description = "pullspace, built, for embedding in another app's web page: the bundle and the host protocol"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/bigmah/pullspace"
+rust-version = "1.88"
+# The bundle under dist/ is built by build.sh and checked in, so depending on this
+# crate needs no wasm toolchain.
+include = ["src/**", "dist/**", "README.md"]
+
+[features]
+default = ["assets"]
+# The built bundle. pullspace itself depends on this crate for the protocol alone,
+# without its own last build inside it.
+assets = []
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+serde_json = "1"

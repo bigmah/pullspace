@@ -1,0 +1,21 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <title>pullspace</title>
+    <meta content="text/html;charset=utf-8" http-equiv="Content-Type" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta charset="UTF-8" />
+    <!-- The tab icon. Here and not in src/ui/page.rs because Safari only looks
+         for one in the page as it arrived, which is before the wasm has run.
+         Percent-encoded because Safari will not take the raw form; it reads:
+         <svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'>
+           <text x='50' y='50' font-size='88' text-anchor='middle'
+                 dominant-baseline='central'>telescope emoji</text>
+         </svg> -->
+    <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%20100%20100'%3E%3Ctext%20x='50'%20y='50'%20font-size='88'%20text-anchor='middle'%20dominant-baseline='central'%3E%F0%9F%94%AD%3C/text%3E%3C/svg%3E" />
+  <link rel="preload" as="script" href="/pullspace/pullspace.js?v=546186eee97c" crossorigin></head>
+  <body>
+    <div id="main"></div>
+  <script type="module" async src="/pullspace/pullspace.js?v=546186eee97c"></script>
+            </body>
+</html>

@@ -8,6 +8,7 @@ pub mod drafts;
 pub mod fuzzy;
 pub mod github;
 pub mod highlight;
+pub mod host;
 pub mod http;
 pub mod images;
 pub mod layout;

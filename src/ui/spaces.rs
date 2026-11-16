@@ -676,6 +676,10 @@ struct Saved {
 /// Write the list down. Cheap enough to do on every file opened: it is a
 /// dozen labels and a dozen links, and it is what makes a reload cost nothing.
 pub fn save(st: &St) {
+    // Embedded, there is one space, and it is the host's.
+    if crate::backend::host::embedded() {
+        return;
+    }
     let list = st.spaces.peek();
     let saved = Saved {
         on: *st.space.peek(),
@@ -700,6 +704,9 @@ pub fn save(st: &St) {
 /// that opens one on a fresh visit: the address bar, which is where it was
 /// written on the way out.
 pub fn load() -> (Vec<Space>, u32) {
+    if crate::backend::host::embedded() {
+        return read(None);
+    }
     read(store::session_get(store::SPACES))
 }
 

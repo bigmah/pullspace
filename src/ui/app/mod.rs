@@ -24,7 +24,7 @@ use crate::backend::symbols::{self, Symbol};
 use crate::backend::tree::{
     ChangeKind, FileNode, build_tree_from_paths, changed_paths, filter_changed,
 };
-use crate::backend::{FileContent, blobs, layout, viewed};
+use crate::backend::{FileContent, blobs, host, layout, viewed};
 
 use super::bottom::Bottom;
 use super::conversation::ConvPane;
@@ -1186,7 +1186,9 @@ pub fn App() -> Element {
             cloning: root(h.cloning),
             store_gen: root(0),
             conv: root(h.conv),
-            conv_open: root(h.conv_open),
+            // Embedded, there is no conversation and nothing to put in its
+            // place, so the pane does not claim its width.
+            conv_open: root(h.conv_open && !host::embedded()),
             commits: root(h.commits),
             branches: root(h.branches),
             checks: root(h.checks),
@@ -1327,8 +1329,21 @@ pub fn App() -> Element {
 
     // The address bar, both ways: what a link opens, and — from `St::enter` —
     // what is written back into it once something is open.
-    use_future(move || super::nav::watch(st));
-    use_future(move || super::nav::landing(st));
+    //
+    // Embedded, the host is where things are opened from instead.
+    let embedded = host::embedded();
+    use_future(move || async move {
+        if embedded {
+            super::embed::run(st).await;
+        } else {
+            super::nav::watch(st).await;
+        }
+    });
+    use_future(move || async move {
+        if !embedded {
+            super::nav::landing(st).await;
+        }
+    });
 
     // And the third thing the bar has to follow: the file being read, and the
     // line picked out of it. Written in place rather than pushed — see
@@ -1346,7 +1361,8 @@ pub fn App() -> Element {
     // Pick up a saved token once at startup. Verifying it costs one API call
     // and tells us the login.
     use_future(move || async move {
-        let Some(tok) = crate::backend::auth::find_token() else {
+        let found = (!embedded).then(crate::backend::auth::find_token).flatten();
+        let Some(tok) = found else {
             let mut acct = st.account;
             acct.set(Account::SignedOut);
             return;
@@ -1530,6 +1546,9 @@ pub fn App() -> Element {
         {
             return;
         }
+        if embedded {
+            return;
+        }
         spawn_forever(super::github::load_repo_prs(st, repo));
     });
 
@@ -1544,6 +1563,9 @@ pub fn App() -> Element {
             return;
         };
         if !matches!(*st.commits.peek(), CommitList::Idle) {
+            return;
+        }
+        if embedded {
             return;
         }
         spawn_forever(super::conversation::load_commits(st, source));
@@ -1561,6 +1583,9 @@ pub fn App() -> Element {
         if !matches!(*st.branches.peek(), BranchList::Idle) {
             return;
         }
+        if embedded {
+            return;
+        }
         spawn_forever(super::conversation::load_branches(st, repo));
     });
 
@@ -1573,6 +1598,9 @@ pub fn App() -> Element {
             return;
         };
         if !matches!(*st.checks.peek(), CheckList::Idle) {
+            return;
+        }
+        if embedded {
             return;
         }
         spawn_forever(super::conversation::load_checks(st, repo, sha));
@@ -1638,16 +1666,20 @@ pub fn App() -> Element {
                         Viewer {}
                         Bottom {}
                     }
-                    ConvPane {}
+                    if !embedded {
+                        ConvPane {}
+                    }
                 }
                 // Under the panels and over the panes: everything but the bar
                 // it was opened from.
-                if *st.pr_board.read() {
+                if !embedded && *st.pr_board.read() {
                     PrBoard {}
                 }
-                if *st.gh_open.read() {
+                if !embedded && *st.gh_open.read() {
                     GhPanel {}
                 }
+            } else if embedded {
+                super::embed::Waiting {}
             } else if let Some(route) = st.incoming.read().clone() {
                 // Empty, but not for long: something is being fetched into
                 // this space. The front page is not what somebody who followed

@@ -5396,3 +5396,19 @@ button.refsep:hover {
 @media (prefers-reduced-motion: reduce) {
   .app.embed.drawer .sidebar, .app.embed.drawer .drawermask { animation: none; }
 }
+
+/* ---- the field text is copied out of, where there is no clipboard to write to ----
+ *
+ * See `backend::clip`. Off screen rather than `display: none`, which cannot be
+ * selected; 16px so that iOS does not zoom the page in on it. */
+.clipfield {
+  position: fixed;
+  top: 0;
+  left: -9999px;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  border: 0;
+  opacity: 0;
+  font-size: 16px;
+}

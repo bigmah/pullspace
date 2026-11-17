@@ -22,6 +22,13 @@
 //! Nothing here is load-bearing. A browser without OPFS, a private window, or a
 //! disk with nothing left on it all end at "not cached", which costs speed and
 //! nothing else.
+//!
+//! With one exception, which is what [`Memory`] is: embedded in a page that has
+//! the files, a browser with no filesystem to give still gets a store — the
+//! same blobs, held in memory until the page is closed. There the files are a
+//! message away rather than a request each, so fetching them again on every
+//! visit is cheap, and going without would cost the search and the symbol
+//! index, which read nothing but this.
 
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
@@ -29,7 +36,7 @@ use std::collections::{HashMap, HashSet};
 use web_sys::FileSystemDirectoryHandle;
 
 use super::github::{RepoRef, Snapshot};
-use super::opfs;
+use super::{host, opfs};
 
 /// Unique blob bytes to keep before the oldest repositories are dropped.
 ///
@@ -70,8 +77,41 @@ struct Store {
     have: HashSet<String>,
 }
 
+/// What [`Memory`] may hold. A phone is the likeliest place for it to be
+/// holding anything, so it is well short of what a clone is allowed on disk;
+/// what does not fit is reported the way anything else not downloaded is.
+const MEMORY_BYTES: usize = 64 << 20;
+
+/// The store where there is no filesystem: blobs by hash, for this page only.
+///
+/// Used only when embedded — see the module's own notes — and only once OPFS
+/// has been asked for and refused. No manifests and nothing to tidy: there is
+/// no next visit for either to be about.
+#[derive(Default)]
+struct Memory {
+    blobs: HashMap<String, Vec<u8>>,
+    bytes: usize,
+}
+
+impl Memory {
+    /// Keep a blob if there is room for it. Whether it is held afterwards.
+    fn put(&mut self, sha: &str, bytes: &[u8], limit: usize) -> bool {
+        if self.blobs.contains_key(sha) {
+            return true;
+        }
+        if self.bytes + bytes.len() > limit {
+            return false;
+        }
+        self.bytes += bytes.len();
+        self.blobs.insert(sha.to_string(), bytes.to_vec());
+        true
+    }
+}
+
 thread_local! {
     static STORE: RefCell<Option<Store>> = const { RefCell::new(None) };
+    /// Set in place of [`STORE`], never alongside it.
+    static MEMORY: RefCell<Option<Memory>> = const { RefCell::new(None) };
     /// Set once OPFS has been asked for and refused, so a browser without it
     /// is not asked again on every file.
     static UNAVAILABLE: RefCell<bool> = const { RefCell::new(false) };
@@ -83,6 +123,22 @@ thread_local! {
 
 fn with<T>(f: impl FnOnce(&mut Store) -> T) -> Option<T> {
     STORE.with(|s| s.borrow_mut().as_mut().map(f))
+}
+
+fn in_memory<T>(f: impl FnOnce(&mut Memory) -> T) -> Option<T> {
+    MEMORY.with(|m| m.borrow_mut().as_mut().map(f))
+}
+
+/// Whether there is somewhere to put a blob, of either kind.
+fn opened() -> bool {
+    with(|_| ()).is_some() || in_memory(|_| ()).is_some()
+}
+
+/// Bytes there is still room for. Without limit on disk, where the sweep is
+/// what keeps the store to size; in memory it is what a clone has to plan
+/// within, or it asks the host for files it then has nowhere to put.
+pub fn room() -> u64 {
+    in_memory(|m| MEMORY_BYTES.saturating_sub(m.bytes) as u64).unwrap_or(u64::MAX)
 }
 
 /// The forty hex characters a git blob is named by. Anything else is not
@@ -99,7 +155,7 @@ fn is_sha(sha: &str) -> bool {
 /// before the index was ready has to wait for the real answer, because "not
 /// cached yet" would send it to the network for a repository already on disk.
 pub async fn open() -> bool {
-    if with(|_| ()).is_some() {
+    if opened() {
         return true;
     }
     if UNAVAILABLE.with(|u| *u.borrow()) {
@@ -109,9 +165,14 @@ pub async fn open() -> bool {
         while OPENING.with(|o| o.get()) {
             super::breathe(15).await;
         }
-        return with(|_| ()).is_some();
+        return opened();
     }
-    let opened = build().await;
+    let mut opened = build().await;
+    // Nowhere on disk, and a host with the files: memory will do.
+    if !opened && host::embedded() {
+        MEMORY.with(|m| *m.borrow_mut() = Some(Memory::default()));
+        opened = true;
+    }
     OPENING.with(|o| o.set(false));
     opened
 }
@@ -175,12 +236,16 @@ async fn build() -> bool {
 /// Whether a blob is already on disk. Answers without awaiting, because the
 /// clone asks once per file in the repository before fetching anything.
 pub fn have(sha: &str) -> bool {
-    with(|s| s.have.contains(sha)).unwrap_or(false)
+    with(|s| s.have.contains(sha))
+        .or_else(|| in_memory(|m| m.blobs.contains_key(sha)))
+        .unwrap_or(false)
 }
 
 /// How many blobs are stored, for the readout.
 pub fn stored() -> usize {
-    with(|s| s.have.len()).unwrap_or(0)
+    with(|s| s.have.len())
+        .or_else(|| in_memory(|m| m.blobs.len()))
+        .unwrap_or(0)
 }
 
 async fn shard_of(sha: &str) -> Option<FileSystemDirectoryHandle> {
@@ -209,6 +274,9 @@ pub async fn read(sha: &str, expect: u64) -> Option<Vec<u8>> {
     if !is_sha(sha) || !open().await || !have(sha) {
         return None;
     }
+    if let Some(held) = in_memory(|m| m.blobs.get(sha).cloned()) {
+        return held;
+    }
     let shard = shard_of(sha).await?;
     let bytes = opfs::read(&shard, sha)
         .await
@@ -231,6 +299,9 @@ pub async fn read(sha: &str, expect: u64) -> Option<Vec<u8>> {
 pub async fn write(sha: &str, bytes: &[u8], expect: u64) -> bool {
     if !is_sha(sha) || !right_length(bytes, expect) || !open().await {
         return false;
+    }
+    if let Some(kept) = in_memory(|m| m.put(sha, bytes, MEMORY_BYTES)) {
+        return kept;
     }
     let Some(shard) = shard_of(sha).await else {
         return false;
@@ -385,6 +456,24 @@ pub async fn usage() -> Option<(f64, f64)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn memory_keeps_what_fits_and_says_what_does_not() {
+        let mut memory = Memory::default();
+        assert!(memory.put("a", b"12345", 8));
+        // No room for this one, and it is not half kept.
+        assert!(!memory.put("b", b"6789", 8));
+        assert!(!memory.blobs.contains_key("b"));
+        assert!(memory.put("c", b"678", 8));
+        assert_eq!(memory.bytes, 8);
+        // Already held: nothing to add, whatever room there is.
+        assert!(memory.put("a", b"12345", 8));
+        assert_eq!(memory.bytes, 8);
+        assert_eq!(
+            memory.blobs.get("a").map(Vec::as_slice),
+            Some(&b"12345"[..])
+        );
+    }
 
     #[test]
     fn only_blob_hashes_become_filenames() {

@@ -50,7 +50,9 @@ pane's header, the explorer opens on the files that changed, and it lays itself 
 the width the host gives it: in a narrow frame (beside a conversation, on a phone) the
 explorer folds away behind a button and diffs are one column. The host can ask it to show
 a file, and **Ask** hands the host what the reader is looking at: a selection, a line or
-the file.
+the file. It runs where the browser gives it no storage and no clipboard (a page served over
+plain http to another machine is not a secure context): the files it would have kept on disk
+are held in memory for the visit, so search and the symbol index still have them.
 
 A host depends on the `pullspace-embed` crate (`crates/embed`): it carries the built bundle
 (checked in under `crates/embed/dist`, so the host needs no wasm toolchain), the files to

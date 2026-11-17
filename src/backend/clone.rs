@@ -198,7 +198,10 @@ impl<'a> Planner<'a> {
             self.plan.skipped += 1;
             return true;
         }
-        if self.plan.wanted.len() >= MAX_CLONE_FILES || self.plan.bytes + size > MAX_CLONE_BYTES {
+        // Whichever is less: what a clone may add, and what the store has room
+        // for — which is only ever a limit where the store is memory.
+        let budget = MAX_CLONE_BYTES.min(blobs::room());
+        if self.plan.wanted.len() >= MAX_CLONE_FILES || self.plan.bytes + size > budget {
             self.plan.skipped += 1;
             return false;
         }

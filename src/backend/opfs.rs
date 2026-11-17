@@ -22,6 +22,7 @@ use wasm_bindgen_futures::JsFuture;
 use web_sys::{
     File, FileSystemDirectoryHandle, FileSystemFileHandle, FileSystemGetDirectoryOptions,
     FileSystemGetFileOptions, FileSystemRemoveOptions, FileSystemWritableFileStream,
+    StorageManager,
 };
 
 /// Everything pullspace writes lives under one directory, so nothing else on
@@ -36,12 +37,34 @@ async fn settle(promise: js_sys::Promise) -> Option<JsValue> {
     JsFuture::from(promise).await.ok()
 }
 
+/// `navigator.storage`, where the browser has one to give.
+///
+/// It is there only in a secure context, and a page served over plain http from
+/// anywhere but the machine it is read on is not one: pullspace embedded in a
+/// page on the local network, read from a phone, gets `undefined`. `web_sys`
+/// types the property as always present, so it is read by name and looked at
+/// first — a method called on `undefined` throws, and nothing thrown through
+/// wasm is caught: the app stops.
+fn storage() -> Option<StorageManager> {
+    let navigator = web_sys::window()?.navigator();
+    let storage = Reflect::get(&navigator, &JsValue::from_str("storage")).ok()?;
+    storage.is_object().then(|| storage.unchecked_into())
+}
+
+/// Whether `storage` can do `method`: a browser may have the manager and not
+/// all of what is asked of it here (Firefox had one for years before it had
+/// `getDirectory`).
+fn can(storage: &StorageManager, method: &str) -> bool {
+    Reflect::get(storage, &JsValue::from_str(method)).is_ok_and(|f| f.is_function())
+}
+
 /// The root of pullspace's own storage, created on first use.
 ///
 /// `None` outside a browser — which is also what the native `cargo test` build
-/// gets, since `window()` is `None` there and nothing below is ever reached.
+/// gets, since `window()` is `None` there and nothing below is ever reached —
+/// and in a browser that has no such storage for this page.
 pub async fn root() -> Option<FileSystemDirectoryHandle> {
-    let storage = web_sys::window()?.navigator().storage();
+    let storage = storage().filter(|s| can(s, "getDirectory"))?;
     let handle: FileSystemDirectoryHandle =
         settle(storage.get_directory()).await?.dyn_into().ok()?;
     dir(&handle, ROOT).await
@@ -161,7 +184,7 @@ pub async fn remove_all(parent: &FileSystemDirectoryHandle, name: &str) -> bool 
 /// the origin rather than only what is below [`root`] — near enough, since
 /// pullspace's other storage is a token and two pane widths.
 pub async fn usage() -> Option<(f64, f64)> {
-    let storage = web_sys::window()?.navigator().storage();
+    let storage = storage().filter(|s| can(s, "estimate"))?;
     let estimate = settle(storage.estimate().ok()?).await?;
     let read = |key: &str| {
         Reflect::get(&estimate, &JsValue::from_str(key))
@@ -178,10 +201,10 @@ pub async fn usage() -> Option<(f64, f64)> {
 /// worth acting on. Chrome grants it on a site with any history of use;
 /// Firefox asks; Safari decides for itself.
 pub async fn persist() -> bool {
-    let Some(window) = web_sys::window() else {
+    let Some(storage) = storage().filter(|s| can(s, "persist")) else {
         return false;
     };
-    let Ok(promise) = window.navigator().storage().persist() else {
+    let Ok(promise) = storage.persist() else {
         return false;
     };
     settle(promise)

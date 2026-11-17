@@ -380,7 +380,13 @@ fn SearchBox() -> Element {
             "Search every file of this repository  (⌘⇧F)".to_string()
         }
     });
-    let index_label = st.index.read().label();
+    // Embedded, the count of what was read is nobody's question: the bar is a
+    // pane's header there, and says how the index is getting on only while it
+    // still is.
+    let index_label = match &*st.index.read() {
+        ide::Index::Ready { .. } if crate::backend::host::embedded() => None,
+        index => index.label(),
+    };
 
     rsx! {
         div { class: "searchgrp",
@@ -498,16 +504,23 @@ fn RefreshButton(reload: Option<Go>, reloading: bool, refresh_title: &'static st
     }
 }
 
-/// The bar, for pullspace embedded in a page that hands it the files: what is
-/// being compared, the search box, and the few buttons that mean anything
-/// without GitHub.
+/// The bar, for pullspace embedded in a page that hands it the files.
+///
+/// A pane's header rather than an app's: the page around it has a bar of its
+/// own, and two of those stacked are two things asking to be read before the
+/// code is. So it is one quiet row — the button for the explorer, what is
+/// being compared, the search box, and the way to ask the host about what is
+/// on screen.
 #[component]
 fn EmbedBar() -> Element {
     let st = use_context::<St>();
     let mut prefs_open = st.prefs_open;
-    let full_on = *st.full.read();
+    // Narrow, the search box has no room beside the rest of the bar, so it
+    // takes the bar's place for as long as it is being typed in.
+    let mut searching = use_signal(|| false);
+    let narrow = use_memo(move || st.narrow());
     let workspace = st.workspace.read();
-    let (repo, label, count) = match workspace.compare() {
+    let (repo, sides, count) = match workspace.compare() {
         Some(view) => (
             view.repo.name.clone(),
             format!("{} → {}", view.base, view.head),
@@ -518,8 +531,7 @@ fn EmbedBar() -> Element {
     drop(workspace);
     let changed = match count {
         0 => "no changes".to_string(),
-        1 => "1 file changed".to_string(),
-        n => format!("{n} files changed"),
+        n => format!("{n} changed"),
     };
     let (busy, failed) = match &*st.fetch.read() {
         Fetch::Working(_) => (true, None),
@@ -529,13 +541,43 @@ fn EmbedBar() -> Element {
     let cloning = (*st.cloning.read())
         .filter(|at| !at.finished())
         .map(|at| format!("reading {}/{}", at.done, at.total));
-    let can_ask = st.open.read().is_some() && st.at_line.read().is_some();
+    // Lit while the explorer is out, whichever way out is at this width.
+    let side_on = if narrow() {
+        *st.drawer.read()
+    } else {
+        !*st.side_shut.read()
+    };
+    // What Ask would quote. Always there, so it can be found before it is
+    // needed, and says which line once one is picked.
+    let has_file = st.open.read().is_some();
+    let line = *st.at_line.read();
+    let ask_why = match (has_file, line) {
+        (false, _) => "Open a file to ask about it".to_string(),
+        (true, Some(n)) => format!("Quote line {n} into the prompt  (⌘⏎)"),
+        (true, None) => {
+            "Ask about this file  (⌘⏎) — select some code or click a line number first to quote it"
+                .to_string()
+        }
+    };
+    let bar_cls = match (busy, *searching.read()) {
+        (false, false) => "topbar embedbar",
+        (true, false) => "topbar embedbar busy",
+        (false, true) => "topbar embedbar searching",
+        (true, true) => "topbar embedbar searching busy",
+    };
     rsx! {
-        div { class: if busy { "topbar busy" } else { "topbar" },
-            span { class: "wschip cmp", title: "Your working tree against its last commit", "local" }
+        div { class: "{bar_cls}",
+            button {
+                class: if side_on { "iconbtn sidebtn on" } else { "iconbtn sidebtn" },
+                title: if side_on { "Hide the files" } else { "Show the files" },
+                onclick: move |_| st.toggle_side(),
+                svg { class: "ico", view_box: "0 0 16 16", "aria-hidden": "true",
+                    rect { x: "2", y: "2.75", width: "12", height: "10.5", rx: "1.75" }
+                    path { d: "M6.25 2.75v10.5" }
+                }
+            }
             span { class: "refrepo", title: "{repo}", "{repo}" }
-            span { class: "prsrc", "{label}" }
-            span { class: "prsrc", "{changed}" }
+            span { class: "embsum", title: "{sides}", "{changed}" }
             if let Some(note) = cloning {
                 span { class: "prwarm", "{note}" }
             }
@@ -543,34 +585,64 @@ fn EmbedBar() -> Element {
                 span { class: "prwarn", title: "{e}", "reload failed" }
             }
             SearchBox {}
-            if can_ask {
-                button {
-                    class: "barbtn",
-                    title: "Quote the picked line into the prompt",
-                    onclick: move |_| embed::quote(&st),
-                    "Ask"
+            button {
+                class: "iconbtn searchshut",
+                title: "Close the search",
+                onclick: move |_| searching.set(false),
+                svg { class: "ico", view_box: "0 0 16 16", "aria-hidden": "true",
+                    path { d: "m4 4 8 8M12 4l-8 8" }
                 }
             }
             button {
-                class: "iconbtn lg",
-                title: "Appearance — theme, accent, font  (⌘,)",
-                onclick: move |_| prefs_open.set(true),
-                span { class: "glyph", "◐" }
+                class: "iconbtn searchopen",
+                title: "Search every file  (⌘⇧F)",
+                onclick: move |_| {
+                    searching.set(true);
+                    // A frame late: the box it is reaching for is hidden until
+                    // the bar has been drawn again.
+                    spawn(async move {
+                        let _ = document::eval(
+                            "requestAnimationFrame(function(){var e=document.querySelector('.searchbox');if(e){e.focus();e.select();}});",
+                        )
+                        .await;
+                    });
+                },
+                svg { class: "ico", view_box: "0 0 16 16", "aria-hidden": "true",
+                    circle { cx: "7", cy: "7", r: "4.25" }
+                    path { d: "m10.25 10.25 3.25 3.25" }
+                }
             }
             button {
-                class: if full_on { "iconbtn lg on" } else { "iconbtn lg" },
-                title: "Fullscreen",
-                onclick: move |_| full::toggle(),
-                span { class: "glyph", "\u{26f6}" }
+                class: if line.is_some() { "askbtn on" } else { "askbtn" },
+                title: "{ask_why}",
+                disabled: !has_file,
+                onclick: move |_| {
+                    spawn(embed::quote(st));
+                },
+                "Ask"
+                if let Some(n) = line {
+                    span { class: "askline", "L{n}" }
+                }
             }
             button {
-                class: if busy { "iconbtn lg spin" } else { "iconbtn lg" },
+                class: if busy { "iconbtn spin" } else { "iconbtn" },
                 title: "Read the workspace again",
                 disabled: busy,
                 onclick: move |_| {
                     spawn(embed::load(st));
                 },
-                span { class: "glyph", "⟳" }
+                svg { class: "ico glyph", view_box: "0 0 16 16", "aria-hidden": "true",
+                    path { d: "M13.2 6.3A5.3 5.3 0 1 0 13 10M13.5 2.8v3.7H9.8" }
+                }
+            }
+            button {
+                class: "iconbtn",
+                title: "Appearance — theme, accent, font  (⌘,)",
+                onclick: move |_| prefs_open.set(true),
+                svg { class: "ico", view_box: "0 0 16 16", "aria-hidden": "true",
+                    circle { cx: "8", cy: "8", r: "5.25" }
+                    path { class: "icofill", d: "M8 2.75a5.25 5.25 0 0 1 0 10.5Z" }
+                }
             }
         }
     }

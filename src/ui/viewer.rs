@@ -178,6 +178,11 @@ pub fn Viewer() -> Element {
         }
     });
 
+    // Whether a diff has room for its two sides. A memo, because the width it
+    // is worked out from moves on every frame of a resize and the answer
+    // moves once.
+    let split_fits = use_memo(move || st.split_fits());
+
     // Resolve the two sides of the open file out of the cache.
     let data = use_memo(move || {
         st.refresh_tick.read();
@@ -509,6 +514,12 @@ pub fn Viewer() -> Element {
         ViewMode::Inline | ViewMode::Split if status.is_none() => ViewMode::Source,
         m => m,
     };
+    // Two sides only where there is the width for two — see `embed::fitting`.
+    // What was asked for is left as it was, so a pane made wider again goes
+    // back to it.
+    let split_fits = split_fits();
+    let mode = super::embed::fitting(mode, split_fits);
+    let embedded = crate::backend::host::embedded();
 
     let rel_str = rel.display().to_string();
     // The same path again, as the key its scroll offset is filed under.
@@ -539,6 +550,14 @@ pub fn Viewer() -> Element {
     // lights it up, and clicking a number is what puts it there.
     let at = *st.at_line.read();
 
+    // A diff with nothing in it is usually a file that only moved, and "no
+    // differences" about one of those is true and no help: the move is the
+    // difference, so that is what the pane says.
+    let same = match st.workspace.read().moved_from(&rel) {
+        Some(from) => format!("Moved from {} — nothing in it changed.", from.display()),
+        None => "No differences.".to_string(),
+    };
+
     let body = match mode {
         ViewMode::Source => match source_lines.read().as_ref() {
             Some(SourceLines::Colored(lines)) => render_colored(lines, &marks, at),
@@ -546,12 +565,12 @@ pub fn Viewer() -> Element {
             None => rsx! { div { class: "notice", "Binary file — no preview." } },
         },
         ViewMode::Inline => match diff.read().as_ref() {
-            Some(d) if d.is_empty() => rsx! { div { class: "notice", "No differences." } },
+            Some(d) if d.is_empty() => rsx! { div { class: "notice", "{same}" } },
             Some(d) => render_inline(d, &open_gaps, &marks, at, &talk.read()),
             None => rsx! { div { class: "notice", "Binary file — cannot diff." } },
         },
         ViewMode::Split => match diff.read().as_ref() {
-            Some(d) if d.is_empty() => rsx! { div { class: "notice", "No differences." } },
+            Some(d) if d.is_empty() => rsx! { div { class: "notice", "{same}" } },
             Some(d) => render_split(st, d, &open_gaps, &marks, at, &talk.read()),
             None => rsx! { div { class: "notice", "Binary file — cannot diff." } },
         },
@@ -675,7 +694,8 @@ pub fn Viewer() -> Element {
                     }
                 }
                 span { class: "spacer" }
-                if settled {
+                // A link to here is the address bar, and a frame has none.
+                if settled && !embedded {
                     LinkButton { line: at }
                 }
                 if markable {
@@ -714,8 +734,14 @@ pub fn Viewer() -> Element {
                 // and a segmented group is what says so.
                 div { class: "modegroup",
                     {mode_btn("Source", ViewMode::Source, mode, settled, "Show the file as it stands")}
-                    {mode_btn("Inline", ViewMode::Inline, mode, diffable, diff_why)}
-                    {mode_btn("Split", ViewMode::Split, mode, diffable, diff_why)}
+                    // With no room for the second, the first is the only
+                    // diff there is, and is called that.
+                    if split_fits {
+                        {mode_btn("Inline", ViewMode::Inline, mode, diffable, diff_why)}
+                        {mode_btn("Split", ViewMode::Split, mode, diffable, diff_why)}
+                    } else {
+                        {mode_btn("Diff", ViewMode::Inline, mode, diffable, diff_why)}
+                    }
                     if previewable {
                         {mode_btn(
                             "Preview",
@@ -1243,7 +1269,26 @@ fn Welcome() -> Element {
                 n => format!("{n} files changed — pick one on the left."),
             },
         )),
-        _ => None,
+        // The one an embedded frame is always showing, and the pane it shows
+        // when the working tree is clean — or was, until a moment ago.
+        Workspace::Compare(view) => Some(match view.files.len() {
+            0 => (
+                "Nothing has changed".to_string(),
+                format!(
+                    "{} and {} are the same. Pick a file from the list to read it.",
+                    view.base, view.head,
+                ),
+            ),
+            1 => (
+                view.repo.name.clone(),
+                "1 file changed — pick it from the list.".to_string(),
+            ),
+            n => (
+                view.repo.name.clone(),
+                format!("{n} files changed — pick one from the list."),
+            ),
+        }),
+        Workspace::Empty => None,
     };
     // A repository that keeps summaries has a better first page than an
     // empty pane: the pull request's own guide when it brings one, the map

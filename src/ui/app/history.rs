@@ -17,13 +17,17 @@ impl St {
         if let Some(spot) = self.tabbed(&rel) {
             return self.go(spot);
         }
-        let changed = self.statuses.peek().get(&rel).is_some();
-        let mode = match () {
-            _ if changed => ViewMode::Split,
-            _ if markdown::is_markdown(&rel) || crate::ui::viewer::is_html(&rel) => {
+        let status = self.statuses.peek().get(&rel).copied();
+        let mode = match status {
+            // Embedded, a file that is all new or all gone opens as the one
+            // column it is. Half of a side-by-side diff of one is an empty
+            // hatch, and in a frame there is rarely the width to spend on it.
+            Some(ChangeKind::Added | ChangeKind::Deleted) if host::embedded() => ViewMode::Inline,
+            Some(_) => ViewMode::Split,
+            None if markdown::is_markdown(&rel) || crate::ui::viewer::is_html(&rel) => {
                 ViewMode::Preview
             }
-            _ => ViewMode::Source,
+            None => ViewMode::Source,
         };
         self.go(Spot {
             path: rel,

@@ -10,12 +10,20 @@
 //! ```text
 //! frame → parent  {ps: 1, id, t: "snapshot", body: {}}            → {ps: 1, id, body: Snapshot}
 //! frame → parent  {ps: 1, id, t: "blobs",    body: BlobsRequest}  → {ps: 1, id, body: BlobsReply}
+//! frame → parent  {ps: 1, t: "ready"}                             (no answer: listening)
 //! frame → parent  {ps: 1, t: "quote", body: Quote}                (no answer)
+//! frame → parent  {ps: 1, t: "missing", body: Open}               (no answer)
 //! parent → frame  {ps: 1, event: "changed"}                       (read the snapshot again)
+//! parent → frame  {ps: 1, event: "open", body: Open}              (show this file)
 //! ```
 //!
 //! A failed request is answered `{ps: 1, id, error: "…"}`. Messages only count between a
-//! frame and its parent of the same origin.
+//! frame and its parent of the same origin. The frame hears events from `ready` on: a
+//! host with one to send sooner keeps it until then.
+//!
+//! The frame is as wide as the host makes it. Narrow, it folds its explorer away behind
+//! a button and shows a diff as one column, so a host need not keep it wide — beside a
+//! conversation, say, or on a phone.
 
 pub mod protocol;
 

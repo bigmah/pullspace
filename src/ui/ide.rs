@@ -618,6 +618,9 @@ const KEYS: &str = r#"
     // too.
     else if (e.ctrlKey && !e.metaKey && (key === 'g' || e.code === 'KeyG')) what = 'gotoline';
     else if (mod && key === ',') what = 'prefs';
+    // Only in a frame, where there is a host to ask: on its own this is the
+    // key that sends a comment, and it is the text box's.
+    else if (mod && key === 'enter' && document.querySelector('.app.embed')) what = 'ask';
     else if (key === 'f12') what = e.shiftKey ? 'refs' : 'def';
     else if (key === 'f7') what = e.shiftKey ? 'prevchange' : 'nextchange';
     else if (key === 'f3') what = e.shiftKey ? 'prevfind' : 'nextfind';
@@ -703,6 +706,7 @@ pub async fn keys(st: St) {
                 let showing = *open.peek();
                 open.set(!showing);
             }
+            ("ask", _) => super::embed::quote(st).await,
             ("def", Some(name)) => goto_def(st, &name),
             ("refs", Some(name)) => find_refs(st, &name),
             // Nothing picked out to look up. Saying so beats a key that

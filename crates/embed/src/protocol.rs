@@ -10,8 +10,16 @@ pub const SNAPSHOT: &str = "snapshot";
 pub const BLOBS: &str = "blobs";
 /// `t` of the frame's [`Quote`], which has no answer.
 pub const QUOTE: &str = "quote";
+/// `t` of what the frame says once it is listening for events, which has no answer and
+/// no body. An event posted before it is one the frame never heard.
+pub const READY: &str = "ready";
+/// `t` of the frame's answer to an [`OPEN`] that named nothing it has: the [`Open`] it
+/// was sent, back again. No answer.
+pub const MISSING: &str = "missing";
 /// The `event` that tells the frame the files may have moved.
 pub const CHANGED: &str = "changed";
+/// The `event` that asks the frame to show a file, with an [`Open`] as its `body`.
+pub const OPEN: &str = "open";
 
 /// What is being reviewed: two sides, every file in each.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -65,15 +73,35 @@ pub struct BlobsReply {
     pub blobs: std::collections::BTreeMap<String, Option<String>>,
 }
 
-/// A line the reader asked the host about.
+/// What the reader asked the host about: a line of a file, a stretch of it, or — with no
+/// line — the file as a whole.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Quote {
     pub path: String,
-    /// 1-based.
-    pub line: usize,
-    /// The line itself, when the frame has the file as text.
+    /// 1-based. Left out when it is the file being asked about and not a line of it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line: Option<usize>,
+    /// The last line, when more than one was picked out.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end: Option<usize>,
+    /// The lines themselves, when the frame has the file as text.
     #[serde(default)]
     pub text: Option<String>,
+}
+
+/// A file the host wants shown.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Open {
+    /// As the host has it: relative to the repository, or longer — an absolute path, or
+    /// one from a directory inside it. The frame opens the file its own list of them
+    /// says this names.
+    pub path: String,
+    /// 1-based, to land on a line.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line: Option<usize>,
+    /// Show what changed in it rather than the file as it stands, when it has changes.
+    #[serde(default)]
+    pub diff: bool,
 }
 
 #[cfg(test)]
@@ -95,6 +123,17 @@ mod tests {
             serde_json::from_str(r#"{"blobs":{"ab":"YQ==","cd":null}}"#).unwrap();
         assert_eq!(reply.blobs["ab"].as_deref(), Some("YQ=="));
         let quote: Quote = serde_json::from_str(r#"{"path":"a","line":3}"#).unwrap();
-        assert_eq!(quote.text, None);
+        assert_eq!((quote.line, quote.end, quote.text), (Some(3), None, None));
+        // A file asked about as a whole says nothing about lines at all.
+        let whole = Quote {
+            path: "a".into(),
+            ..Quote::default()
+        };
+        assert_eq!(
+            serde_json::to_string(&whole).unwrap(),
+            r#"{"path":"a","text":null}"#
+        );
+        let open: Open = serde_json::from_str(r#"{"path":"src/a.rs","line":12}"#).unwrap();
+        assert_eq!((open.line, open.diff), (Some(12), false));
     }
 }

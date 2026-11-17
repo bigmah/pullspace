@@ -5115,3 +5115,284 @@ button.refsep:hover {
 
 .reviewsignin { font-size: 12px; color: var(--fg-dim); line-height: 1.5; }
 .lcompose .reviewsignin { padding: 2px 0; }
+
+/* ---------- embedded: a pane of somebody else's page ---------- */
+
+/* Everything here hangs off `.app.embed`, which only a frame with a host has
+   (see `ui::embed`), so none of it can reach the app on its own.
+
+   The page around the frame has a bar already. A second one of the same
+   weight under it is two things to read before the code is, so this one steps
+   down to a pane's header: shorter, on the page's own ground, and with
+   nothing on it that the host's bar has said. */
+.app.embed { --bar: 40px; }
+
+.embedbar { gap: 6px; padding: 0 8px; background: var(--bg); }
+
+/* The stroke icons, drawn rather than typed: the three on this bar are a
+   panel, a lens and a cross, and no font agrees on what any of those look
+   like. The same weight as the host's, so the two bars read as one hand. */
+.ico {
+  display: block;
+  width: 15px;
+  height: 15px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.4;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.ico .icofill { fill: currentColor; stroke: none; }
+/* Turning about its own middle, which a drawn icon has to be told is where
+   its middle is. */
+.iconbtn.spin .ico.glyph { transform-origin: 50% 50%; }
+
+/* Which repository, as a name and not as a path: the host is the one that
+   knows where it is. */
+.embedbar .refrepo {
+  min-width: 0;
+  margin-left: 2px;
+  font-family: var(--sans);
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--fg);
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* And how much of it has changed. Said once, quietly: the explorer under it
+   is the list. */
+.embsum { flex: none; font-size: 12px; color: var(--fg-faint); white-space: nowrap; }
+
+/* Lit by what it shows rather than by having been pressed. */
+.sidebtn.on { color: var(--fg); }
+
+/* The toggles live inside the box, and only while it is in use. Four of them
+   standing beside an empty box are four things to read on a bar that is trying
+   to say one; inside it, they cost the bar nothing and the box only the room
+   they stand in. The box is pulled under them rather than the other way about,
+   so nothing on the bar moves when they arrive. */
+.embedbar .searchgrp { max-width: 520px; }
+.embedbar .searchgrp .sopt { display: none; position: relative; z-index: 1; }
+.embedbar .searchgrp .sopt.wide { width: 40px; padding: 0; }
+
+.embedbar .searchgrp:focus-within .sopt,
+.embedbar .searchbox:not(:placeholder-shown) ~ .sopt { display: block; }
+
+/* 4 + 40 + 4 + 24 + 4 + 24 + 4 + 24, and four more to clear the box's edge. */
+.embedbar .searchgrp:focus-within .searchbox,
+.embedbar .searchbox:not(:placeholder-shown) { padding-right: 136px; margin-right: -132px; }
+
+/* Only the narrow bar has these two: the way into the search and out of it. */
+.searchopen, .searchshut { display: none; }
+
+/* The way to ask the host about what is on screen. Always here, so it can be
+   found before it is wanted; filled once a line is picked, which is when it
+   has something particular to say. */
+.askbtn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+  height: var(--ctl);
+  padding: 0 11px;
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  border-radius: var(--r);
+  color: var(--fg);
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 600;
+  transition: background-color var(--quick) var(--ease), border-color var(--quick) var(--ease),
+    color var(--quick) var(--ease);
+}
+
+.askbtn:hover:enabled { background: var(--bg-3); border-color: var(--fg-faint); }
+.askbtn:disabled { opacity: 0.4; cursor: default; }
+.askbtn.on { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
+.askbtn.on:hover:enabled { background: var(--accent); border-color: var(--accent); filter: brightness(1.08); }
+
+.askline { font-family: var(--mono); font-size: 10.5px; font-weight: 700; opacity: 0.75; }
+
+/* The explorer's heading: which of its two trees is showing, as the two words
+   for them. One control with two positions, like the view modes over the
+   code. */
+.app.embed .side-hdr { padding-left: 8px; gap: 4px; }
+
+.sideseg {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  flex: none;
+  padding: 2px;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: var(--r);
+}
+
+.segbtn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 20px;
+  padding: 0 9px;
+  background: transparent;
+  border: none;
+  border-radius: var(--r-sm);
+  color: var(--fg-dim);
+  cursor: pointer;
+  font-size: 11.5px;
+  transition: background-color var(--quick) var(--ease), color var(--quick) var(--ease);
+}
+
+.segbtn:hover { color: var(--fg); background: var(--bg-3); }
+.segbtn.on, .segbtn.on:hover { color: var(--fg-bright); background: var(--bg-4); }
+
+.segcount {
+  font-family: var(--mono);
+  font-size: 10px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  color: var(--modified);
+}
+
+/* The bar has already said which repository this is, so the tree does not
+   say it again on a row of its own. */
+.app.embed .tree:not(.flat) .row.dir.root { display: none; }
+
+/* How wide the code pane is, for the header over it to answer to: it is the
+   pane that runs out of room, at whatever width the frame and the explorer
+   happen to leave it. */
+.app.embed .rightcol { container: codepane / inline-size; }
+
+/* The header over the code holds more than a narrow pane can show, and a
+   control cut off at the pane's edge is one that cannot be reached. So it
+   scrolls sideways rather than clipping — with nothing drawn to say so, since
+   the control half in view is what says it. */
+.app.embed .viewhdr { overflow-x: auto; overflow-y: hidden; scrollbar-width: none; }
+.app.embed .viewhdr::-webkit-scrollbar { display: none; }
+.app.embed .viewhdr .vpath { flex: 0 1 auto; min-width: 9ch; }
+.app.embed .viewhdr .badge { margin-left: 0; }
+
+/* Out of the way, where it sits beside the code and has been shut. */
+@media (min-width: 721px) {
+  .app.embed.side-shut .sidebar,
+  .app.embed.side-shut .sidebar + .splitter { display: none; }
+}
+
+/* Only ever drawn over a narrow pane — see below. */
+.drawermask { display: none; }
+
+/* A narrow frame: half a window beside a conversation, or a phone. 720px is
+   `embed::NARROW`; change one and change the other.
+
+   There is no room for the explorer beside the code, so it is not beside it:
+   it comes out over the code from the button at the head of the bar, and goes
+   away again when a file is picked out of it. */
+@media (max-width: 720px) {
+  .app.embed .main { position: relative; }
+
+  .app.embed .sidebar,
+  .app.embed .sidebar + .splitter { display: none; }
+
+  .app.embed.drawer .sidebar {
+    display: flex;
+    position: absolute;
+    z-index: 31;
+    top: 0;
+    bottom: 0;
+    left: 0;
+    /* Its own width here, not the one it was dragged to beside the code. */
+    width: min(86vw, 340px);
+    min-width: 0;
+    max-width: none;
+    border-right: 1px solid var(--border);
+    box-shadow: 18px 0 40px rgba(0, 0, 0, 0.45);
+    animation: drawerin 180ms var(--ease);
+  }
+
+  .app.embed.drawer .drawermask {
+    display: block;
+    position: absolute;
+    inset: 0;
+    z-index: 30;
+    background: rgba(0, 0, 0, 0.45);
+    animation: appear 140ms var(--ease);
+  }
+
+  /* The search box gives the bar up, and takes all of it while it is in use. */
+  .embedbar .searchgrp { display: none; }
+  .embedbar .searchopen { display: inline-flex; margin-left: auto; }
+  .embedbar.searching > * { display: none; }
+  .embedbar.searching .searchgrp { display: flex; max-width: none; margin-left: 0; }
+  .embedbar.searching .searchshut { display: inline-flex; }
+  .embedbar.searching .searchgrp .sopt { display: block; }
+  .embedbar.searching .searchbox { padding-right: 136px; margin-right: -132px; }
+  .embedbar .idxstate { display: none; }
+
+  /* Two gutters on one column of diff: narrower, so the code has the width —
+     but never narrower than a four-digit line number and the gap after it. */
+  .app.embed .code.inline .ln { width: calc(4ch + 8px); padding-right: 6px; }
+}
+
+@keyframes drawerin {
+  from { transform: translateX(-16px); opacity: 0; }
+  to { transform: none; opacity: 1; }
+}
+
+/* A finger rather than a pointer: rows and buttons a finger can land on, and
+   no text box under 16px, which is the size below which iOS zooms the page
+   into a field it has been asked to focus. */
+@media (pointer: coarse) {
+  .app.embed { --ctl: 36px; --hdr: 44px; --bar: 48px; }
+  .app.embed .row { height: 36px; }
+  .app.embed .fname, .app.embed .dirname { font-size: 14px; }
+  .app.embed .searchbox, .app.embed .findbox, .app.embed .findinbox { height: 36px; font-size: 16px; }
+  .app.embed .iconbtn.sm { width: 34px; height: 34px; }
+  .app.embed .segbtn { height: 30px; padding: 0 12px; font-size: 13px; }
+  .app.embed .modebtn, .app.embed .stepbtn { height: 30px; padding: 0 12px; font-size: 12.5px; }
+  .app.embed .viewedbox { height: 34px; font-size: 12.5px; }
+  .app.embed .tab { padding: 0 6px 0 14px; }
+  .app.embed .tname { font-size: 13px; }
+  .app.embed .askbtn { padding: 0 14px; font-size: 13.5px; }
+  .app.embed .sopt { width: 30px; height: 30px; }
+  .embedbar .searchgrp .sopt.wide { width: 46px; }
+  .embedbar .searchgrp:focus-within .searchbox,
+  .embedbar .searchbox:not(:placeholder-shown),
+  .embedbar.searching .searchbox { padding-right: 160px; margin-right: -156px; }
+}
+
+/* The header over the code, by how wide the pane under it is. After the rules
+   for a finger above, because it is on a phone that both apply, and here it
+   is the width that has to win. */
+@container codepane (max-width: 640px) {
+  /* Back and forward are the tabs' job at this width, and the note beside a
+     deleted file's name is the badge's. What is left is what a review is
+     worked through with. */
+  .app.embed .viewhdr { gap: 6px; padding: 0 8px; }
+  .app.embed .viewhdr > .iconbtn.sm,
+  .app.embed .viewhdr .delnote { display: none; }
+  .app.embed .viewhdr .resetbtn { margin-right: 0; }
+}
+
+@container codepane (max-width: 460px) {
+  /* A phone's width. The tab over this already says which file it is, so the
+     path is what gives way first; then the word beside the box, which says it
+     is ticked without it; then the whitespace toggle — but only while it is
+     off, since one that is hiding lines has to stay where it can be seen. */
+  .app.embed .viewhdr .vpath,
+  .app.embed .viewhdr > .sopt:not(.on) { display: none; }
+  .app.embed .viewhdr .viewedbox { font-size: 0; gap: 0; padding: 0 9px; }
+  .app.embed .viewhdr .stepnum { min-width: 30px; }
+  .app.embed .viewhdr .stepbtn { padding: 0 8px; }
+  .app.embed .viewhdr .modebtn { padding: 0 9px; }
+  /* And in the results panel, what was not searched gives way to what was
+     searched for. */
+  .app.embed .panel-title { flex: none; max-width: 70%; }
+  .app.embed .panel-note { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .app.embed.drawer .sidebar, .app.embed.drawer .drawermask { animation: none; }
+}

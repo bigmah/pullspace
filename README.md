@@ -45,7 +45,12 @@ Upcoming:
 pullspace can also review files that a host page hands it instead of GitHub: a local
 checkout's working tree against `HEAD`, say. Opened in a same-origin frame as
 `/pullspace/?embed`, it asks its parent for each side's files (as git blob hashes) and for
-blob contents over `postMessage`, and hides everything GitHub-specific.
+blob contents over `postMessage`, and hides everything GitHub-specific. Its bar becomes a
+pane's header, the explorer opens on the files that changed, and it lays itself out for
+the width the host gives it: in a narrow frame (beside a conversation, on a phone) the
+explorer folds away behind a button and diffs are one column. The host can ask it to show
+a file, and **Ask** hands the host what the reader is looking at: a selection, a line or
+the file.
 
 A host depends on the `pullspace-embed` crate (`crates/embed`): it carries the built bundle
 (checked in under `crates/embed/dist`, so the host needs no wasm toolchain), the files to

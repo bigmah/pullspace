@@ -52,7 +52,7 @@ mod workspace;
 
 static CSS: &str = include_str!("../../../assets/style.css");
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ViewMode {
     Source,
     Inline,
@@ -273,6 +273,20 @@ impl Workspace {
                 .collect(),
             _ => Vec::new(),
         }
+    }
+
+    /// Where a changed file was before the change moved it, if it did.
+    pub fn moved_from(&self, rel: &Path) -> Option<&Path> {
+        let files = match self {
+            Workspace::Pr(pr) => &pr.files,
+            Workspace::Commit(view) => &view.files,
+            Workspace::Compare(view) => &view.files,
+            Workspace::Repo(_) | Workspace::Empty => return None,
+        };
+        files
+            .iter()
+            .find(|f| f.path == rel)
+            .and_then(|f| f.previous_path.as_deref())
     }
 
     /// Everything needed to read one path of what is open, changed or not.
@@ -945,6 +959,12 @@ pub struct St {
     /// The area the two panes share, as last measured. `(0, 0)` until the
     /// first report from the resize observer.
     pub main_size: Signal<(f64, f64)>,
+    /// The explorer put away, where it sits beside the code — and brought
+    /// out, where there is no room beside the code and it lies over it. Two
+    /// flags because they rest in opposite states: see `St::toggle_side`.
+    /// Only an embedded frame has the button that writes either.
+    pub side_shut: Signal<bool>,
+    pub drawer: Signal<bool>,
     /// Whether the browser is holding the screen for this page — see
     /// [`super::full`], which is the only thing that writes it.
     ///
@@ -1206,6 +1226,8 @@ pub fn App() -> Element {
             split: root(saved.split),
             split_w: root(0.0),
             main_size: root((0.0, 0.0)),
+            side_shut: root(false),
+            drawer: root(false),
             full: root(false),
             drag: root(None),
             last_grab: root(None),
@@ -1240,6 +1262,11 @@ pub fn App() -> Element {
                 view.tree.paths(),
                 &statuses,
             ),
+            // Embedded, the bar over the tree has already said which two
+            // sides these are, and the owner is one this app made up.
+            Workspace::Compare(view) if host::embedded() => {
+                build_tree_from_paths(&view.repo.name, view.tree.paths(), &statuses)
+            }
             Workspace::Compare(view) => build_tree_from_paths(
                 &format!("{} {}...{}", view.repo, view.base, view.head),
                 view.tree.paths(),
@@ -1635,11 +1662,23 @@ pub fn App() -> Element {
     // is not what a drag should cost.
     let look = use_memo(move || st.prefs.read().css());
 
+    // What the stylesheet needs to know about the frame it is in: that it is
+    // one, and where the reader has put the explorer. Every embedded rule
+    // hangs off the first of these, so none of them can reach the app on its
+    // own.
+    let app_cls = match (embedded, *st.side_shut.read(), *st.drawer.read()) {
+        (false, _, _) => "app",
+        (true, false, false) => "app embed",
+        (true, true, false) => "app embed side-shut",
+        (true, false, true) => "app embed drawer",
+        (true, true, true) => "app embed side-shut drawer",
+    };
+
     rsx! {
         style { dangerous_inner_html: CSS }
         style { dangerous_inner_html: "{look}" }
         Tab {}
-        div { class: "app", style: "{panes}",
+        div { class: "{app_cls}", style: "{panes}",
             // The IDE is for something being open. With nothing open it would
             // be three empty panes under a modal, so the landing page stands
             // in for the lot — including the top bar, whose every control is
@@ -1662,6 +1701,14 @@ pub fn App() -> Element {
                         }
                     },
                     FileTreePane {}
+                    // What the explorer lies over while it is out across the
+                    // code: a press anywhere off it puts it away.
+                    if embedded && *st.drawer.read() {
+                        div {
+                            class: "drawermask",
+                            onclick: move |_| st.close_drawer(),
+                        }
+                    }
                     div { class: "rightcol",
                         Viewer {}
                         Bottom {}

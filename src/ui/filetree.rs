@@ -324,40 +324,70 @@ pub fn FileTreePane() -> Element {
     // Why the list is empty is not the same question every time, and "no
     // changed files" under a filter that matched nothing is an answer to a
     // question nobody asked.
+    let embedded = crate::backend::host::embedded();
     let empty = if !listing.read().rows.is_empty() {
         None
     } else if filtering {
         Some(format!("No file matches “{}”", query.read().trim()))
+    } else if !showing_all && embedded {
+        Some("Nothing has changed since the last commit.".to_string())
     } else if !showing_all {
         Some("No changed files".to_string())
     } else {
         Some("Nothing to show".to_string())
     };
+    // The two trees, by name. Flipping between them forgets the folds: they
+    // are different trees, and carrying one's folds over to the other lands
+    // you in a changed-files view with the changed files folded away.
+    let mut show = move |only: bool| {
+        if *changes_only.peek() != only {
+            changes_only.set(only);
+            st.reset_tree_folds();
+        }
+    };
 
     rsx! {
         div { class: "sidebar",
             div { class: "side-hdr",
-                span { class: "side-title", "EXPLORER" }
-                if changed > 0 {
-                    span {
-                        class: "side-count",
-                        title: "{changed_title}",
-                        "{changed_label}"
+                // Embedded, what changed is what the pane was opened to see,
+                // so the choice between that and the whole repository is the
+                // heading — two words, rather than a Δ to be worked out.
+                if embedded {
+                    div { class: "sideseg",
+                        button {
+                            class: if showing_all { "segbtn" } else { "segbtn on" },
+                            title: "{changed_title}",
+                            onclick: move |_| show(true),
+                            "Changes"
+                            // Only once there are some: a zero in the colour
+                            // of a change is a change that is not there.
+                            if changed > 0 {
+                                span { class: "segcount", "{changed_label}" }
+                            }
+                        }
+                        button {
+                            class: if showing_all { "segbtn on" } else { "segbtn" },
+                            title: "Every file in the repository",
+                            onclick: move |_| show(false),
+                            "Files"
+                        }
                     }
-                }
-                button {
-                    class: filter_cls,
-                    title: filter_title,
-                    onclick: move |_| {
-                        let v = *changes_only.peek();
-                        changes_only.set(!v);
-                        // The two modes are different trees, and carrying one's
-                        // folds over to the other lands you in a changed-files
-                        // view with the changed files folded away. Forgotten,
-                        // the way down to every change opens again.
-                        st.reset_tree_folds();
-                    },
-                    "Δ"
+                    span { class: "spacer" }
+                } else {
+                    span { class: "side-title", "EXPLORER" }
+                    if changed > 0 {
+                        span {
+                            class: "side-count",
+                            title: "{changed_title}",
+                            "{changed_label}"
+                        }
+                    }
+                    button {
+                        class: filter_cls,
+                        title: filter_title,
+                        onclick: move |_| show(showing_all),
+                        "Δ"
+                    }
                 }
                 // Two ways out of a tree that has got away from you: shut all
                 // of it, or go to the one row that matters.
@@ -529,6 +559,9 @@ fn TreeRow(row: Row, active: bool, viewed: bool, summarized: bool) -> Element {
                     // A summary page opens as one, where its links work — see
                     // `super::summary`. Its HTML is the pane's Source button.
                     onclick: move |_| {
+                        // Lying over the code, the explorer has done what it
+                        // was brought out for.
+                        st.close_drawer();
                         if crate::backend::summary::is_page(&path) {
                             st.open_summary(path.clone());
                         } else {
